@@ -8,3 +8,4 @@ description = "AI"
 repository = "https://github.com/prabirshrestha/ai"
 
 [dependencies]
+thiserror = "2.0.9"
