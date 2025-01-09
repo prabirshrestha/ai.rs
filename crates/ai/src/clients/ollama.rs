@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use derive_builder::Builder;
 
 use crate::completions::{CompletionProvider, CompletionRequest, CompletionResponse};
@@ -9,14 +10,16 @@ pub struct OllamaClient {
     base_url: String,
 }
 
+#[async_trait]
 impl CompletionProvider for OllamaClient {
-    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
         todo!()
     }
 }
 
+#[async_trait]
 impl EmbeddingProvider for OllamaClient {
-    fn embed(&self, request: &EmbeddingRequest) -> Result<EmbeddingResponse> {
+    async fn embed(&self, request: &EmbeddingRequest) -> Result<EmbeddingResponse> {
         todo!()
     }
 }

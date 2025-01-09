@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use derive_builder::Builder;
 
 use crate::Result;
@@ -10,6 +11,7 @@ pub struct CompletionRequest {
 #[derive(Debug, Builder)]
 pub struct CompletionResponse {}
 
+#[async_trait]
 pub trait CompletionProvider: Send + Sync {
-    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse>;
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse>;
 }

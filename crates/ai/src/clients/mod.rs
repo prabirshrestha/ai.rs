@@ -1,6 +1,7 @@
 pub mod ollama;
 pub mod openai;
 
+use async_trait::async_trait;
 use dyn_clone::DynClone;
 
 use crate::{
@@ -18,20 +19,22 @@ pub enum Client {
     Any(Box<dyn AnyClient>),
 }
 
+#[async_trait]
 impl CompletionProvider for Client {
-    fn complete(&self, request: &CompletionRequest) -> crate::Result<CompletionResponse> {
+    async fn complete(&self, request: &CompletionRequest) -> crate::Result<CompletionResponse> {
         match self {
-            Self::OpenAI(client) => client.complete(request),
-            Self::Any(client) => client.complete(request),
+            Self::OpenAI(client) => client.complete(request).await,
+            Self::Any(client) => client.complete(request).await,
         }
     }
 }
 
+#[async_trait]
 impl EmbeddingProvider for Client {
-    fn embed(&self, request: &EmbeddingRequest) -> crate::Result<EmbeddingResponse> {
+    async fn embed(&self, request: &EmbeddingRequest) -> crate::Result<EmbeddingResponse> {
         match self {
-            Self::OpenAI(client) => client.embed(request),
-            Self::Any(client) => client.embed(request),
+            Self::OpenAI(client) => client.embed(request).await,
+            Self::Any(client) => client.embed(request).await,
         }
     }
 }

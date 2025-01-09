@@ -5,6 +5,22 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
+
+    /// The error type for operations interacting with environment variables.
+    /// Possibly returned from [`std::env::var()`].
+    #[error("Environment variable error: {0} {1}")]
+    EnvVarError(String, std::env::VarError),
+
+    /// Represents [`crate::completions::CompletionRequestBuilder`] errors.
+    #[error(transparent)]
+    CompletionRequestBuilderError(#[from] crate::completions::CompletionRequestBuilderError),
+
+    /// Represents [`crate::completions::CompletionResposeBuilder`] errors.
+    #[error(transparent)]
+    CompletionResponseBuilderError(#[from] crate::completions::CompletionResponseBuilderError),
+
     /// Catches any other error types that don't fit into the above categories.
     /// Uses a boxed trait object to support a wide range of error types.
     #[error("OtherError: {0}")]
