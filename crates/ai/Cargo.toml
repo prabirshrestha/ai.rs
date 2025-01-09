@@ -8,4 +8,7 @@ description = "AI"
 repository = "https://github.com/prabirshrestha/ai"
 
 [dependencies]
+async-trait = "0.1.85"
+derive_builder = "0.20.2"
+dyn-clone = "1.0.17"
 thiserror = "2.0.9"
