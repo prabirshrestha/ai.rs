@@ -6,6 +6,20 @@ authors = ["Prabir Shrestha <mail@prabir.me>"]
 license = "MIT"
 description = "AI"
 repository = "https://github.com/prabirshrestha/ai"
+readme = "../../README.md"
 
 [dependencies]
+async-trait = "0.1.85"
+derive_builder = "0.20.2"
+dyn-clone = "1.0.17"
+reqwest = { version = "0.12.12", features = ["json"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.217", features = ["serde_derive"] }
+serde_json = "1.0.135"
 thiserror = "2.0.9"
+time = { version = "0.3.37", features = ["parsing"] }
+
+[features]
+default = ["ollama_client", "openai_client"]
+ollama_client = []
+openai_client = []
