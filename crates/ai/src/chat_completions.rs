@@ -10,6 +10,34 @@ pub struct Message {
     pub content: String,
 }
 
+impl From<(&str, &str)> for Message {
+    fn from((role, content): (&str, &str)) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Messages(Vec<Message>);
+
+impl<const N: usize> From<[(&str, &str); N]> for Messages {
+    fn from(arr: [(&str, &str); N]) -> Self {
+        Messages(
+            arr.iter()
+                .map(|&(role, content)| Message::from((role, content)))
+                .collect(),
+        )
+    }
+}
+
+impl From<Messages> for Vec<Message> {
+    fn from(messages: Messages) -> Self {
+        messages.0
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Builder)]
 pub struct ChatCompletionRequest {
     pub model: String,

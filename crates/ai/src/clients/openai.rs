@@ -1,4 +1,5 @@
 use crate::chat_completions::{ChatCompletion, ChatCompletionRequest, ChatCompletionResponse};
+use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use derive_builder::Builder;
@@ -20,23 +21,11 @@ impl Client {
     }
 
     pub fn from_url(api_key: &str, base_url: &str) -> Result<Self> {
-        let http_client = reqwest::Client::builder()
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    reqwest::header::AUTHORIZATION,
-                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
-                        .map_err(|e| {
-                            Error::InvalidHeaderValue(reqwest::header::AUTHORIZATION.to_string(), e)
-                        })?,
-                );
-                headers
-            })
-            .build()?;
+        let http_client = reqwest::Client::builder().build()?;
 
         Ok(Self {
             api_key: SecretString::new(api_key.into()),
-            base_url: base_url.into(),
+            base_url: ensure_no_trailing_slash(base_url),
             http_client,
         })
     }
