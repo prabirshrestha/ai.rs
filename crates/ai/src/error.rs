@@ -5,6 +5,10 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    /// Represents errors that occur during JSON serialization/deserialization.
+    #[error(transparent)]
+    SerdeJsonError(#[from] serde_json::Error),
+
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
 

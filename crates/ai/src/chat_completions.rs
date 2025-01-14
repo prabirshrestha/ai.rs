@@ -19,22 +19,24 @@ impl From<(&str, &str)> for Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Messages(Vec<Message>);
-
-impl<const N: usize> From<[(&str, &str); N]> for Messages {
-    fn from(arr: [(&str, &str); N]) -> Self {
-        Messages(
-            arr.iter()
-                .map(|&(role, content)| Message::from((role, content)))
-                .collect(),
-        )
+impl Message {
+    pub fn new<R: Into<String>, C: Into<String>>(role: R, content: C) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
     }
-}
 
-impl From<Messages> for Vec<Message> {
-    fn from(messages: Messages) -> Self {
-        messages.0
+    pub fn system<S: Into<String>>(content: S) -> Self {
+        Self::new("system", content.into())
+    }
+
+    pub fn user<S: Into<String>>(content: S) -> Self {
+        Self::new("user", content.into())
+    }
+
+    pub fn assistant<S: Into<String>>(content: S) -> Self {
+        Self::new("assistant", content.into())
     }
 }
 
@@ -46,8 +48,8 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f64>,
     #[builder(default = "None")]
     pub n: Option<u64>,
-    #[builder(default = "None")]
-    pub stream: Option<bool>,
+    #[builder(default = "false")]
+    pub stream: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]

@@ -18,13 +18,10 @@ async fn main() -> ai::Result<()> {
 
     let request = &ChatCompletionRequestBuilder::default()
         .model("llama3.2".to_string())
-        .messages(
-            Messages::from([
-                ("system", "You are a helpful assistant."),
-                ("user", "Why is the sky blue?"),
-            ])
-            .into(),
-        )
+        .messages(vec![
+            Message::system("Your are a helpful assistant."),
+            Message::user("Tell me a joke".to_string()),
+        ])
         .build()?;
 
     let response = openai.complete(&request).await?;
