@@ -63,7 +63,7 @@ pub enum Error {
 /// ```
 ///
 /// fn generate_chat_completions() -> ai::Result<()> {
-///     // run come code that may produce an error from the ai code
+///     // run some code that may produce an error from the ai code
 ///     Ok(())
 /// }
 /// ```

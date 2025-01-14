@@ -6,6 +6,7 @@ authors = ["Prabir Shrestha <mail@prabir.me>"]
 license = "MIT"
 description = "AI"
 repository = "https://github.com/prabirshrestha/ai"
+readme = "../../README.md"
 
 [dependencies]
 async-trait = "0.1.85"
