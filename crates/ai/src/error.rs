@@ -9,6 +9,12 @@ pub enum Error {
     #[error(transparent)]
     SerdeJsonError(#[from] serde_json::Error),
 
+    /// An error type indicating that a component provided to a method was out of range, causing a
+    /// failure.
+    // i64 is the narrowest type fitting all use cases. This eliminates the need for a type parameter.
+    #[error(transparent)]
+    TimeComponentRangeError(#[from] time::error::ComponentRange),
+
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
 

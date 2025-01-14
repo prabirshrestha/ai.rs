@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use derive_builder::Builder;
 use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct Message {
@@ -60,6 +61,12 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<Choice>,
     pub usage: Usage,
+}
+
+impl ChatCompletionResponse {
+    pub fn to_iso8601_created_time(&self) -> Result<OffsetDateTime> {
+        Ok(OffsetDateTime::from_unix_timestamp(self.created as i64)?)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]

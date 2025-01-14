@@ -1,8 +1,14 @@
 # ai
 
-# Examples
+# Using the library
 
-## Ollama via OpenAI Client
+```
+cargo add ai
+```
+
+# Example
+
+## Chat Completion API (OpenAI)
 
 ```rust
 use ai::chat_completions::{ChatCompletion, ChatCompletionRequestBuilder, Messages};
@@ -14,10 +20,10 @@ async fn main() -> ai::Result<()> {
         .init();
 
     let openai =
-        ai::clients::openai::Client::from_url("ollama_api_key", "http://localhost:11434/v1")?;
+        ai::clients::openai::Client::new("open_api_key")?;
 
     let request = &ChatCompletionRequestBuilder::default()
-        .model("llama3.2".to_string())
+        .model("gpt-4o-mini".to_string())
         .messages(vec![
             Message::system("Your are a helpful assistant."),
             Message::user("Tell me a joke".to_string()),
@@ -25,9 +31,29 @@ async fn main() -> ai::Result<()> {
         .build()?;
 
     let response = openai.complete(&request).await?;
+    println!("{}", &response.choices[0].message.content);
 
     dbg!(&response);
 
     Ok(())
 }
 ```
+
+## Clients
+
+### OpenAI
+
+```rust
+let openai = ai::clients::openai::Client::new("open_api_key")?;
+let openai = ai::clients::openai::Client::from_url("open_api_key", "http://api.openai.com/v1")?;
+let openai = ai::clients::openai::Client::from_env()?;
+```
+
+### Ollama
+
+```rust
+let ollama = ai::clients::ollama::Client::new()?;
+let ollama = ai::clients::ollama::Client::from_url("http://localhost:11434")?;
+```
+
+
