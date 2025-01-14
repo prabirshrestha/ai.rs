@@ -39,6 +39,30 @@ async fn main() -> ai::Result<()> {
 }
 ```
 
+## Dynamic Clients based on the runtime
+
+```rust
+let client: Box<dyn Client> = if let Ok(openai_api_key) = std::env::var("OPENAI_API_KEY") {
+    let openai = ai::clients::openai::Client::new(&openai_api_key)?;
+    Box::new(openai)
+} else {
+    let ollama = ai::clients::ollama::Client::new()?;
+    Box::new(ollama)
+};
+
+let request = &ChatCompletionRequestBuilder::default()
+    .model("llama3.2".into())
+    .messages(vec![
+        Message::system("Your are a helpful assistant."),
+        Message::user("Tell me a joke".to_string()),
+    ])
+    .build()?;
+
+let response = client.complete(&request).await?;
+
+dbg!(&response);
+```
+
 ## Clients
 
 ### OpenAI
