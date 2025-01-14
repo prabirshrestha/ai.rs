@@ -39,6 +39,10 @@ impl Message {
     pub fn assistant<S: Into<String>>(content: S) -> Self {
         Self::new("assistant", content.into())
     }
+
+    pub fn developer<S: Into<String>>(content: S) -> Self {
+        Self::new("developer", content.into())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
