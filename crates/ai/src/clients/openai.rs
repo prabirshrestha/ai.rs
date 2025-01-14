@@ -66,7 +66,7 @@ impl ChatCompletion for Client {
             .await?;
 
         if !response.status().is_success() {
-            todo!()
+            return Err(Error::UnknownError(response.text().await?));
         }
 
         let chat_completion_response = response.json::<ChatCompletionResponse>().await?;

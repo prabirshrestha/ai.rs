@@ -42,8 +42,11 @@ impl From<Messages> for Vec<Message> {
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
+    #[builder(default = "None")]
     pub temperature: Option<f64>,
+    #[builder(default = "None")]
     pub n: Option<u64>,
+    #[builder(default = "None")]
     pub stream: Option<bool>,
 }
 

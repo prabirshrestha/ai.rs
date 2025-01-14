@@ -28,6 +28,10 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
+    /// Represents errors that are uknown or not yet categorized.
+    #[error("Unknown error: {0}")]
+    UnknownError(String),
+
     /// Catches any other error types that don't fit into the above categories.
     /// Uses a boxed trait object to support a wide range of error types.
     #[error("OtherError: {0}")]
