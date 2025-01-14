@@ -76,3 +76,46 @@ impl ChatCompletion for Client {
 }
 
 impl super::Client for Client {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        chat_completions::{ChatCompletionRequestBuilder, Message},
+        Result,
+    };
+    use httpmock::prelude::*;
+
+    const SAMPLE_RESPONSE: &str = r#"{"id":"chatcmpl-518","object":"chat.completion","created":1736868357,"model":"llama3.2","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"The capital of France is Paris."},"finish_reason":"stop"}],"usage":{"prompt_tokens":33,"completion_tokens":8,"total_tokens":41}}"#;
+
+    #[tokio::test]
+    async fn test_sending_api_key() -> Result<()> {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key");
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .body(SAMPLE_RESPONSE);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("llama3.2".to_string())
+            .messages(vec![Message::user("What is the capital of France?")])
+            .build()?;
+
+        let response = openai.complete(&request).await?;
+        mock.assert();
+
+        assert_eq!(
+            response.choices[0].message.content,
+            "The capital of France is Paris."
+        );
+
+        Ok(())
+    }
+}
