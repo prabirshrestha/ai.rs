@@ -1,5 +1,7 @@
 # ai
 
+AI library for Rust primarily targeting OpenAI and Ollama APIs with more to come. This is work in progress.
+
 # Using the library
 
 ```
