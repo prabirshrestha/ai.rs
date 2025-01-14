@@ -5,6 +5,29 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
+
+    #[error("Invalid Header Value: {0} {1}")]
+    InvalidHeaderValue(String, reqwest::header::InvalidHeaderValue),
+
+    /// The error type for operations interacting with environment variables.
+    /// Possibly returned from [`std::env::var()`].
+    #[error("Environment variable error: {0} {1}")]
+    EnvVarError(String, std::env::VarError),
+
+    /// Represents [`crate::chat_completions::ChatCompletionRequestBuilder`] errors.
+    #[error(transparent)]
+    CompletionRequestBuilderError(
+        #[from] crate::chat_completions::ChatCompletionRequestBuilderError,
+    ),
+
+    /// Represents [`crate::chat_completions::ChatCompletionResponseBuilder`] errors.
+    #[error(transparent)]
+    CompletionResponseBuilderError(
+        #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
+    ),
+
     /// Catches any other error types that don't fit into the above categories.
     /// Uses a boxed trait object to support a wide range of error types.
     #[error("OtherError: {0}")]
