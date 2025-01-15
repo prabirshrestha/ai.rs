@@ -17,10 +17,6 @@ use ai::chat_completions::{ChatCompletion, ChatCompletionRequestBuilder, Message
 
 #[tokio::main]
 async fn main() -> ai::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let openai =
         ai::clients::openai::Client::new("open_api_key")?;
 
@@ -43,26 +39,66 @@ async fn main() -> ai::Result<()> {
 
 ## Dynamic Clients based on the runtime
 
+Use `<T: Client + ?Sized>` to support both dynamic or static dispatch.
+
 ```rust
-let client: Box<dyn Client> = if let Ok(openai_api_key) = std::env::var("OPENAI_API_KEY") {
-    let openai = ai::clients::openai::Client::new(&openai_api_key)?;
-    Box::new(openai)
-} else {
-    let ollama = ai::clients::ollama::Client::new()?;
-    Box::new(ollama)
-};
+async fn summarize<T: Client + ?Sized>(client: &T, text: &str) -> ai::Result<String> {
+    let request = &ChatCompletionRequestBuilder::default()
+        .model("llama3.2".into())
+        .messages(vec![
+            Message::system("Your are a helpful assistant."),
+            Message::user(format!("Summarize the following text: {}", text)),
+        ])
+        .build()?;
 
-let request = &ChatCompletionRequestBuilder::default()
-    .model("llama3.2".into())
-    .messages(vec![
-        Message::system("Your are a helpful assistant."),
-        Message::user("Tell me a joke".to_string()),
-    ])
-    .build()?;
+    let response = client.complete(&request).await?;
 
-let response = client.complete(&request).await?;
+    Ok(response.choices[0].message.content.to_owned())
+}
 
-dbg!(&response);
+#[tokio::main]
+async fn main() -> ai::Result<()> {
+    let client: Box<dyn Client> = if let Ok(openai_api_key) = std::env::var("OPENAI_API_KEY") {
+        let openai = ai::clients::openai::Client::new(&openai_api_key)?;
+        Box::new(openai)
+    } else {
+        let ollama = ai::clients::ollama::Client::new()?;
+        Box::new(ollama)
+    };
+
+    let summary = summarize(&*client, "Sky is blue because it is blue.").await?;
+    println!("{}", &summary);
+
+    Ok(())
+}
+```
+
+For `struct` use `Box<dyn Client>` to support dynamic dispatch.
+
+```rust
+struct Summarizer {
+    client: Box<dyn Client>,
+}
+
+impl Summarizer {
+    pub fn new(client: Box<dyn Client>) -> Self {
+        Self { client }
+    }
+
+    pub async fn summarize(&self, text: &str) -> ai::Result<String> {
+        let request = &ChatCompletionRequestBuilder::default()
+            .model("llama3.2".into())
+            .messages(vec![
+                Message::system("Your are a helpful assistant."),
+                Message::user("What is the capital of France? Return in JSON."),
+            ])
+            .build()?;
+
+        let response = self.client.complete(request).await?;
+
+        Ok(response.choices[0].message.content.to_owned())
+    }
+}
 ```
 
 ## Clients
