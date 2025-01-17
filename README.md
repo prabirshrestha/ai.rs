@@ -28,7 +28,7 @@ async fn main() -> ai::Result<()> {
         ])
         .build()?;
 
-    let response = openai.complete(&request).await?;
+    let response = openai.chat_completions(&request).await?;
     println!("{}", &response.choices[0].message.content);
 
     dbg!(&response);
@@ -51,7 +51,7 @@ async fn summarize<T: Client + ?Sized>(client: &T, text: &str) -> ai::Result<Str
         ])
         .build()?;
 
-    let response = client.complete(&request).await?;
+    let response = client.chat_completions(&request).await?;
 
     Ok(response.choices[0].message.content.to_owned())
 }
@@ -94,7 +94,7 @@ impl Summarizer {
             ])
             .build()?;
 
-        let response = self.client.complete(request).await?;
+        let response = self.client.chat_completions(request).await?;
 
         Ok(response.choices[0].message.content.to_owned())
     }

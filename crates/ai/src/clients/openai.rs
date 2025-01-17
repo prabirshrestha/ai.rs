@@ -39,7 +39,10 @@ impl Client {
 
 #[async_trait]
 impl ChatCompletion for Client {
-    async fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    async fn chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
@@ -108,7 +111,7 @@ mod tests {
             .messages(vec![Message::user("What is the capital of France?")])
             .build()?;
 
-        let response = openai.complete(&request).await?;
+        let response = openai.chat_completions(&request).await?;
         mock.assert();
 
         assert_eq!(

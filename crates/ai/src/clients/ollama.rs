@@ -76,7 +76,10 @@ impl From<OllamaChatCompletionResponse> for ChatCompletionResponse {
 
 #[async_trait]
 impl ChatCompletion for Client {
-    async fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    async fn chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,

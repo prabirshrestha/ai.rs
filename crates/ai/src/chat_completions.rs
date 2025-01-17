@@ -92,7 +92,10 @@ pub struct Usage {
 
 #[async_trait]
 pub trait ChatCompletion: DynClone + Send + Sync {
-    async fn complete(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse>;
+    async fn chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse>;
 }
 
 dyn_clone::clone_trait_object!(ChatCompletion);
