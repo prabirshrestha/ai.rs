@@ -38,6 +38,14 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
+    /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
+    #[error(transparent)]
+    OllamaClientBuilderError(#[from] crate::clients::ollama::ClientBuilderError),
+
+    /// Represents [`crate::clients::openai::ClientBuilder`] errors.
+    #[error(transparent)]
+    OpenAIClientBuilderError(#[from] crate::clients::openai::ClientBuilderError),
+
     /// Represents errors that are uknown or not yet categorized.
     #[error("Unknown error: {0}")]
     UnknownError(String),

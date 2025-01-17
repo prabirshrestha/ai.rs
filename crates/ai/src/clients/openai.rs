@@ -21,7 +21,7 @@ impl Client {
     }
 
     pub fn from_url(api_key: &str, base_url: &str) -> Result<Self> {
-        let http_client = reqwest::Client::builder().build()?;
+        let http_client = reqwest::Client::default();
 
         Ok(Self {
             api_key: SecretString::new(api_key.into()),

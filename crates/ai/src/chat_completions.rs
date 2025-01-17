@@ -50,16 +50,19 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
     #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u64>,
-    #[builder(default = "false")]
-    pub stream: bool,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
 pub struct ChatCompletionResponse {
-    pub id: String,
+    pub id: Option<String>,
     pub object: String,
     pub created: u64,
     pub model: String,

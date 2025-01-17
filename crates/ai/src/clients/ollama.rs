@@ -52,7 +52,7 @@ struct OllamaChatCompletionResponseMessage {
 impl From<OllamaChatCompletionResponse> for ChatCompletionResponse {
     fn from(response: OllamaChatCompletionResponse) -> Self {
         ChatCompletionResponse {
-            id: "".to_string(),
+            id: None,
             object: "".to_string(),
             created: response.created_at,
             model: response.model,

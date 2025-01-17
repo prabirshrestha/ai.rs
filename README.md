@@ -115,7 +115,23 @@ let openai = ai::clients::openai::Client::from_url("open_api_key", "http://api.o
 let openai = ai::clients::openai::Client::from_env()?;
 ```
 
+#### Gemini API via OpenAI
+
+```rust
+let gemini = ai::clients::openai::ClientBuilder::default()
+    .http_client(
+        reqwest::Client::builder()
+            .http1_title_case_headers()
+            .build()?,
+    )
+    .api_key("gemini_api_key".into())
+    .base_url("https://generativelanguage.googleapis.com/v1beta/openai".into())
+    .build()?;
+```
+
 ### Ollama
+
+Suggest using openai client instead of ollama for maximum compatibility.
 
 ```sh
 cargo add ai --features=ollama_client
