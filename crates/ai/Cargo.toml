@@ -1,11 +1,11 @@
 [package]
 name = "ai"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Prabir Shrestha <mail@prabir.me>"]
 license = "MIT"
 description = "AI"
-repository = "https://github.com/prabirshrestha/ai"
+repository = "https://github.com/prabirshrestha/ai.rs"
 readme = "../../README.md"
 
 [dependencies]
