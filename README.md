@@ -141,3 +141,16 @@ cargo add ai --features=ollama_client
 let ollama = ai::clients::ollama::Client::new()?;
 let ollama = ai::clients::ollama::Client::from_url("http://localhost:11434")?;
 ```
+
+# Cargo Feature
+
+| Feature               | Description                                   |
+|-----------------------|-----------------------------------------------|
+| `openai_client`       | Enable OpenAI client                          |
+| `ollama_client`       | Enable Ollama client                          |
+| `native_tls`          | Enable native TLS for reqwest http client     |
+| `rustls_tls`          | Enable rustls TLS for reqwest http client     |
+
+# LICENSE
+
+MIT
