@@ -15,9 +15,11 @@ pub enum Error {
     #[error(transparent)]
     TimeComponentRangeError(#[from] time::error::ComponentRange),
 
+    /// Represents errors that occur during HTTP operations.
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
 
+    /// Represent invalid header values.
     #[error("Invalid Header Value: {0} {1}")]
     InvalidHeaderValue(String, reqwest::header::InvalidHeaderValue),
 
@@ -28,21 +30,31 @@ pub enum Error {
 
     /// Represents [`crate::chat_completions::ChatCompletionRequestBuilder`] errors.
     #[error(transparent)]
-    CompletionRequestBuilderError(
+    ChatCompletionRequestBuilderError(
         #[from] crate::chat_completions::ChatCompletionRequestBuilderError,
     ),
 
     /// Represents [`crate::chat_completions::ChatCompletionResponseBuilder`] errors.
     #[error(transparent)]
-    CompletionResponseBuilderError(
+    ChatCompletionResponseBuilderError(
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
+    /// Represent [`crate::chat_completions::MessageBuilder`] errors.
+    #[error(transparent)]
+    MessageBuilderError(#[from] crate::chat_completions::MessageBuilderError),
+
+    /// Represents [`crate::chat_completions::ChoiceBuilder`] errors.
+    #[error(transparent)]
+    ChoiceBuilderError(crate::chat_completions::ChoiceBuilderError),
+
     /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
+    #[cfg(feature = "ollama_client")]
     #[error(transparent)]
     OllamaClientBuilderError(#[from] crate::clients::ollama::ClientBuilderError),
 
     /// Represents [`crate::clients::openai::ClientBuilder`] errors.
+    #[cfg(feature = "openai_client")]
     #[error(transparent)]
     OpenAIClientBuilderError(#[from] crate::clients::openai::ClientBuilderError),
 
