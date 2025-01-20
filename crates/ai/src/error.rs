@@ -40,13 +40,9 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
-    /// Represent [`crate::chat_completions::MessageBuilder`] errors.
+    /// Represents [`crate::chat_completions::ChatCompletionChoiceBuilder`] errors.
     #[error(transparent)]
-    MessageBuilderError(#[from] crate::chat_completions::MessageBuilderError),
-
-    /// Represents [`crate::chat_completions::ChoiceBuilder`] errors.
-    #[error(transparent)]
-    ChoiceBuilderError(crate::chat_completions::ChoiceBuilderError),
+    ChatCompletionChoiceBuilderError(crate::chat_completions::ChatCompletionChoiceBuilderError),
 
     /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
     #[cfg(feature = "ollama_client")]

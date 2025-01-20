@@ -84,7 +84,7 @@ impl super::Client for Client {}
 mod tests {
     use super::*;
     use crate::{
-        chat_completions::{ChatCompletionRequestBuilder, Message},
+        chat_completions::{ChatCompletionMessageParam, ChatCompletionRequestBuilder, Role},
         Result,
     };
     use httpmock::prelude::*;
@@ -108,16 +108,24 @@ mod tests {
 
         let request = ChatCompletionRequestBuilder::default()
             .model("llama3.2".to_string())
-            .messages(vec![Message::user("What is the capital of France?")])
+            .messages(vec![ChatCompletionMessageParam::User(
+                "What is the capital of France?".into(),
+            )])
             .build()?;
 
         let response = openai.chat_completions(&request).await?;
         mock.assert();
 
         assert_eq!(
-            response.choices[0].message.content,
+            response.choices[0]
+                .message
+                .content
+                .clone()
+                .unwrap_or_default(),
             "The capital of France is Paris."
         );
+
+        assert_eq!(response.choices[0].message.role, Role::Assistant);
 
         Ok(())
     }

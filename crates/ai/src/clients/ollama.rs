@@ -1,5 +1,6 @@
 use crate::chat_completions::{
-    ChatCompletion, ChatCompletionRequest, ChatCompletionResponse, Choice, Message, Usage,
+    ChatCompletion, ChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionResponse,
+    Choice, MessageContent, Usage,
 };
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
@@ -58,9 +59,9 @@ impl From<OllamaChatCompletionResponse> for ChatCompletionResponse {
             model: response.model,
             choices: vec![Choice {
                 index: 0,
-                message: Message {
+                message: ChatCompletionRequestMessage {
                     role: response.message.role,
-                    content: response.message.content,
+                    content: MessageContent::String(response.message.content),
                 },
                 finish_reason: Some(response.done_reason),
             }],
