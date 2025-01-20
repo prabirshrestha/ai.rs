@@ -43,6 +43,14 @@ impl ChatCompletion for Client {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
+        if let Some(stream) = request.stream {
+            if stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming is not supported when using chat_completions() api".to_string(),
+                ));
+            }
+        }
+
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,

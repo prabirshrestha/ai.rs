@@ -1,0 +1,8 @@
+[package]
+name = "clients_dynamic_runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ai = { path = "../../crates/ai", features = ["ollama_client", "openai_client"] }
+tokio = { version = "1.43.0", features = ["full"] }

@@ -12,6 +12,7 @@ pub enum Role {
     #[default]
     User,
     Assistant,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
