@@ -42,7 +42,15 @@ pub enum Error {
 
     /// Represents [`crate::chat_completions::ChatCompletionChoiceBuilder`] errors.
     #[error(transparent)]
-    ChatCompletionChoiceBuilderError(crate::chat_completions::ChatCompletionChoiceBuilderError),
+    ChatCompletionChoiceBuilderError(
+        #[from] crate::chat_completions::ChatCompletionChoiceBuilderError,
+    ),
+
+    /// Represents [`crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilder`] errors.
+    #[error(transparent)]
+    ChatCompletionToolFunctionDefinitionBuilderError(
+        #[from] crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilderError,
+    ),
 
     /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
     #[cfg(feature = "ollama_client")]

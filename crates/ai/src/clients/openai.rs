@@ -84,7 +84,7 @@ impl super::Client for Client {}
 mod tests {
     use super::*;
     use crate::{
-        chat_completions::{ChatCompletionMessageParam, ChatCompletionRequestBuilder, Role},
+        chat_completions::{ChatCompletionMessage, ChatCompletionRequestBuilder, Role},
         Result,
     };
     use httpmock::prelude::*;
@@ -108,7 +108,7 @@ mod tests {
 
         let request = ChatCompletionRequestBuilder::default()
             .model("llama3.2".to_string())
-            .messages(vec![ChatCompletionMessageParam::User(
+            .messages(vec![ChatCompletionMessage::User(
                 "What is the capital of France?".into(),
             )])
             .build()?;
