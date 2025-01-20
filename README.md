@@ -13,7 +13,7 @@ cargo add ai
 ## Chat Completion API (OpenAI)
 
 ```rust
-use ai::chat_completions::{ChatCompletion, ChatCompletionRequestBuilder, Messages};
+use ai::chat_completions::{ChatCompletion, ChatCompletionRequestBuilder, ChatCompletionMessageParam};
 
 #[tokio::main]
 async fn main() -> ai::Result<()> {
@@ -23,8 +23,8 @@ async fn main() -> ai::Result<()> {
     let request = &ChatCompletionRequestBuilder::default()
         .model("gpt-4o-mini".to_string())
         .messages(vec![
-            Message::system("Your are a helpful assistant."),
-            Message::user("Tell me a joke"),
+            ChatCompletionMessageParam::System("You are a helpful assistant."),
+            ChatCompletionMessageParam::User("Tell me a joke"),
         ])
         .build()?;
 
@@ -37,6 +37,18 @@ async fn main() -> ai::Result<()> {
 }
 ```
 
+Using tuples for messages. Unrecognized `role` will cause panic.
+
+```rust
+let request = &ChatCompletionRequestBuilder::default()
+    .model("gpt-4o-mini".to_string())
+    .messages(vec![
+        ("system", "You are a helpful assistant.").into(),
+        ("user", "Tell me a joke").into(),
+    ])
+    .build()?;
+```
+
 ## Dynamic Clients based on the runtime
 
 Use `<T: Client + ?Sized>` to support both dynamic or static dispatch.
@@ -46,7 +58,7 @@ async fn summarize<T: Client + ?Sized>(client: &T, text: &str) -> ai::Result<Str
     let request = &ChatCompletionRequestBuilder::default()
         .model("llama3.2".into())
         .messages(vec![
-            Message::system("Your are a helpful assistant."),
+            Message::system("You are a helpful assistant."),
             Message::user(format!("Summarize the following text: {}", text)),
         ])
         .build()?;
@@ -89,7 +101,7 @@ impl Summarizer {
         let request = &ChatCompletionRequestBuilder::default()
             .model("llama3.2".into())
             .messages(vec![
-                Message::system("Your are a helpful assistant."),
+                Message::system("You are a helpful assistant."),
                 Message::user("What is the capital of France? Return in JSON."),
             ])
             .build()?;
