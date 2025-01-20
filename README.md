@@ -1,6 +1,6 @@
 # ai
 
-Simple to user AI library for Rust primarily targeting OpenAI compatible
+Simple to use AI library for Rust primarily targeting OpenAI compatible
 providers with more to come.
 
 *This library is work in progress, and the API is subject to change.*
