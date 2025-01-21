@@ -1,0 +1,9 @@
+[package]
+name = "chat_completions_tool_calling"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ai = { path = "../../crates/ai" }
+serde_json = "1.0.137"
+tokio = { version = "1.43.0", features = ["full"] }

@@ -15,7 +15,7 @@ servers.
 cargo add ai
 ```
 
-## Cargo Feature
+# Cargo Features
 
 | Feature               | Description                               | Default |
 |-----------------------|-------------------------------------------|---------|
@@ -24,12 +24,13 @@ cargo add ai
 | `native_tls`          | Enable native TLS for reqwest http client | ✅      |
 | `rustls_tls`          | Enable rustls TLS for reqwest http client |         |
 
-## Examples
+# Examples
 
-| Example Name              | Description                                   |
-|---------------------------|-----------------------------------------------|
-| openai_chat_completions   | Basic chat completions using OpenAI API       |
-| clients_dynamic_runtime   | Dynamic runtime client selection              |
+| Example Name                      | Description                                   |
+|-----------------------------------|-----------------------------------------------|
+| openai_chat_completions           | Basic chat completions using OpenAI API       |
+| clients_dynamic_runtime           | Dynamic runtime client selection              |
+| chat_completions_tool_calling     | Tool/Function calling example                 |
 
 ## Chat Completion API
 
@@ -73,9 +74,9 @@ let request = &ChatCompletionRequestBuilder::default()
     .build()?;
 ```
 
-## Clients
+# Clients
 
-### OpenAI
+## OpenAI
 
 ```sh
 cargo add ai --features=openai_client
@@ -87,7 +88,7 @@ let openai = ai::clients::openai::Client::from_url("open_api_key", "http://api.o
 let openai = ai::clients::openai::Client::from_env()?;
 ```
 
-#### Gemini API via OpenAI
+### Gemini API via OpenAI
 
 Set `http1_title_case_headers` for Gemini API.
 
@@ -103,7 +104,7 @@ let gemini = ai::clients::openai::ClientBuilder::default()
     .build()?;
 ```
 
-### Ollama
+## Ollama
 
 Suggest using openai client instead of ollama for maximum compatibility.
 
