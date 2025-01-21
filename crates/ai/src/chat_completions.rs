@@ -5,50 +5,208 @@ use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    #[default]
+    User,
+    Assistant,
+    Unknown,
 }
 
-impl From<(&str, &str)> for Message {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+pub enum ChatCompletionMessage {
+    Developer(ChatCompletionDeveloperMessage),
+    System(ChatCompletionSystemMessage),
+    User(ChatCompletionUserMessage),
+    Assistant(ChatCompletionAssistantMessage),
+}
+
+impl From<(&str, &str)> for ChatCompletionMessage {
     fn from((role, content): (&str, &str)) -> Self {
-        Self {
-            role: role.to_string(),
-            content: content.to_string(),
+        match role {
+            "system" => ChatCompletionMessage::System(content.into()),
+            "user" => ChatCompletionMessage::User(content.into()),
+            "assistant" => ChatCompletionMessage::Assistant(content.into()),
+            _ => panic!("Invalid role"),
         }
     }
 }
 
-impl Message {
-    pub fn new<R: Into<String>, C: Into<String>>(role: R, content: C) -> Self {
-        Self {
-            role: role.into(),
-            content: content.into(),
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+pub struct ChatCompletionRequestMessageContentPartText {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+pub struct ChatCompletionRequestMessageContentPartRefusal {
+    pub refusal: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionDeveloperMessage {
+    pub content: ChatCompletionDeveloperMessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatCompletionDeveloperMessageContent {
+    String(String),
+    Array(Vec<ChatCompletionRequestDeveloperMessageContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChatCompletionRequestDeveloperMessageContentPart {
+    Text(ChatCompletionRequestMessageContentPartText),
+}
+
+impl<S: Into<String>> From<S> for ChatCompletionDeveloperMessage {
+    fn from(content: S) -> Self {
+        ChatCompletionDeveloperMessage {
+            content: ChatCompletionDeveloperMessageContent::String(content.into()),
+            name: None,
         }
     }
+}
 
-    pub fn system<S: Into<String>>(content: S) -> Self {
-        Self::new("system", content.into())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionSystemMessage {
+    pub content: ChatCompletionSystemMessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatCompletionSystemMessageContent {
+    String(String),
+    Array(Vec<ChatCompletionRequestSystemMessageContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChatCompletionRequestSystemMessageContentPart {
+    Text(ChatCompletionRequestMessageContentPartText),
+}
+
+impl<S: Into<String>> From<S> for ChatCompletionSystemMessage {
+    fn from(content: S) -> Self {
+        ChatCompletionSystemMessage {
+            content: ChatCompletionSystemMessageContent::String(content.into()),
+            name: None,
+        }
     }
+}
 
-    pub fn user<S: Into<String>>(content: S) -> Self {
-        Self::new("user", content.into())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionUserMessage {
+    pub content: ChatCompletionUserMessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatCompletionUserMessageContent {
+    String(String),
+    Array(Vec<ChatCompletionRequestUserMessageContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChatCompletionRequestUserMessageContentPart {
+    Text(ChatCompletionRequestMessageContentPartText),
+}
+
+impl<S: Into<String>> From<S> for ChatCompletionUserMessage {
+    fn from(content: S) -> Self {
+        ChatCompletionUserMessage {
+            content: ChatCompletionUserMessageContent::String(content.into()),
+            name: None,
+        }
     }
+}
 
-    pub fn assistant<S: Into<String>>(content: S) -> Self {
-        Self::new("assistant", content.into())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionAssistantMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ChatCompletionAssistantMessageContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatCompletionAssistantMessageContent {
+    Text(String),
+    Array(Vec<ChatCompletionRequestAssistantMessageContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChatCompletionRequestAssistantMessageContentPart {
+    Text(ChatCompletionRequestMessageContentPartText),
+    Refusal(ChatCompletionRequestMessageContentPartRefusal),
+}
+
+impl<S: Into<String>> From<S> for ChatCompletionAssistantMessage {
+    fn from(content: S) -> Self {
+        ChatCompletionAssistantMessage {
+            content: Some(ChatCompletionAssistantMessageContent::Text(content.into())),
+            refusal: None,
+            name: None,
+        }
     }
+}
 
-    pub fn developer<S: Into<String>>(content: S) -> Self {
-        Self::new("developer", content.into())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ChatCompletionTool {
+    #[serde(rename = "function")]
+    Function {
+        function: ChatCompletionToolFunctionDefinition,
+    },
+}
+
+#[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+pub struct ChatCompletionToolFunctionDefinition {
+    pub name: String,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+impl From<ChatCompletionToolFunctionDefinition> for ChatCompletionTool {
+    fn from(function: ChatCompletionToolFunctionDefinition) -> Self {
+        ChatCompletionTool::Function { function }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option))]
 pub struct ChatCompletionRequest {
     pub model: String,
-    pub messages: Vec<Message>,
+    pub messages: Vec<ChatCompletionMessage>,
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -58,6 +216,9 @@ pub struct ChatCompletionRequest {
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ChatCompletionTool>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
@@ -66,7 +227,7 @@ pub struct ChatCompletionResponse {
     pub object: String,
     pub created: u64,
     pub model: String,
-    pub choices: Vec<Choice>,
+    pub choices: Vec<ChatCompletionChoice>,
     pub usage: Usage,
 }
 
@@ -77,10 +238,40 @@ impl ChatCompletionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
-pub struct Choice {
+pub struct ChatCompletionResponseMessage {
+    pub content: Option<String>,
+    pub rufusal: Option<String>,
+    pub role: Role,
+    pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChatCompletionMessageToolCall {
+    Function { function: FunctionCall },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+pub struct ChatCompletionChoice {
     pub index: u32,
-    pub message: Message,
-    pub finish_reason: Option<String>,
+    pub message: ChatCompletionResponseMessage,
+    pub finish_reason: Option<FinishReason>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    FunctionCall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,3 +290,83 @@ pub trait ChatCompletion: DynClone + Send + Sync {
 }
 
 dyn_clone::clone_trait_object!(ChatCompletion);
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_developer_message() {
+        let message = ChatCompletionMessage::Developer("You are a helpful assistant.".into());
+        assert_eq!(
+            r#"{"role":"developer","content":"You are a helpful assistant."}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+
+        let message = ChatCompletionMessage::Developer(ChatCompletionDeveloperMessage {
+            content: ChatCompletionDeveloperMessageContent::Array(vec![
+                ChatCompletionRequestDeveloperMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "You are a helpful assistant.".into(),
+                    },
+                ),
+            ]),
+            name: None,
+        });
+
+        assert_eq!(
+            r#"{"role":"developer","content":[{"type":"text","text":"You are a helpful assistant."}]}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_system_message() {
+        let message = ChatCompletionMessage::System("You are a helpful assistant.".into());
+        assert_eq!(
+            r#"{"role":"system","content":"You are a helpful assistant."}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+
+        let message = ChatCompletionMessage::System(ChatCompletionSystemMessage {
+            content: ChatCompletionSystemMessageContent::Array(vec![
+                ChatCompletionRequestSystemMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "You are a helpful assistant.".into(),
+                    },
+                ),
+            ]),
+            name: None,
+        });
+
+        assert_eq!(
+            r#"{"role":"system","content":[{"type":"text","text":"You are a helpful assistant."}]}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_user_message() {
+        let message = ChatCompletionMessage::User("What is the capital of France?".into());
+        assert_eq!(
+            r#"{"role":"user","content":"What is the capital of France?"}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+
+        let message = ChatCompletionMessage::User(ChatCompletionUserMessage {
+            content: ChatCompletionUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "What is the capital of France?".into(),
+                    },
+                ),
+            ]),
+            name: None,
+        });
+
+        assert_eq!(
+            r#"{"role":"user","content":[{"type":"text","text":"What is the capital of France?"}]}"#,
+            serde_json::to_string(&message).unwrap()
+        );
+    }
+}

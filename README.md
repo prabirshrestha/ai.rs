@@ -1,109 +1,82 @@
 # ai
 
-AI library for Rust primarily targeting OpenAI and Ollama APIs with more to come. This is work in progress.
+Simple to use AI library for Rust primarily targeting OpenAI compatible
+providers with more to come.
+
+*This library is work in progress, and the API is subject to change.*
 
 # Using the library
+
+Add [ai](https://crates.io/crates/ai) as a depdenency along with `tokio`. This
+library directly uses `reqwest` for http client when making requests to the
+servers.
 
 ```
 cargo add ai
 ```
 
-# Example
+# Cargo Features
 
-## Chat Completion API (OpenAI)
+| Feature               | Description                               | Default |
+|-----------------------|-------------------------------------------|---------|
+| `openai_client`       | Enable OpenAI client                      | ✅      |
+| `ollama_client`       | Enable Ollama client                      |         |
+| `native_tls`          | Enable native TLS for reqwest http client | ✅      |
+| `rustls_tls`          | Enable rustls TLS for reqwest http client |         |
+
+# Examples
+
+| Example Name                      | Description                                   |
+|-----------------------------------|-----------------------------------------------|
+| openai_chat_completions           | Basic chat completions using OpenAI API       |
+| clients_dynamic_runtime           | Dynamic runtime client selection              |
+| chat_completions_tool_calling     | Tool/Function calling example                 |
+
+## Chat Completion API
 
 ```rust
-use ai::chat_completions::{ChatCompletion, ChatCompletionRequestBuilder, Messages};
+use ai::{
+    chat_completions::{ChatCompletion, ChatCompletionMessage, ChatCompletionRequestBuilder},
+    Result,
+};
 
 #[tokio::main]
-async fn main() -> ai::Result<()> {
-    let openai =
-        ai::clients::openai::Client::new("open_api_key")?;
+async fn main() -> Result<()> {
+    let openai = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
+    // let openai = ai::clients::openai::Client::from_env()?;
+    // let openai = ai::clients::openai::Client::new("api_key")?;
 
-    let request = &ChatCompletionRequestBuilder::default()
-        .model("gpt-4o-mini".to_string())
+    let request = ChatCompletionRequestBuilder::default()
+        .model("llama3.2")
         .messages(vec![
-            Message::system("Your are a helpful assistant."),
-            Message::user("Tell me a joke"),
+            ChatCompletionMessage::System("You are a helpful assistant".into()),
+            ChatCompletionMessage::User("Tell me a joke.".into()),
         ])
         .build()?;
 
     let response = openai.chat_completions(&request).await?;
-    println!("{}", &response.choices[0].message.content);
 
-    dbg!(&response);
-
-    Ok(())
-}
-```
-
-## Dynamic Clients based on the runtime
-
-Use `<T: Client + ?Sized>` to support both dynamic or static dispatch.
-
-```rust
-async fn summarize<T: Client + ?Sized>(client: &T, text: &str) -> ai::Result<String> {
-    let request = &ChatCompletionRequestBuilder::default()
-        .model("llama3.2".into())
-        .messages(vec![
-            Message::system("Your are a helpful assistant."),
-            Message::user(format!("Summarize the following text: {}", text)),
-        ])
-        .build()?;
-
-    let response = client.chat_completions(&request).await?;
-
-    Ok(response.choices[0].message.content.to_owned())
-}
-
-#[tokio::main]
-async fn main() -> ai::Result<()> {
-    let client: Box<dyn Client> = if let Ok(openai_api_key) = std::env::var("OPENAI_API_KEY") {
-        let openai = ai::clients::openai::Client::new(&openai_api_key)?;
-        Box::new(openai)
-    } else {
-        let ollama = ai::clients::ollama::Client::new()?;
-        Box::new(ollama)
-    };
-
-    let summary = summarize(&*client, "Sky is blue because it is blue.").await?;
-    println!("{}", &summary);
+    println!("{}", &response.choices[0].message.content.as_ref().unwrap());
 
     Ok(())
 }
 ```
 
-For `struct` use `Box<dyn Client>` to support dynamic dispatch.
+Using tuples for messages. Unrecognized `role` will cause panic.
 
 ```rust
-struct Summarizer {
-    client: Box<dyn Client>,
-}
-
-impl Summarizer {
-    pub fn new(client: Box<dyn Client>) -> Self {
-        Self { client }
-    }
-
-    pub async fn summarize(&self, text: &str) -> ai::Result<String> {
-        let request = &ChatCompletionRequestBuilder::default()
-            .model("llama3.2".into())
-            .messages(vec![
-                Message::system("Your are a helpful assistant."),
-                Message::user("What is the capital of France? Return in JSON."),
-            ])
-            .build()?;
-
-        let response = self.client.chat_completions(request).await?;
-
-        Ok(response.choices[0].message.content.to_owned())
-    }
-}
+let request = &ChatCompletionRequestBuilder::default()
+    .model("gpt-4o-mini".to_string())
+    .messages(vec![
+        ("system", "You are a helpful assistant.").into(),
+        ("user", "Tell me a joke").into(),
+    ])
+    .build()?;
 ```
 
-## Clients
+# Clients
 
-### OpenAI
+## OpenAI
 
 ```sh
 cargo add ai --features=openai_client
@@ -115,7 +88,9 @@ let openai = ai::clients::openai::Client::from_url("open_api_key", "http://api.o
 let openai = ai::clients::openai::Client::from_env()?;
 ```
 
-#### Gemini API via OpenAI
+### Gemini API via OpenAI
+
+Set `http1_title_case_headers` for Gemini API.
 
 ```rust
 let gemini = ai::clients::openai::ClientBuilder::default()
@@ -129,7 +104,7 @@ let gemini = ai::clients::openai::ClientBuilder::default()
     .build()?;
 ```
 
-### Ollama
+## Ollama
 
 Suggest using openai client instead of ollama for maximum compatibility.
 
@@ -141,15 +116,6 @@ cargo add ai --features=ollama_client
 let ollama = ai::clients::ollama::Client::new()?;
 let ollama = ai::clients::ollama::Client::from_url("http://localhost:11434")?;
 ```
-
-# Cargo Feature
-
-| Feature               | Description                                   |
-|-----------------------|-----------------------------------------------|
-| `openai_client`       | Enable OpenAI client                          |
-| `ollama_client`       | Enable Ollama client                          |
-| `native_tls`          | Enable native TLS for reqwest http client     |
-| `rustls_tls`          | Enable rustls TLS for reqwest http client     |
 
 # LICENSE
 

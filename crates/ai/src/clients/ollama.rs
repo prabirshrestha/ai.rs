@@ -1,5 +1,6 @@
 use crate::chat_completions::{
-    ChatCompletion, ChatCompletionRequest, ChatCompletionResponse, Choice, Message, Usage,
+    ChatCompletion, ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionResponseMessage, FinishReason, Role, Usage,
 };
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
@@ -8,6 +9,7 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use derive_builder::Builder;
 use serde::Deserialize;
+use serde_json::Value;
 
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 
@@ -38,14 +40,14 @@ struct OllamaChatCompletionResponse {
     created_at: u64,
     model: String,
     message: OllamaChatCompletionResponseMessage,
-    done_reason: String,
+    done_reason: FinishReason,
     prompt_eval_count: u32,
     eval_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
 struct OllamaChatCompletionResponseMessage {
-    role: String,
+    role: Role,
     content: String,
 }
 
@@ -56,11 +58,13 @@ impl From<OllamaChatCompletionResponse> for ChatCompletionResponse {
             object: "".to_string(),
             created: response.created_at,
             model: response.model,
-            choices: vec![Choice {
+            choices: vec![ChatCompletionChoice {
                 index: 0,
-                message: Message {
+                message: ChatCompletionResponseMessage {
+                    content: Some(response.message.content),
+                    rufusal: None,
                     role: response.message.role,
-                    content: response.message.content,
+                    tool_calls: None,
                 },
                 finish_reason: Some(response.done_reason),
             }],
@@ -80,17 +84,29 @@ impl ChatCompletion for Client {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
+        if let Some(stream) = request.stream {
+            if stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming is not supported when using chat_completions() api".to_string(),
+                ));
+            }
+        }
+
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
+        let mut request = serde_json::to_value(request)?;
+        // Ollama defaults to streaming responses, so we need to disable it.
+        request["stream"] = Value::from(false);
+
         let response = self
             .http_client
             .post(format!("{}/api/chat", self.base_url))
             .headers(headers)
-            .json(request)
+            .json(&request)
             .send()
             .await?;
 

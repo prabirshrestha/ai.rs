@@ -5,6 +5,9 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error("Streaming not supported: {0}")]
+    StreamingNotSupported(String),
+
     /// Represents errors that occur during JSON serialization/deserialization.
     #[error(transparent)]
     SerdeJsonError(#[from] serde_json::Error),
@@ -40,13 +43,17 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
-    /// Represent [`crate::chat_completions::MessageBuilder`] errors.
+    /// Represents [`crate::chat_completions::ChatCompletionChoiceBuilder`] errors.
     #[error(transparent)]
-    MessageBuilderError(#[from] crate::chat_completions::MessageBuilderError),
+    ChatCompletionChoiceBuilderError(
+        #[from] crate::chat_completions::ChatCompletionChoiceBuilderError,
+    ),
 
-    /// Represents [`crate::chat_completions::ChoiceBuilder`] errors.
+    /// Represents [`crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilder`] errors.
     #[error(transparent)]
-    ChoiceBuilderError(crate::chat_completions::ChoiceBuilderError),
+    ChatCompletionToolFunctionDefinitionBuilderError(
+        #[from] crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilderError,
+    ),
 
     /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
     #[cfg(feature = "ollama_client")]

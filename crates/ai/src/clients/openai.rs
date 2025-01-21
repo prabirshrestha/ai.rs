@@ -43,6 +43,14 @@ impl ChatCompletion for Client {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
+        if let Some(stream) = request.stream {
+            if stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming is not supported when using chat_completions() api".to_string(),
+                ));
+            }
+        }
+
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
@@ -84,7 +92,9 @@ impl super::Client for Client {}
 mod tests {
     use super::*;
     use crate::{
-        chat_completions::{ChatCompletionRequestBuilder, Message},
+        chat_completions::{
+            ChatCompletionMessage, ChatCompletionRequestBuilder, FinishReason, Role,
+        },
         Result,
     };
     use httpmock::prelude::*;
@@ -108,16 +118,121 @@ mod tests {
 
         let request = ChatCompletionRequestBuilder::default()
             .model("llama3.2".to_string())
-            .messages(vec![Message::user("What is the capital of France?")])
+            .messages(vec![ChatCompletionMessage::User(
+                "What is the capital of France?".into(),
+            )])
             .build()?;
 
         let response = openai.chat_completions(&request).await?;
         mock.assert();
 
         assert_eq!(
-            response.choices[0].message.content,
+            response.choices[0]
+                .message
+                .content
+                .clone()
+                .unwrap_or_default(),
             "The capital of France is Paris."
         );
+
+        assert_eq!(response.choices[0].message.role, Role::Assistant);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling() -> Result<()> {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .body(
+                    r#"{
+  "id": "chatcmpl-357",
+  "object": "chat.completion",
+  "created": 1737436413,
+  "model": "llama3.2",
+  "system_fingerprint": "fp_ollama",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_qehg6bf9",
+            "index": 0,
+            "type": "function",
+            "function": {
+              "name": "get_current_weather",
+              "arguments": "{\"location\":\"Seattle\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 176,
+    "completion_tokens": 18,
+    "total_tokens": 194
+  }
+}"#,
+                );
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("llama3.2".to_string())
+            .messages(vec![ChatCompletionMessage::User(
+                "What is the weather like in Paris?".into(),
+            )])
+            .build()?;
+
+        let response = openai.chat_completions(&request).await?;
+        mock.assert();
+
+        assert_eq!(response.choices[0].message.role, Role::Assistant);
+        assert_eq!(response.choices[0].message.content, Some("".to_string()));
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some(FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        if let Some(tool_call) = response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .get(0)
+        {
+            match tool_call {
+                crate::chat_completions::ChatCompletionMessageToolCall::Function { function } => {
+                    assert_eq!(function.name, "get_current_weather");
+                    assert_eq!(function.arguments, r#"{"location":"Seattle"}"#);
+                }
+            }
+        } else {
+            unreachable!("Tool call not found");
+        }
+
+        assert_eq!(response.usage.prompt_tokens, 176);
+        assert_eq!(response.usage.completion_tokens, 18);
+        assert_eq!(response.usage.total_tokens, 194);
 
         Ok(())
     }

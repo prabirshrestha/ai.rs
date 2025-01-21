@@ -24,7 +24,7 @@ httpmock = "0.7.0"
 tokio = { version = "1.43.0", features = ["rt-multi-thread"] }
 
 [features]
-default = ["ollama_client", "openai_client", "native_tls"]
+default = ["openai_client", "native_tls"]
 ollama_client = []
 openai_client = []
 native_tls = ["reqwest/native-tls"]
