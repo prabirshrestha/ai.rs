@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "ai"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "derive_builder",
