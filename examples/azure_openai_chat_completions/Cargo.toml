@@ -1,0 +1,9 @@
+[package]
+name = "azure_openai_chat_completions"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ai = { path = "../../crates/ai", features = ["azure_openai_client"] }
+tokio = { version = "1.43.0", features = ["full"] }
+url = "2.5.4"

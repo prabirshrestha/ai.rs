@@ -25,11 +25,10 @@ impl Client {
     }
 
     pub fn from_url(base_url: &str) -> Result<Self> {
-        let http_client = reqwest::Client::builder().build()?;
 
         Ok(Self {
             base_url: ensure_no_trailing_slash(base_url),
-            http_client,
+            http_client: reqwest::Client::builder().build()?;
         })
     }
 }

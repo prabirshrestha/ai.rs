@@ -20,6 +20,7 @@ cargo add ai
 | Feature               | Description                               | Default |
 |-----------------------|-------------------------------------------|---------|
 | `openai_client`       | Enable OpenAI client                      | ✅      |
+| `azure_openai_client` | Enable Azure OpenAI client                |         |
 | `ollama_client`       | Enable Ollama client                      |         |
 | `native_tls`          | Enable native TLS for reqwest http client | ✅      |
 | `rustls_tls`          | Enable rustls TLS for reqwest http client |         |
@@ -29,6 +30,7 @@ cargo add ai
 | Example Name                      | Description                                   |
 |-----------------------------------|-----------------------------------------------|
 | openai_chat_completions           | Basic chat completions using OpenAI API       |
+| azure_openai_chat_completions     | Basic chat completions using Azure OpenAI API |
 | clients_dynamic_runtime           | Dynamic runtime client selection              |
 | chat_completions_tool_calling     | Tool/Function calling example                 |
 
@@ -102,6 +104,29 @@ let gemini = ai::clients::openai::ClientBuilder::default()
     .api_key("gemini_api_key".into())
     .base_url("https://generativelanguage.googleapis.com/v1beta/openai".into())
     .build()?;
+```
+
+## Azure OpenAI
+
+```rust
+let azure_openai = ai::clients::azure_openai::ClientBuilder::default()
+    .auth(ai::clients::azure_openai::Auth::BearerToken("token".into()))
+    // .auth(ai::clients::azure_openai::Auth::ApiKey(
+    //     std::env::var(ai::clients::azure_openai::AZURE_OPENAI_API_KEY_ENV_VAR)
+    //         .map_err(|e| Error::EnvVarError(ai::clients::azure_openai::AZURE_OPENAI_API_KEY_ENV_VAR.to_string(), e))?
+    //         .into(),
+    // ))
+    .api_version("2024-02-15-preview")
+    .base_url("https://resourcename.openai.azure.com")
+    .build()?;
+```
+
+Pass the `deployment_id` as `model` of the `ChatCompletionRequest`.
+
+Use the following command to get bearer token.
+
+```sh
+az account get-access-token --resource https://cognitiveservices.azure.com
 ```
 
 ## Ollama
