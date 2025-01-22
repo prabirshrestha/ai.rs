@@ -33,7 +33,9 @@ async fn main() -> Result<()> {
         .model("llama3.2")
         .messages(vec![
             ChatCompletionMessage::System("You are a helpful assistant".into()),
-            ChatCompletionMessage::User("What is the weather like in Paris today?".into()),
+            ChatCompletionMessage::User(
+                "What is the weather like in Paris and Seattle today?".into(),
+            ),
         ])
         .tools(vec![weather_tool])
         .build()?;
