@@ -108,6 +108,10 @@ let gemini = ai::clients::openai::ClientBuilder::default()
 
 ## Azure OpenAI
 
+```
+cargo add ai --features=azure_openai_client
+```
+
 ```rust
 let azure_openai = ai::clients::azure_openai::ClientBuilder::default()
     .auth(ai::clients::azure_openai::Auth::BearerToken("token".into()))
