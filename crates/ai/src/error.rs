@@ -22,6 +22,10 @@ pub enum Error {
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
 
+    /// Represent invalid header name.
+    #[error("Invalid Header Name: {0} {1}")]
+    InvalidHeaderName(String, reqwest::header::InvalidHeaderName),
+
     /// Represent invalid header values.
     #[error("Invalid Header Value: {0} {1}")]
     InvalidHeaderValue(String, reqwest::header::InvalidHeaderValue),
@@ -54,6 +58,11 @@ pub enum Error {
     ChatCompletionToolFunctionDefinitionBuilderError(
         #[from] crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilderError,
     ),
+
+    /// Represents [`crate::clients::azure_openai::ClientBuilder`] errors.
+    #[cfg(feature = "azure_openai_client")]
+    #[error(transparent)]
+    AzureOpenAIClientBuilderError(#[from] crate::clients::azure_openai::ClientBuilderError),
 
     /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
     #[cfg(feature = "ollama_client")]

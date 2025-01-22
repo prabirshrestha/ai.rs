@@ -27,5 +27,6 @@ tokio = { version = "1.43.0", features = ["rt-multi-thread"] }
 default = ["openai_client", "native_tls"]
 ollama_client = []
 openai_client = []
+azure_openai_client = []
 native_tls = ["reqwest/native-tls"]
 rustls_tls = ["reqwest/rustls-tls"]
