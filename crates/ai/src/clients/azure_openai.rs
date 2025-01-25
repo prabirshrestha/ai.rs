@@ -1,10 +1,14 @@
+use std::pin::Pin;
 use std::str::FromStr;
 
-use crate::chat_completions::{ChatCompletion, ChatCompletionRequest, ChatCompletionResponse};
+use crate::chat_completions::{
+    ChatCompletion, ChatCompletionRequest, ChatCompletionResponse, StreamData,
+};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use derive_builder::Builder;
+use futures::Stream;
 use reqwest::header::HeaderName;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -38,20 +42,8 @@ impl Client {
     }
 }
 
-#[async_trait]
-impl ChatCompletion for Client {
-    async fn chat_completions(
-        &self,
-        request: &ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse> {
-        if let Some(stream) = request.stream {
-            if stream {
-                return Err(Error::StreamingNotSupported(
-                    "Streaming is not supported when using chat_completions() api".to_string(),
-                ));
-            }
-        }
-
+impl Client {
+    fn get_headers(&self) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
         let (auth_header_key, auth_header_value) = match &self.auth {
             Auth::BearerToken(secret_box) => (
@@ -78,11 +70,33 @@ impl ChatCompletion for Client {
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
-        // NOTE: use model as the deployment_id
-        let url = format!(
+        Ok(headers)
+    }
+
+    fn get_url(&self, model: &str) -> String {
+        format!(
             "{}/openai/deployments/{}/chat/completions?api-version={}",
-            self.base_url, &request.model, self.api_version
-        );
+            self.base_url, model, self.api_version
+        )
+    }
+}
+
+#[async_trait]
+impl ChatCompletion for Client {
+    async fn chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
+        if let Some(stream) = request.stream {
+            if stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming is not supported when using chat_completions() api".to_string(),
+                ));
+            }
+        }
+
+        let headers = self.get_headers()?;
+        let url = self.get_url(&request.model);
 
         let response = self
             .http_client
@@ -99,6 +113,13 @@ impl ChatCompletion for Client {
         let chat_completion_response = response.json::<ChatCompletionResponse>().await?;
 
         Ok(chat_completion_response)
+    }
+
+    async fn stream_chat_completions(
+        &self,
+        _request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>> {
+        todo!()
     }
 }
 

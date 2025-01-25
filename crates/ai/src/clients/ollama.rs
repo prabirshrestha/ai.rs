@@ -1,6 +1,8 @@
+use std::pin::Pin;
+
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseMessage, FinishReason, Role, Usage,
+    ChatCompletionResponseMessage, FinishReason, Role, StreamData, Usage,
 };
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
@@ -8,6 +10,7 @@ use crate::utils::{
 use crate::{Error, Result};
 use async_trait::async_trait;
 use derive_builder::Builder;
+use futures::Stream;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -115,6 +118,13 @@ impl ChatCompletion for Client {
         let chat_completion_response = response.json::<OllamaChatCompletionResponse>().await?;
 
         Ok(chat_completion_response.into())
+    }
+
+    async fn stream_chat_completions(
+        &self,
+        _request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>> {
+        todo!()
     }
 }
 

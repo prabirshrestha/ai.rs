@@ -12,6 +12,7 @@ readme = "../../README.md"
 async-trait = "0.1.85"
 derive_builder = "0.20.2"
 dyn-clone = "1.0.17"
+futures = "0.3.31"
 reqwest = { version = "0.12.12", features = ["json"], default-features = false }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }

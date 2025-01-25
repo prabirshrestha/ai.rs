@@ -1,7 +1,10 @@
+use std::pin::Pin;
+
 use crate::Result;
 use async_trait::async_trait;
 use derive_builder::Builder;
 use dyn_clone::DynClone;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -281,12 +284,20 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamData {}
+
 #[async_trait]
 pub trait ChatCompletion: DynClone + Send + Sync {
     async fn chat_completions(
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse>;
+
+    async fn stream_chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>>;
 }
 
 dyn_clone::clone_trait_object!(ChatCompletion);

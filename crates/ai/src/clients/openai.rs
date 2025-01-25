@@ -1,8 +1,13 @@
-use crate::chat_completions::{ChatCompletion, ChatCompletionRequest, ChatCompletionResponse};
+use std::pin::Pin;
+
+use crate::chat_completions::{
+    ChatCompletion, ChatCompletionRequest, ChatCompletionResponse, StreamData,
+};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use derive_builder::Builder;
+use futures::Stream;
 use secrecy::{ExposeSecret, SecretString};
 
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -81,6 +86,13 @@ impl ChatCompletion for Client {
         let chat_completion_response = response.json::<ChatCompletionResponse>().await?;
 
         Ok(chat_completion_response)
+    }
+
+    async fn stream_chat_completions(
+        &self,
+        _request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>> {
+        todo!()
     }
 }
 
