@@ -44,6 +44,12 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionRequestBuilderError,
     ),
 
+    /// Represents [`crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError`] errors.
+    #[error(transparent)]
+    ChatCompletionRequestStreamOptionsBuilderError(
+        #[from] crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError,
+    ),
+
     /// Represents [`crate::chat_completions::ChatCompletionResponseBuilder`] errors.
     #[error(transparent)]
     ChatCompletionResponseBuilderError(

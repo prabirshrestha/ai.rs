@@ -221,7 +221,19 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ChatCompletionRequestStreamOptions>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatCompletionTool>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option))]
+pub struct ChatCompletionRequestStreamOptions {
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
@@ -291,6 +303,7 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]

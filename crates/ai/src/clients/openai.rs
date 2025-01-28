@@ -136,6 +136,7 @@ impl ChatCompletion for Client {
                 match chunk_result {
                     Ok(chunk) => {
                         let chunk_str = String::from_utf8_lossy(&chunk);
+
                         for line in chunk_str.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
