@@ -286,7 +286,6 @@ version = "0.1.0"
 dependencies = [
  "ai",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -406,7 +405,6 @@ version = "0.1.0"
 dependencies = [
  "ai",
  "futures",
- "serde_json",
  "tokio",
 ]
 
