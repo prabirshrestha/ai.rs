@@ -5,6 +5,9 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error("Streaming required: {0}")]
+    StreamingRequired(String),
+
     #[error("Streaming not supported: {0}")]
     StreamingNotSupported(String),
 
@@ -39,6 +42,12 @@ pub enum Error {
     #[error(transparent)]
     ChatCompletionRequestBuilderError(
         #[from] crate::chat_completions::ChatCompletionRequestBuilderError,
+    ),
+
+    /// Represents [`crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError`] errors.
+    #[error(transparent)]
+    ChatCompletionRequestStreamOptionsBuilderError(
+        #[from] crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError,
     ),
 
     /// Represents [`crate::chat_completions::ChatCompletionResponseBuilder`] errors.

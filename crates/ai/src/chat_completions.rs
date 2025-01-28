@@ -1,7 +1,10 @@
+use std::pin::Pin;
+
 use crate::Result;
 use async_trait::async_trait;
 use derive_builder::Builder;
 use dyn_clone::DynClone;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -218,7 +221,19 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ChatCompletionRequestStreamOptions>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatCompletionTool>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option))]
+pub struct ChatCompletionRequestStreamOptions {
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
@@ -281,12 +296,42 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChunkChoice>,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+pub struct ChatCompletionChunkChoice {
+    pub delta: ChatCompletionChunkChoiceDelta,
+    pub index: u32,
+    pub finish_reason: Option<FinishReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+pub struct ChatCompletionChunkChoiceDelta {
+    pub content: Option<String>,
+    pub rufusal: Option<String>,
+    pub role: Role,
+    pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
+}
+
 #[async_trait]
 pub trait ChatCompletion: DynClone + Send + Sync {
     async fn chat_completions(
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse>;
+
+    async fn stream_chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>>;
 }
 
 dyn_clone::clone_trait_object!(ChatCompletion);

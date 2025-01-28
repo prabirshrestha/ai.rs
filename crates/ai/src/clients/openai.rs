@@ -1,8 +1,14 @@
-use crate::chat_completions::{ChatCompletion, ChatCompletionRequest, ChatCompletionResponse};
+use std::pin::Pin;
+
+use crate::chat_completions::{
+    ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
+use async_stream::stream;
 use async_trait::async_trait;
 use derive_builder::Builder;
+use futures::{Stream, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -35,20 +41,8 @@ impl Client {
     }
 }
 
-#[async_trait]
-impl ChatCompletion for Client {
-    async fn chat_completions(
-        &self,
-        request: &ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse> {
-        if let Some(stream) = request.stream {
-            if stream {
-                return Err(Error::StreamingNotSupported(
-                    "Streaming is not supported when using chat_completions() api".to_string(),
-                ));
-            }
-        }
-
+impl Client {
+    fn get_headers(&self) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
@@ -66,9 +60,33 @@ impl ChatCompletion for Client {
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
+        Ok(headers)
+    }
+
+    fn get_chat_completions_url(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
+    }
+}
+
+#[async_trait]
+impl ChatCompletion for Client {
+    async fn chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
+        if let Some(stream) = request.stream {
+            if stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming is not supported when using chat_completions() api".to_string(),
+                ));
+            }
+        }
+
+        let headers = self.get_headers()?;
+
         let response = self
             .http_client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(self.get_chat_completions_url())
             .headers(headers)
             .json(request)
             .send()
@@ -81,6 +99,67 @@ impl ChatCompletion for Client {
         let chat_completion_response = response.json::<ChatCompletionResponse>().await?;
 
         Ok(chat_completion_response)
+    }
+
+    async fn stream_chat_completions(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
+        if let Some(stream) = request.stream {
+            if !stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming required when using stream_chat_completions() api".to_string(),
+                ));
+            }
+        }
+
+        let mut json = serde_json::to_value(request)?;
+        json["stream"] = serde_json::Value::Bool(true);
+
+        let response = self
+            .http_client
+            .post(self.get_chat_completions_url())
+            .headers(self.get_headers()?)
+            .body(json.to_string())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let byte_stream = response.bytes_stream();
+
+        let result_stream = stream! {
+            let mut stream = byte_stream;
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        let chunk_str = String::from_utf8_lossy(&chunk);
+
+                        for line in chunk_str.lines() {
+                            if line.starts_with("data: ") {
+                                let data = &line[6..];
+
+                                // Check for stream end
+                                if data == "[DONE]" {
+                                    break;
+                                }
+
+                                // Parse the JSON response
+                                match serde_json::from_str::<ChatCompletionChunk>(data) {
+                                    Ok(v) => yield Ok(v),
+                                    Err(e) => yield Err(Error::SerdeJsonError(e)),
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => yield Err(Error::UnknownError(format!("Failed to read response: {}", e))),
+                }
+            }
+        };
+
+        Ok(Box::pin(result_stream))
     }
 }
 
