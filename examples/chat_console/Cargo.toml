@@ -1,0 +1,9 @@
+[package]
+name = "chat_console"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ai = { path = "../../crates/ai" }
+futures = "0.3.31"
+tokio = { version = "1.43.0", features = ["full"] }

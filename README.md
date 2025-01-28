@@ -29,10 +29,12 @@ cargo add ai
 
 | Example Name                      | Description                                   |
 |-----------------------------------|-----------------------------------------------|
-| openai_chat_completions           | Basic chat completions using OpenAI API       |
 | azure_openai_chat_completions     | Basic chat completions using Azure OpenAI API |
-| clients_dynamic_runtime           | Dynamic runtime client selection              |
+| chat_completions_streaming        | Chat completions streaming example            |
 | chat_completions_tool_calling     | Tool/Function calling example                 |
+| chat_console                      | Console chat example                          |
+| clients_dynamic_runtime           | Dynamic runtime client selection              |
+| openai_chat_completions           | Basic chat completions using OpenAI API       |
 
 ## Chat Completion API
 

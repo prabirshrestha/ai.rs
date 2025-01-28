@@ -1,8 +1,8 @@
 use std::pin::Pin;
 
 use crate::chat_completions::{
-    ChatCompletion, ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseMessage, FinishReason, Role, StreamData, Usage,
+    ChatCompletion, ChatCompletionChoice, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, ChatCompletionResponseMessage, FinishReason, Role, Usage,
 };
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
@@ -123,7 +123,7 @@ impl ChatCompletion for Client {
     async fn stream_chat_completions(
         &self,
         _request: &ChatCompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
         todo!()
     }
 }

@@ -5,6 +5,9 @@ pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error("Streaming required: {0}")]
+    StreamingRequired(String),
+
     #[error("Streaming not supported: {0}")]
     StreamingNotSupported(String),
 

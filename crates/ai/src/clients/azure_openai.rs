@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use crate::chat_completions::{
-    ChatCompletion, ChatCompletionRequest, ChatCompletionResponse, StreamData,
+    ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
@@ -118,7 +118,7 @@ impl ChatCompletion for Client {
     async fn stream_chat_completions(
         &self,
         _request: &ChatCompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
         todo!()
     }
 }

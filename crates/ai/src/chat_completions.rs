@@ -285,7 +285,28 @@ pub struct Usage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamData {}
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionChunkChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+pub struct ChatCompletionChunkChoice {
+    pub delta: ChatCompletionChunkChoiceDelta,
+    pub index: u32,
+    pub finish_reason: Option<FinishReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+pub struct ChatCompletionChunkChoiceDelta {
+    pub content: Option<String>,
+    pub rufusal: Option<String>,
+    pub role: Role,
+    pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
+}
 
 #[async_trait]
 pub trait ChatCompletion: DynClone + Send + Sync {
@@ -297,7 +318,7 @@ pub trait ChatCompletion: DynClone + Send + Sync {
     async fn stream_chat_completions(
         &self,
         request: &ChatCompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData>> + Send>>>;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>>;
 }
 
 dyn_clone::clone_trait_object!(ChatCompletion);
