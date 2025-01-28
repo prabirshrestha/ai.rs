@@ -317,7 +317,7 @@ pub struct ChatCompletionChunkChoice {
 pub struct ChatCompletionChunkChoiceDelta {
     pub content: Option<String>,
     pub rufusal: Option<String>,
-    pub role: Role,
+    pub role: Option<Role>,
     pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
 }
 
