@@ -6,9 +6,10 @@ use crate::chat_completions::{
 };
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
+use async_stream::stream;
 use async_trait::async_trait;
 use derive_builder::Builder;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use reqwest::header::HeaderName;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -117,9 +118,69 @@ impl ChatCompletion for Client {
 
     async fn stream_chat_completions(
         &self,
-        _request: &ChatCompletionRequest,
+        request: &ChatCompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>> {
-        todo!()
+        if let Some(stream) = request.stream {
+            if !stream {
+                return Err(Error::StreamingNotSupported(
+                    "Streaming required when using stream_chat_completions() api".to_string(),
+                ));
+            }
+        }
+
+        let mut json = serde_json::to_value(request)?;
+        json["stream"] = serde_json::Value::Bool(true);
+
+        let response = self
+            .http_client
+            .post(self.get_url(&request.model))
+            .headers(self.get_headers()?)
+            .body(json.to_string())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let byte_stream = response.bytes_stream();
+
+        let result_stream = stream! {
+            let mut stream = byte_stream;
+            let mut buffer = String::new();
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        let chunk_str = String::from_utf8_lossy(&chunk);
+                        buffer.push_str(&chunk_str);
+
+                        // Azure Open AI may send incomplete messages, so we need to buffer the response
+                        // https://learn.microsoft.com/en-us/answers/questions/1693297/how-to-fix-streaming-azure-ai-responses-from-sendi
+                        // Process complete messages when we have a double newline
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let message = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            if message.starts_with("data: ") {
+                                let data = &message["data: ".len()..];
+                                if data == "[DONE]" {
+                                    break;
+                                }
+
+                                // Parse the JSON response
+                                match serde_json::from_str::<ChatCompletionChunk>(data) {
+                                    Ok(v) => yield Ok(v),
+                                    Err(e) => yield Err(Error::SerdeJsonError(e)),
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => yield Err(Error::UnknownError(format!("Failed to read response: {}", e))),
+                }
+            }
+        };
+
+        Ok(Box::pin(result_stream))
     }
 }
 
