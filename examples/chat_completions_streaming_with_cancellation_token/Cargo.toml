@@ -1,5 +1,5 @@
 [package]
-name = "chat_completions_streaming"
+name = "chat_completions_streaming_with_cancellation_token"
 version = "0.1.0"
 edition = "2021"
 

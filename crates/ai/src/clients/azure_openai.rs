@@ -96,16 +96,42 @@ impl ChatCompletion for Client {
             }
         }
 
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+
         let headers = self.get_headers()?;
         let url = self.get_url(&request.model);
 
-        let response = self
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
             .http_client
             .post(url)
             .headers(headers)
             .json(request)
-            .send()
-            .await?;
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Err(Error::Cancelled);
+                }
+            };
 
         if !response.status().is_success() {
             return Err(Error::UnknownError(response.text().await?));
@@ -128,27 +154,60 @@ impl ChatCompletion for Client {
             }
         }
 
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Ok(Box::pin(futures::stream::empty()));
+            }
+        }
+
         let mut json = serde_json::to_value(request)?;
         json["stream"] = serde_json::Value::Bool(true);
 
-        let response = self
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
             .http_client
             .post(self.get_url(&request.model))
             .headers(self.get_headers()?)
             .body(json.to_string())
-            .send()
-            .await?;
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Ok(Box::pin(futures::stream::empty()));
+                }
+            };
 
         if !response.status().is_success() {
             return Err(Error::UnknownError(response.text().await?));
         }
 
         let byte_stream = response.bytes_stream();
+        let cancellation_token = request.cancellation_token.clone();
 
         let result_stream = stream! {
             let mut stream = byte_stream;
             let mut buffer = String::new();
+
             while let Some(chunk_result) = stream.next().await {
+                if let Some(token) = &cancellation_token {
+                    if token.is_cancelled() {
+                        break;
+                    }
+                }
                 match chunk_result {
                     Ok(chunk) => {
                         let chunk_str = String::from_utf8_lossy(&chunk);

@@ -83,6 +83,10 @@ pub enum Error {
     #[error(transparent)]
     OpenAIClientBuilderError(#[from] crate::clients::openai::ClientBuilderError),
 
+    /// The operation was cancelled
+    #[error("The operation was cancelled")]
+    Cancelled,
+
     /// Represents errors that are uknown or not yet categorized.
     #[error("Unknown error: {0}")]
     UnknownError(String),

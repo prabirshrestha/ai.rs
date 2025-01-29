@@ -82,15 +82,41 @@ impl ChatCompletion for Client {
             }
         }
 
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+
         let headers = self.get_headers()?;
 
-        let response = self
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
             .http_client
             .post(self.get_chat_completions_url())
             .headers(headers)
             .json(request)
-            .send()
-            .await?;
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Err(Error::Cancelled);
+                }
+            };
 
         if !response.status().is_success() {
             return Err(Error::UnknownError(response.text().await?));
@@ -113,48 +139,90 @@ impl ChatCompletion for Client {
             }
         }
 
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Ok(Box::pin(futures::stream::empty()));
+            }
+        }
+
         let mut json = serde_json::to_value(request)?;
         json["stream"] = serde_json::Value::Bool(true);
 
-        let response = self
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
             .http_client
             .post(self.get_chat_completions_url())
             .headers(self.get_headers()?)
             .body(json.to_string())
-            .send()
-            .await?;
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Ok(Box::pin(futures::stream::empty()));
+                }
+            };
 
         if !response.status().is_success() {
             return Err(Error::UnknownError(response.text().await?));
         }
 
         let byte_stream = response.bytes_stream();
+        let cancellation_token = request.cancellation_token.clone();
 
         let result_stream = stream! {
             let mut stream = byte_stream;
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        let chunk_str = String::from_utf8_lossy(&chunk);
 
-                        for line in chunk_str.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+            loop {
+                if let Some(token) = &cancellation_token {
+                    if token.is_cancelled() {
+                        break;
+                    }
+                }
 
-                                // Check for stream end
-                                if data == "[DONE]" {
-                                    break;
+                match stream.next().await {
+                    Some(chunk_result) => {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                let chunk_str = String::from_utf8_lossy(&chunk);
+
+                                for line in chunk_str.lines() {
+                                    if line.starts_with("data: ") {
+                                        let data = &line[6..];
+
+                                        // Check for stream end
+                                        if data == "[DONE]" {
+                                            break;
+                                        }
+
+                                        // Parse the JSON response
+                                        match serde_json::from_str::<ChatCompletionChunk>(data) {
+                                            Ok(v) => yield Ok(v),
+                                            Err(e) => yield Err(Error::SerdeJsonError(e)),
+                                        }
+                                    }
                                 }
-
-                                // Parse the JSON response
-                                match serde_json::from_str::<ChatCompletionChunk>(data) {
-                                    Ok(v) => yield Ok(v),
-                                    Err(e) => yield Err(Error::SerdeJsonError(e)),
-                                }
+                            },
+                            Err(e) => {
+                                yield Err(Error::UnknownError(format!("Failed to read response: {}", e)));
+                                break;
                             }
                         }
-                    },
-                    Err(e) => yield Err(Error::UnknownError(format!("Failed to read response: {}", e))),
+                    }
+                    None => break,
                 }
             }
         };

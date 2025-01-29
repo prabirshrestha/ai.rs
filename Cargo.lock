@@ -43,6 +43,7 @@ dependencies = [
  "thiserror 2.0.11",
  "time",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -406,6 +407,17 @@ dependencies = [
  "ai",
  "futures",
  "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "chat_completions_streaming_with_cancellation_token"
+version = "0.1.0"
+dependencies = [
+ "ai",
+ "futures",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

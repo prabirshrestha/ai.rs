@@ -32,21 +32,22 @@ cargo add ai
 | Feature               | Description                               | Default |
 |-----------------------|-------------------------------------------|---------|
 | `openai_client`       | Enable OpenAI client                      | ✅      |
-| `azure_openai_client` | Enable Azure OpenAI client                |         |
+| `azure_openai_client` | Enable Azure OpenAI client                | ✅      |
 | `ollama_client`       | Enable Ollama client                      |         |
 | `native_tls`          | Enable native TLS for reqwest http client | ✅      |
 | `rustls_tls`          | Enable rustls TLS for reqwest http client |         |
 
 # Examples
 
-| Example Name                      | Description                                   |
-|-----------------------------------|-----------------------------------------------|
-| azure_openai_chat_completions     | Basic chat completions using Azure OpenAI API |
-| chat_completions_streaming        | Chat completions streaming example            |
-| chat_completions_tool_calling     | Tool/Function calling example                 |
-| chat_console                      | Console chat example                          |
-| clients_dynamic_runtime           | Dynamic runtime client selection              |
-| openai_chat_completions           | Basic chat completions using OpenAI API       |
+| Example Name                      | Description                                                               |
+|-----------------------------------|---------------------------------------------------------------------------|
+| azure_openai_chat_completions                         | Basic chat completions using Azure OpenAI API         |
+| chat_completions_streaming                            | Chat completions streaming example                    |
+| chat_completions_streaming_with_cancellation_token    | Chat completions streaming with cancellation token    |
+| chat_completions_tool_calling                         | Tool/Function calling example                         |
+| chat_console                                          | Console chat example                                  |
+| clients_dynamic_runtime                               | Dynamic runtime client selection                      |
+| openai_chat_completions                               | Basic chat completions using OpenAI API               |
 
 ## Chat Completion API
 

@@ -7,6 +7,7 @@ use dyn_clone::DynClone;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -225,6 +226,9 @@ pub struct ChatCompletionRequest {
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatCompletionTool>>,
+    #[builder(default = "None")]
+    #[serde(skip)]
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
