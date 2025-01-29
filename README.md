@@ -5,6 +5,18 @@ providers with more to come.
 
 *This library is work in progress, and the API is subject to change.*
 
+## Table of Contents
+- [Using the Library](#using-the-library)
+- [Cargo Features](#cargo-features)
+- [Examples](#examples)
+  - [Chat Completion API](#chat-completion-api)
+- [Clients](#clients)
+  - [OpenAI](#openai)
+    - [Gemini API via OpenAI](#gemini-api-via-openai)
+  - [Azure OpenAI](#azure-openai)
+  - [Ollama](#ollama)
+- [License](#license)
+
 # Using the library
 
 Add [ai](https://crates.io/crates/ai) as a depdenency along with `tokio`. This
