@@ -19,8 +19,9 @@ providers with more to come.
 
 # Using the library
 
-Add [ai](https://crates.io/crates/ai) as a depdenency along with `tokio`. This
-library directly uses `reqwest` for http client when making requests to the
+Add [ai](https://crates.io/crates/ai) as a dependency along with `tokio`. For
+streaming add `futures` create, for `CancellationToken` support add `tokio-util`.
+This library directly uses `reqwest` for http client when making requests to the
 servers.
 
 ```

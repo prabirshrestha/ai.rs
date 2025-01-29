@@ -1,6 +1,4 @@
 use std::io::Write;
-use tokio::time::{sleep, Duration};
-use tokio_util::sync::CancellationToken;
 
 use ai::chat_completions::{
     ChatCompletion, ChatCompletionMessage, ChatCompletionRequestBuilder,
@@ -12,15 +10,11 @@ use futures::StreamExt;
 async fn main() -> ai::Result<()> {
     let openai = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
 
-    let cancel_token = CancellationToken::new();
-    let cancel_token_clone = cancel_token.clone();
-
     let request = ChatCompletionRequestBuilder::default()
         .model("llama3.2")
         .messages(vec![ChatCompletionMessage::User(
             "Write a paragraph about LLM.".into(),
         )])
-        .cancellation_token(cancel_token)
         .stream_options(
             ChatCompletionRequestStreamOptionsBuilder::default()
                 .include_usage(true)
@@ -29,12 +23,6 @@ async fn main() -> ai::Result<()> {
         .build()?;
 
     let mut stream = openai.stream_chat_completions(&request).await?;
-
-    tokio::spawn(async move {
-        sleep(Duration::from_millis(200)).await;
-        cancel_token_clone.cancel();
-        println!("\n\nCancelled after 200ms timeout!");
-    });
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;

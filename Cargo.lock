@@ -407,7 +407,6 @@ dependencies = [
  "ai",
  "futures",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
