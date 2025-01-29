@@ -13,14 +13,13 @@ async fn main() -> ai::Result<()> {
     let openai = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
 
     let cancel_token = CancellationToken::new();
-    let cancel_token_clone = cancel_token.clone();
 
     let request = ChatCompletionRequestBuilder::default()
         .model("llama3.2")
         .messages(vec![ChatCompletionMessage::User(
             "Write a paragraph about LLM.".into(),
         )])
-        .cancellation_token(cancel_token)
+        .cancellation_token(cancel_token.clone())
         .stream_options(
             ChatCompletionRequestStreamOptionsBuilder::default()
                 .include_usage(true)
@@ -30,10 +29,13 @@ async fn main() -> ai::Result<()> {
 
     let mut stream = openai.stream_chat_completions(&request).await?;
 
-    tokio::spawn(async move {
-        sleep(Duration::from_millis(200)).await;
-        cancel_token_clone.cancel();
-        println!("\n\nCancelled after 200ms timeout!");
+    tokio::spawn({
+        let cancel_token = cancel_token.clone();
+        async move {
+            sleep(Duration::from_millis(200)).await;
+            cancel_token.cancel();
+            println!("\n\nCancelled after 200ms timeout!");
+        }
     });
 
     while let Some(chunk) = stream.next().await {
