@@ -229,6 +229,9 @@ pub struct ChatCompletionRequest {
     #[builder(default = "None")]
     #[serde(skip)]
     pub cancellation_token: Option<CancellationToken>,
+    #[builder(default = "None")]
+    #[serde(skip)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
