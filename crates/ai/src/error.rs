@@ -56,6 +56,18 @@ pub enum Error {
         #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
     ),
 
+    /// Represents [`crate::chat_completions::ChatCompletionResponseMessageBuilderError`] errors.
+    #[error(transparent)]
+    ChatCompletionResponseMessageBuilderError(
+        #[from] crate::chat_completions::ChatCompletionResponseMessageBuilderError,
+    ),
+
+    /// Represents [`crate::chat_completions::ChatCompletionChunkChoiceBuilderError`] errors.
+    #[error(transparent)]
+    ChatCompletionChunkChoiceBuilderError(
+        #[from] crate::chat_completions::ChatCompletionChunkChoiceBuilderError,
+    ),
+
     /// Represents [`crate::chat_completions::ChatCompletionChoiceBuilder`] errors.
     #[error(transparent)]
     ChatCompletionChoiceBuilderError(
@@ -67,6 +79,10 @@ pub enum Error {
     ChatCompletionToolFunctionDefinitionBuilderError(
         #[from] crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilderError,
     ),
+
+    /// Represents [`crate::chat_completions::UsageBuilderError`] errors.
+    #[error(transparent)]
+    ChatCompletionUsageBuilderError(#[from] crate::chat_completions::UsageBuilderError),
 
     /// Represents [`crate::clients::azure_openai::ClientBuilder`] errors.
     #[cfg(feature = "azure_openai_client")]

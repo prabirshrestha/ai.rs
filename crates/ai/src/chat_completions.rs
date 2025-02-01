@@ -262,8 +262,12 @@ impl ChatCompletionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct ChatCompletionResponseMessage {
     pub content: Option<String>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rufusal: Option<String>,
     pub role: Role,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
 }
 
@@ -296,14 +300,19 @@ pub enum FinishReason {
     FunctionCall,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, Default)]
+#[builder(setter(into, strip_option), default)]
+#[builder(pattern = "mutable")]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
 pub struct ChatCompletionChunk {
     pub id: String,
     pub object: String,
@@ -313,14 +322,20 @@ pub struct ChatCompletionChunk {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
 pub struct ChatCompletionChunkChoice {
     pub delta: ChatCompletionChunkChoiceDelta,
     pub index: u32,
     pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
 pub struct ChatCompletionChunkChoiceDelta {
     pub content: Option<String>,
     pub rufusal: Option<String>,
