@@ -103,7 +103,7 @@ pub enum Error {
     #[error("The operation was cancelled")]
     Cancelled,
 
-    /// Represents errors that are uknown or not yet categorized.
+    /// Represents errors that are unknown or not yet categorized.
     #[error("Unknown error: {0}")]
     UnknownError(String),
 
