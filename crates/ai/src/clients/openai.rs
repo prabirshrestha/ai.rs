@@ -237,10 +237,10 @@ impl super::Client for Client {}
 mod tests {
     use super::*;
     use crate::{
+        Result,
         chat_completions::{
             ChatCompletionMessage, ChatCompletionRequestBuilder, FinishReason, Role,
         },
-        Result,
     };
     use httpmock::prelude::*;
 
