@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "ai"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "async-stream",
  "async-trait",
