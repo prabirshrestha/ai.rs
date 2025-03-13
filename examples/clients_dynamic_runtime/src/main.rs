@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
             (Box::new(openai), "gpt-4o-mini".to_string())
         } else {
             let ollama = ai::clients::ollama::Client::new()?;
-            (Box::new(ollama), "llama3.2".to_string())
+            (Box::new(ollama), "gemma3".to_string())
         };
 
     let summary = summarize(&*client, &model, "The sky is blue because it is blue.").await?;

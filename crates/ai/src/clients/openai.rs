@@ -244,7 +244,7 @@ mod tests {
     };
     use httpmock::prelude::*;
 
-    const SAMPLE_RESPONSE: &str = r#"{"id":"chatcmpl-518","object":"chat.completion","created":1736868357,"model":"llama3.2","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"The capital of France is Paris."},"finish_reason":"stop"}],"usage":{"prompt_tokens":33,"completion_tokens":8,"total_tokens":41}}"#;
+    const SAMPLE_RESPONSE: &str = r#"{"id":"chatcmpl-518","object":"chat.completion","created":1736868357,"model":"gemma3","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"The capital of France is Paris."},"finish_reason":"stop"}],"usage":{"prompt_tokens":33,"completion_tokens":8,"total_tokens":41}}"#;
 
     #[tokio::test]
     async fn test_sending_api_key() -> Result<()> {
@@ -262,7 +262,7 @@ mod tests {
         let openai = Client::from_url("mock_api_key", &server.base_url())?;
 
         let request = ChatCompletionRequestBuilder::default()
-            .model("llama3.2".to_string())
+            .model("gemma3".to_string())
             .messages(vec![ChatCompletionMessage::User(
                 "What is the capital of France?".into(),
             )])
@@ -298,7 +298,7 @@ mod tests {
   "id": "chatcmpl-357",
   "object": "chat.completion",
   "created": 1737436413,
-  "model": "llama3.2",
+  "model": "gemma3",
   "system_fingerprint": "fp_ollama",
   "choices": [
     {
@@ -333,7 +333,7 @@ mod tests {
         let openai = Client::from_url("mock_api_key", &server.base_url())?;
 
         let request = ChatCompletionRequestBuilder::default()
-            .model("llama3.2".to_string())
+            .model("gemma3".to_string())
             .messages(vec![ChatCompletionMessage::User(
                 "What is the weather like in Paris?".into(),
             )])

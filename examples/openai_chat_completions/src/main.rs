@@ -10,7 +10,7 @@ async fn main() -> Result<()> {
     // let openai = ai::clients::openai::Client::new("api_key")?;
 
     let request = ChatCompletionRequestBuilder::default()
-        .model("llama3.2")
+        .model("gemma3")
         .messages(vec![
             ChatCompletionMessage::System("You are a helpful assistant".into()),
             ChatCompletionMessage::User("Tell me a joke.".into()),

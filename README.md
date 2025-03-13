@@ -35,8 +35,8 @@ cargo add ai
 | `openai_client`       | Enable OpenAI client                      | ✅      |
 | `azure_openai_client` | Enable Azure OpenAI client                | ✅      |
 | `ollama_client`       | Enable Ollama client                      |         |
-| `native_tls`          | Enable native TLS for reqwest http client | ✅      |
-| `rustls_tls`          | Enable rustls TLS for reqwest http client |         |
+| `native_tls`          | Enable native TLS for reqwest http client |         |
+| `rustls_tls`          | Enable rustls TLS for reqwest http client | ✅      |
 
 # Examples
 
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     // let openai = ai::clients::openai::Client::new("api_key")?;
 
     let request = ChatCompletionRequestBuilder::default()
-        .model("llama3.2")
+        .model("gemma3")
         .messages(vec![
             ChatCompletionMessage::System("You are a helpful assistant".into()),
             ChatCompletionMessage::User("Tell me a joke.".into()),

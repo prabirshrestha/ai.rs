@@ -11,7 +11,7 @@ async fn main() -> ai::Result<()> {
     let openai = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
 
     let request = ChatCompletionRequestBuilder::default()
-        .model("llama3.2")
+        .model("gemma3")
         .messages(vec![ChatCompletionMessage::User(
             "Write a paragraph about LLM.".into(),
         )])

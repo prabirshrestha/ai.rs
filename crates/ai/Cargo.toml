@@ -28,7 +28,7 @@ httpmock = "0.7.0"
 tokio = { version = "1.43.0", features = ["rt-multi-thread"] }
 
 [features]
-default = [ "azure_openai_client", "openai_client", "native_tls"]
+default = [ "azure_openai_client", "openai_client", "rustls_tls"]
 ollama_client = []
 openai_client = []
 azure_openai_client = []

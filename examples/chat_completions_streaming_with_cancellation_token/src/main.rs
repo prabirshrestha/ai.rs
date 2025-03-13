@@ -15,7 +15,7 @@ async fn main() -> ai::Result<()> {
     let cancel_token = CancellationToken::new();
 
     let request = ChatCompletionRequestBuilder::default()
-        .model("llama3.2")
+        .model("gemma3")
         .messages(vec![ChatCompletionMessage::User(
             "Write a paragraph about LLM.".into(),
         )])

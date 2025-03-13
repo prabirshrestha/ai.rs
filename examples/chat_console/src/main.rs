@@ -27,7 +27,7 @@ async fn main() -> ai::Result<()> {
         conversation_history.push(ChatCompletionMessage::User(user_input.into()));
 
         let request = ChatCompletionRequestBuilder::default()
-            .model("llama3.2")
+            .model("gemma3")
             .messages(conversation_history.clone())
             .build()?;
 
