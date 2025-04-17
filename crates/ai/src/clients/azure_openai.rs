@@ -4,6 +4,7 @@ use std::str::FromStr;
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
+use crate::embeddings::{Embeddings, EmbeddingsRequest, EmbeddingsResponse};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_stream::stream;
@@ -77,6 +78,13 @@ impl Client {
     fn get_url(&self, model: &str) -> String {
         format!(
             "{}/openai/deployments/{}/chat/completions?api-version={}",
+            self.base_url, model, self.api_version
+        )
+    }
+
+    fn get_embeddings_url(&self, model: &str) -> String {
+        format!(
+            "{}/openai/deployments/{}/embeddings?api-version={}",
             self.base_url, model, self.api_version
         )
     }
@@ -244,3 +252,39 @@ impl ChatCompletion for Client {
 }
 
 impl super::Client for Client {}
+
+#[async_trait]
+impl Embeddings for Client {
+    async fn create_embeddings(
+        &self,
+        request: &EmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.metadata {
+            if let Some(token) = token.get("cancellation_token") {
+                if token.as_bool().unwrap_or(false) {
+                    return Err(Error::Cancelled);
+                }
+            }
+        }
+
+        let headers = self.get_headers()?;
+        let url = self.get_embeddings_url(&request.model);
+
+        let response = self
+            .http_client
+            .post(url)
+            .headers(headers)
+            .json(request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
+    }
+}

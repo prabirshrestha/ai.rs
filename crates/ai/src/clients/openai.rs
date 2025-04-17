@@ -3,6 +3,7 @@ use std::pin::Pin;
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
+use crate::embeddings::{Base64EmbeddingsResponse, Embeddings, EmbeddingsRequest, EmbeddingsResponse};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_stream::stream;
@@ -65,6 +66,10 @@ impl Client {
 
     fn get_chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
+    }
+
+    fn get_embeddings_url(&self) -> String {
+        format!("{}/embeddings", self.base_url)
     }
 }
 
@@ -232,6 +237,81 @@ impl ChatCompletion for Client {
 }
 
 impl super::Client for Client {}
+
+#[async_trait]
+impl Embeddings for Client {
+    async fn create_embeddings(
+        &self,
+        request: &EmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.metadata {
+            if let Some(token) = token.get("cancellation_token") {
+                if token.as_bool().unwrap_or(false) {
+                    return Err(Error::Cancelled);
+                }
+            }
+        }
+
+        let headers = self.get_headers()?;
+
+        let response = self
+            .http_client
+            .post(self.get_embeddings_url())
+            .headers(headers)
+            .json(request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
+    }
+    
+    async fn create_base64_embeddings(
+        &self,
+        request: &EmbeddingsRequest,
+    ) -> Result<Base64EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.metadata {
+            if let Some(token) = token.get("cancellation_token") {
+                if token.as_bool().unwrap_or(false) {
+                    return Err(Error::Cancelled);
+                }
+            }
+        }
+
+        let headers = self.get_headers()?;
+        
+        // Convert the request to a format with encoding_format=base64
+        let request_body = serde_json::json!({
+            "model": request.model,
+            "input": request.input,
+            "encoding_format": "base64",
+            "user": request.user
+        });
+
+        let response = self
+            .http_client
+            .post(self.get_embeddings_url())
+            .headers(headers)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<Base64EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
+    }
+}
 
 #[cfg(test)]
 mod tests {

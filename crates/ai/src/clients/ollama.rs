@@ -4,6 +4,7 @@ use crate::chat_completions::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionResponseMessage, FinishReason, Role, Usage,
 };
+use crate::embeddings::{Embeddings, EmbeddingsRequest, EmbeddingsResponse, EmbeddingData, EmbeddingsUsage};
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
 };
@@ -155,3 +156,72 @@ impl ChatCompletion for Client {
 }
 
 impl super::Client for Client {}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbeddingsResponse {
+    embedding: Vec<f64>,
+}
+
+#[async_trait]
+impl Embeddings for Client {
+    async fn create_embeddings(
+        &self,
+        request: &EmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.metadata {
+            if let Some(token) = token.get("cancellation_token") {
+                if token.as_bool().unwrap_or(false) {
+                    return Err(Error::Cancelled);
+                }
+            }
+        }
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+
+        let request_body = if request.input.len() == 1 {
+            serde_json::json!({
+                "model": request.model,
+                "prompt": request.input[0],
+            })
+        } else {
+            serde_json::json!({
+                "model": request.model,
+                "prompt": request.input,
+            })
+        };
+
+        let response = self
+            .http_client
+            .post(format!("{}/api/embeddings", self.base_url))
+            .headers(headers)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let ollama_response = response.json::<OllamaEmbeddingsResponse>().await?;
+
+        // Convert Ollama response to standard EmbeddingsResponse
+        Ok(EmbeddingsResponse {
+            object: "list".to_string(),
+            data: vec![EmbeddingData {
+                object: "embedding".to_string(),
+                embedding: ollama_response.embedding,
+                index: 0,
+            }],
+            model: request.model.clone(),
+            usage: EmbeddingsUsage {
+                prompt_tokens: 0, // Ollama doesn't provide token counts
+                total_tokens: 0,
+            },
+        })
+    }
+}

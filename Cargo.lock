@@ -1416,6 +1416,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "openai_embeddings"
+version = "0.1.0"
+dependencies = [
+ "ai",
+ "tokio",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
