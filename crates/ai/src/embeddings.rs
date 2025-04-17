@@ -18,6 +18,9 @@ pub struct EmbeddingsRequest {
     #[builder(default = "None")]
     #[serde(skip)]
     pub metadata: Option<serde_json::Value>,
+    #[builder(default = "None")]
+    #[serde(skip)]
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
