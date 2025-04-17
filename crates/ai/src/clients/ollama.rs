@@ -4,7 +4,9 @@ use crate::chat_completions::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionResponseMessage, FinishReason, Role, Usage,
 };
-use crate::embeddings::{Embeddings, EmbeddingsRequest, EmbeddingsResponse, EmbeddingData, EmbeddingsUsage};
+use crate::embeddings::{
+    EmbeddingData, Embeddings, EmbeddingsRequest, EmbeddingsResponse, EmbeddingsUsage,
+};
 use crate::utils::{
     time::deserialize_iso8601_timestamp_to_unix_timestamp, uri::ensure_no_trailing_slash,
 };
@@ -164,10 +166,7 @@ struct OllamaEmbeddingsResponse {
 
 #[async_trait]
 impl Embeddings for Client {
-    async fn create_embeddings(
-        &self,
-        request: &EmbeddingsRequest,
-    ) -> Result<EmbeddingsResponse> {
+    async fn create_embeddings(&self, request: &EmbeddingsRequest) -> Result<EmbeddingsResponse> {
         // Check if already cancelled before making the request
         if let Some(token) = &request.cancellation_token {
             if token.is_cancelled() {

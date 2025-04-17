@@ -3,7 +3,9 @@ use std::pin::Pin;
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
-use crate::embeddings::{Base64EmbeddingsResponse, Embeddings, EmbeddingsRequest, EmbeddingsResponse};
+use crate::embeddings::{
+    Base64EmbeddingsResponse, Embeddings, EmbeddingsRequest, EmbeddingsResponse,
+};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_stream::stream;
@@ -240,10 +242,7 @@ impl super::Client for Client {}
 
 #[async_trait]
 impl Embeddings for Client {
-    async fn create_embeddings(
-        &self,
-        request: &EmbeddingsRequest,
-    ) -> Result<EmbeddingsResponse> {
+    async fn create_embeddings(&self, request: &EmbeddingsRequest) -> Result<EmbeddingsResponse> {
         // Check if already cancelled before making the request
         if let Some(token) = &request.cancellation_token {
             if token.is_cancelled() {
@@ -288,7 +287,7 @@ impl Embeddings for Client {
 
         Ok(embeddings_response)
     }
-    
+
     async fn create_base64_embeddings(
         &self,
         request: &EmbeddingsRequest,
@@ -301,7 +300,7 @@ impl Embeddings for Client {
         }
 
         let headers = self.get_headers()?;
-        
+
         // Convert the request to a format with encoding_format=base64
         let request_body = serde_json::json!({
             "model": request.model,
