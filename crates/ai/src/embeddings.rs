@@ -1,10 +1,10 @@
 use crate::Result;
 use async_trait::async_trait;
+use base64;
+use base64::engine::Engine;
 use derive_builder::Builder;
 use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
-
-
 
 #[derive(Debug, Serialize, Deserialize, Builder)]
 #[builder(pattern = "mutable")]
@@ -38,22 +38,28 @@ pub struct Base64EmbeddingsResponse {
 
 impl EmbeddingsResponse {
     pub fn to_base64(self) -> Base64EmbeddingsResponse {
-        let data: Vec<Base64EmbeddingData> = self.data
+        let data: Vec<Base64EmbeddingData> = self
+            .data
             .into_iter()
             .map(|item| {
-                // Simple JSON encoding approach for f32 vectors
-                let json_str = serde_json::to_string(&item.embedding).unwrap_or_default();
-                // In a real implementation, this would be proper base64, but we're using a simplified version
-                // to avoid adding dependencies
-                
+                // Convert the vector of f64 to bytes
+                let bytes = item
+                    .embedding
+                    .iter()
+                    .flat_map(|&f| f.to_le_bytes())
+                    .collect::<Vec<u8>>();
+
+                // Apply base64 encoding
+                let base64_str = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
                 Base64EmbeddingData {
                     object: item.object,
-                    embedding: format!("base64:{}", json_str),
+                    embedding: base64_str,
                     index: item.index,
                 }
             })
             .collect();
-            
+
         Base64EmbeddingsResponse {
             object: self.object,
             data,
@@ -87,10 +93,7 @@ pub struct EmbeddingsUsage {
 
 #[async_trait]
 pub trait Embeddings: DynClone + Send + Sync {
-    async fn create_embeddings(
-        &self,
-        request: &EmbeddingsRequest,
-    ) -> Result<EmbeddingsResponse>;
+    async fn create_embeddings(&self, request: &EmbeddingsRequest) -> Result<EmbeddingsResponse>;
 
     async fn create_base64_embeddings(
         &self,
