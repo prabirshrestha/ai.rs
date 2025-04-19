@@ -10,6 +10,7 @@ providers with more to come.
 - [Cargo Features](#cargo-features)
 - [Examples](#examples)
   - [Chat Completion API](#chat-completion-api)
+  - [Embeddings API](#embeddings-api)
 - [Clients](#clients)
   - [OpenAI](#openai)
     - [Gemini API via OpenAI](#gemini-api-via-openai)
@@ -100,14 +101,14 @@ async fn main() -> Result<()> {
 
     // Get standard float embeddings
     let response = openai.create_embeddings(&request).await?;
-    
+
     println!("Embedding dimensions: {}", response.data[0].embedding.len());
-    
+
     // Get base64 encoded embeddings
     let base64_response = openai.create_base64_embeddings(&request).await?;
-    
+
     println!("Base64 embedding: {}", base64_response.data[0].embedding);
-    
+
     Ok(())
 }
 ```
