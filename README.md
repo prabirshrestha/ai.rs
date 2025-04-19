@@ -49,6 +49,7 @@ cargo add ai
 | chat_console                                          | Console chat example                                  |
 | clients_dynamic_runtime                               | Dynamic runtime client selection                      |
 | openai_chat_completions                               | Basic chat completions using OpenAI API               |
+| openai_embeddings                                     | Text embeddings with OpenAI API                       |
 
 ## Chat Completion API
 
@@ -76,6 +77,37 @@ async fn main() -> Result<()> {
 
     println!("{}", &response.choices[0].message.content.as_ref().unwrap());
 
+    Ok(())
+}
+```
+
+## Embeddings API
+
+```rust
+use ai::{
+    embeddings::{Embeddings, EmbeddingsRequestBuilder},
+    Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = ai::clients::openai::Client::from_env()?;
+
+    let request = EmbeddingsRequestBuilder::default()
+        .model("text-embedding-3-small")
+        .input(vec!["Hello, world!".to_string()])
+        .build()?;
+
+    // Get standard float embeddings
+    let response = openai.create_embeddings(&request).await?;
+    
+    println!("Embedding dimensions: {}", response.data[0].embedding.len());
+    
+    // Get base64 encoded embeddings
+    let base64_response = openai.create_base64_embeddings(&request).await?;
+    
+    println!("Base64 embedding: {}", base64_response.data[0].embedding);
+    
     Ok(())
 }
 ```

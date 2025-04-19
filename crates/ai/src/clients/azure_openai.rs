@@ -4,6 +4,7 @@ use std::str::FromStr;
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
+use crate::embeddings::{Embeddings, EmbeddingsRequest, EmbeddingsResponse};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_stream::stream;
@@ -77,6 +78,13 @@ impl Client {
     fn get_url(&self, model: &str) -> String {
         format!(
             "{}/openai/deployments/{}/chat/completions?api-version={}",
+            self.base_url, model, self.api_version
+        )
+    }
+
+    fn get_embeddings_url(&self, model: &str) -> String {
+        format!(
+            "{}/openai/deployments/{}/embeddings?api-version={}",
             self.base_url, model, self.api_version
         )
     }
@@ -240,6 +248,56 @@ impl ChatCompletion for Client {
         };
 
         Ok(Box::pin(result_stream))
+    }
+}
+
+#[async_trait]
+impl Embeddings for Client {
+    async fn create_embeddings(&self, request: &EmbeddingsRequest) -> Result<EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+
+        let headers = self.get_headers()?;
+        let url = self.get_embeddings_url(&request.model);
+
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
+            .http_client
+            .post(url)
+            .headers(headers)
+            .json(request)
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Err(Error::Cancelled);
+                }
+            };
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
     }
 }
 

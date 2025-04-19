@@ -3,6 +3,9 @@ use std::pin::Pin;
 use crate::chat_completions::{
     ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
 };
+use crate::embeddings::{
+    Base64EmbeddingsResponse, Embeddings, EmbeddingsRequest, EmbeddingsResponse,
+};
 use crate::utils::uri::ensure_no_trailing_slash;
 use crate::{Error, Result};
 use async_stream::stream;
@@ -65,6 +68,10 @@ impl Client {
 
     fn get_chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
+    }
+
+    fn get_embeddings_url(&self) -> String {
+        format!("{}/embeddings", self.base_url)
     }
 }
 
@@ -232,6 +239,112 @@ impl ChatCompletion for Client {
 }
 
 impl super::Client for Client {}
+
+#[async_trait]
+impl Embeddings for Client {
+    async fn create_embeddings(&self, request: &EmbeddingsRequest) -> Result<EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+
+        let headers = self.get_headers()?;
+
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
+            .http_client
+            .post(self.get_embeddings_url())
+            .headers(headers)
+            .json(request)
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Err(Error::Cancelled);
+                }
+            };
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
+    }
+
+    async fn create_base64_embeddings(
+        &self,
+        request: &EmbeddingsRequest,
+    ) -> Result<Base64EmbeddingsResponse> {
+        // Check if already cancelled before making the request
+        if let Some(token) = &request.cancellation_token {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+
+        let headers = self.get_headers()?;
+
+        // Convert the request to a format with encoding_format=base64
+        let request_body = serde_json::json!({
+            "model": request.model,
+            "input": request.input,
+            "encoding_format": "base64",
+            "user": request.user
+        });
+
+        // Create an abortable request
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+
+        // If we have a cancellation token, set up cancellation monitoring
+        if let Some(token) = &request.cancellation_token {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                abort_handle.abort();
+            });
+        }
+
+        let request_future = self
+            .http_client
+            .post(self.get_embeddings_url())
+            .headers(headers)
+            .json(&request_body)
+            .send();
+
+        let response =
+            match futures::future::Abortable::new(request_future, abort_registration).await {
+                Ok(response) => response?,
+                Err(futures::future::Aborted) => {
+                    return Err(Error::Cancelled);
+                }
+            };
+
+        if !response.status().is_success() {
+            return Err(Error::UnknownError(response.text().await?));
+        }
+
+        let embeddings_response = response.json::<Base64EmbeddingsResponse>().await?;
+
+        Ok(embeddings_response)
+    }
+}
 
 #[cfg(test)]
 mod tests {
