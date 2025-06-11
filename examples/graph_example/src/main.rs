@@ -1,4 +1,4 @@
-use ai::graph::{Graph, NodeResult, END};
+use ai::graph::{Graph, END, START};
 use ai::Error;
 use std::collections::HashMap;
 
@@ -6,73 +6,73 @@ use std::collections::HashMap;
 struct State {
     message: String,
     count: i32,
-}
-
-async fn greet_node(mut state: State) -> NodeResult<State> {
-    state.message = format!("Hello, {}!", state.message);
-    println!("Greet: {}", state.message);
-    Ok(state)
-}
-
-async fn count_node(mut state: State) -> NodeResult<State> {
-    state.count += 1;
-    println!("Count incremented to: {}", state.count);
-
-    // Example of using OtherError for demonstration
-    if state.count == 5 {
-        let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "Count reached 5");
-        return Err(Box::new(Error::OtherError(Box::new(custom_error))));
-    }
-
-    Ok(state)
-}
-
-async fn decision_node(state: State) -> NodeResult<State> {
-    println!("Decision: count is {}", state.count);
-    Ok(state)
-}
-
-async fn final_node(mut state: State) -> NodeResult<State> {
-    state.message = format!("{} (Final)", state.message);
-    println!("Final: {}", state.message);
-    Ok(state)
-}
-
-fn should_continue(state: &State) -> String {
-    if state.count < 3 {
-        "continue".to_string()
-    } else {
-        "end".to_string()
-    }
+    quality_score: i32,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut graph = Graph::new();
+    let compiled_graph = Graph::new()
+        .add_node("generate_content", |mut state: State| async move {
+            state.message = format!("Generated content: {}", state.message);
+            state.quality_score = 6; // Initial quality score
+            println!("Generate: {}", state.message);
+            Ok(state)
+        })
+        .add_node("improve_content", |mut state: State| async move {
+            state.message = format!("Improved: {}", state.message);
+            state.quality_score += 3; // Improve quality
+            state.count += 1;
+            println!(
+                "Improve: {} (quality: {})",
+                state.message, state.quality_score
+            );
 
-    graph
-        .add_node("greet", greet_node)
-        .add_node("count", count_node)
-        .add_node("decision", decision_node)
-        .add_node("final", final_node);
+            // Example error handling
+            if state.count > 5 {
+                let custom_error =
+                    std::io::Error::new(std::io::ErrorKind::Other, "Too many improvement attempts");
+                return Err(Box::new(Error::OtherError(Box::new(custom_error)))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
 
-    graph.add_edge("greet", "count");
+            Ok(state)
+        })
+        .add_node("polish_content", |mut state: State| async move {
+            state.message = format!("Polished: {}", state.message);
+            state.quality_score = 10; // Final quality
+            println!(
+                "Polish: {} (final quality: {})",
+                state.message, state.quality_score
+            );
+            Ok(state)
+        })
+        .add_edge(START, "generate_content")
+        .add_conditional_edges(
+            "generate_content",
+            |state: State| async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    let mut conditional_mapping = HashMap::new();
-    conditional_mapping.insert("continue".to_string(), "count".to_string());
-    conditional_mapping.insert("end".to_string(), END.to_string());
-
-    graph
-        .add_edge("count", "decision")
-        .add_conditional_edges("decision", should_continue, conditional_mapping)
-        .set_entry_point("greet")
-        .set_finish_point("final");
-
-    let compiled_graph = graph.compile()?;
+                if state.quality_score < 8 {
+                    "improve".to_string()
+                } else {
+                    "polish".to_string()
+                }
+            },
+            {
+                let mut mapping = HashMap::new();
+                mapping.insert("improve", "improve_content");
+                mapping.insert("polish", "polish_content");
+                mapping
+            },
+        )
+        .add_edge("improve_content", "polish_content")
+        .add_edge("polish_content", END)
+        .compile()?;
 
     let initial_state = State {
-        message: "World".to_string(),
+        message: "Hello World".to_string(),
         count: 0,
+        quality_score: 0,
     };
 
     let result = compiled_graph.execute(initial_state).await?;
