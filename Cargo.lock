@@ -1745,6 +1745,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "react_agent_graph"
+version = "0.1.0"
+dependencies = [
+ "ai",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "urlencoding",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
