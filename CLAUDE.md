@@ -73,4 +73,4 @@ The graph module provides a workflow execution framework with support for:
 #### Execution
 - `execute(initial_state)` - Run from START node
 - `execute_with_start(node_name, state)` - Run from specific node
-- `draw_mermaid()` - Generate flowchart visualization
+- `draw_mermaid()` - Generate flowchart visualization (preview at https://mermaid.live)
