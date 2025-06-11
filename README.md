@@ -52,6 +52,7 @@ cargo add ai
 | graph_example                                         | Graph workflow execution with conditional logic       |
 | openai_chat_completions                               | Basic chat completions using OpenAI API               |
 | openai_embeddings                                     | Text embeddings with OpenAI API                       |
+| react_agent                                           | ReAct agent with reasoning and action capabilities    |
 
 ## Chat Completion API
 
@@ -184,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .add_edge("polish_content", END);
 
     let compiled_graph = graph.compile()?;
-    
+
     let initial_state = State {
         message: "Hello World".to_string(),
         count: 0,
