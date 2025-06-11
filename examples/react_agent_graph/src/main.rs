@@ -321,6 +321,11 @@ impl ReactAgentGraph {
             .compile()
             .map_err(|e| ai::Error::UnknownError(format!("Graph compilation failed: {}", e)))?;
 
+        // Display the Mermaid graph
+        println!("📊 Graph Structure (Mermaid):");
+        println!("{}", compiled_graph.draw_mermaid());
+        println!("🔗 View at: https://mermaid.live\n");
+
         // Execute the graph
         let final_state = compiled_graph
             .execute(initial_state)
