@@ -1,7 +1,6 @@
 # ai
 
-Simple to use AI library for Rust primarily targeting OpenAI compatible
-providers with more to come.
+Simple to use AI library for Rust with OpenAI compatible providers and graph-based workflow execution.
 
 *This library is work in progress, and the API is subject to change.*
 
@@ -11,6 +10,7 @@ providers with more to come.
 - [Examples](#examples)
   - [Chat Completion API](#chat-completion-api)
   - [Embeddings API](#embeddings-api)
+  - [Graph](#graph)
 - [Clients](#clients)
   - [OpenAI](#openai)
     - [Gemini API via OpenAI](#gemini-api-via-openai)
@@ -49,6 +49,7 @@ cargo add ai
 | chat_completions_tool_calling                         | Tool/Function calling example                         |
 | chat_console                                          | Console chat example                                  |
 | clients_dynamic_runtime                               | Dynamic runtime client selection                      |
+| graph_example                                         | Graph workflow execution with conditional logic       |
 | openai_chat_completions                               | Basic chat completions using OpenAI API               |
 | openai_embeddings                                     | Text embeddings with OpenAI API                       |
 
@@ -124,6 +125,98 @@ let request = &ChatCompletionRequestBuilder::default()
     ])
     .build()?;
 ```
+
+## Graph
+
+Build and execute complex workflows with conditional logic and async node execution.
+
+```rust
+use ai::graph::{Graph, START, END};
+use std::collections::HashMap;
+
+#[derive(Clone, Debug)]
+struct State {
+    message: String,
+    count: i32,
+    quality_score: i32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let graph = Graph::new()
+        .add_node("generate_content", |mut state: State| async move {
+            state.message = format!("Generated content: {}", state.message);
+            state.quality_score = 6;
+            println!("Generate: {}", state.message);
+            Ok(state)
+        })
+        .add_node("improve_content", |mut state: State| async move {
+            state.message = format!("Improved: {}", state.message);
+            state.quality_score += 3;
+            state.count += 1;
+            println!("Improve: {} (quality: {})", state.message, state.quality_score);
+            Ok(state)
+        })
+        .add_node("polish_content", |mut state: State| async move {
+            state.message = format!("Polished: {}", state.message);
+            state.quality_score = 10;
+            println!("Polish: {} (final quality: {})", state.message, state.quality_score);
+            Ok(state)
+        })
+        .add_edge(START, "generate_content")
+        .add_conditional_edges(
+            "generate_content",
+            |state: State| async move {
+                if state.quality_score < 8 {
+                    "improve".to_string()
+                } else {
+                    "polish".to_string()
+                }
+            },
+            {
+                let mut mapping = HashMap::new();
+                mapping.insert("improve", "improve_content");
+                mapping.insert("polish", "polish_content");
+                mapping
+            },
+        )
+        .add_edge("improve_content", "polish_content")
+        .add_edge("polish_content", END);
+
+    let compiled_graph = graph.compile()?;
+    
+    let initial_state = State {
+        message: "Hello World".to_string(),
+        count: 0,
+        quality_score: 0,
+    };
+
+    let result = compiled_graph.execute(initial_state).await?;
+    println!("Final result: {:?}", result);
+
+    Ok(())
+}
+```
+
+The graph can be visualized using Mermaid syntax. Use `draw_mermaid()` to generate the diagram:
+
+```mermaid
+flowchart TD
+    __start__([START])
+    __end__([END])
+    improve_content[improve_content]
+    generate_content[generate_content]
+    polish_content[polish_content]
+    __start__ --> generate_content
+    improve_content --> polish_content
+    polish_content --> __end__
+    generate_content -->|improve| improve_content
+    generate_content -->|polish| polish_content
+    classDef startEnd fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    class __start__,__end__ startEnd
+```
+
+Visit [mermaid.live](https://mermaid.live) to see a live preview of your graph diagrams.
 
 # Clients
 
