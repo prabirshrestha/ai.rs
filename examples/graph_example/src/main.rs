@@ -11,7 +11,7 @@ struct State {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let compiled_graph = Graph::new()
+    let graph = Graph::new()
         .add_node("generate_content", |mut state: State| async move {
             state.message = format!("Generated content: {}", state.message);
             state.quality_score = 6; // Initial quality score
@@ -66,14 +66,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             },
         )
         .add_edge("improve_content", "polish_content")
-        .add_edge("polish_content", END)
-        .compile()?;
+        .add_edge("polish_content", END);
+
+    // Test drawing Mermaid before compilation
+    println!("Graph Mermaid diagram (before compilation):");
+    println!("{}", graph.draw_mermaid());
+
+    let compiled_graph = graph.compile()?;
 
     let initial_state = State {
         message: "Hello World".to_string(),
         count: 0,
         quality_score: 0,
     };
+
+    // Generate and print the Mermaid diagram after compilation
+    println!("Graph Mermaid diagram (after compilation):");
+    println!("{}", compiled_graph.draw_mermaid());
+    println!();
 
     let result = compiled_graph.execute(initial_state).await?;
     println!("Sequential Final result: {:?}", result);

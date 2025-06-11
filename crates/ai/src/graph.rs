@@ -132,6 +132,41 @@ where
 
         Ok(())
     }
+
+    /// Generate a Mermaid flowchart representation of the graph
+    pub fn draw_mermaid(&self) -> String {
+        let mut mermaid = String::from("flowchart TD\n");
+        
+        // Add start and end nodes with special styling
+        mermaid.push_str("    __start__([START])\n");
+        mermaid.push_str("    __end__([END])\n");
+        
+        // Add regular nodes
+        for node_name in self.nodes.keys() {
+            mermaid.push_str(&format!("    {}[{}]\n", node_name, node_name));
+        }
+        
+        // Add regular edges
+        for edge in &self.edges {
+            mermaid.push_str(&format!("    {} --> {}\n", edge.from, edge.to));
+        }
+        
+        // Add conditional edges with labels
+        for conditional_edge in &self.conditional_edges {
+            for (condition, target) in &conditional_edge.mapping {
+                mermaid.push_str(&format!(
+                    "    {} -->|{}| {}\n", 
+                    conditional_edge.from, condition, target
+                ));
+            }
+        }
+        
+        // Add styling
+        mermaid.push_str("    classDef startEnd fill:#e1f5fe,stroke:#01579b,stroke-width:2px\n");
+        mermaid.push_str("    class __start__,__end__ startEnd\n");
+        
+        mermaid
+    }
 }
 
 pub struct CompiledGraph<T> {
@@ -227,6 +262,41 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Generate a Mermaid flowchart representation of the compiled graph
+    pub fn draw_mermaid(&self) -> String {
+        let mut mermaid = String::from("flowchart TD\n");
+        
+        // Add start and end nodes with special styling
+        mermaid.push_str("    __start__([START])\n");
+        mermaid.push_str("    __end__([END])\n");
+        
+        // Add regular nodes
+        for node_name in self.nodes.keys() {
+            mermaid.push_str(&format!("    {}[{}]\n", node_name, node_name));
+        }
+        
+        // Add regular edges
+        for edge in &self.edges {
+            mermaid.push_str(&format!("    {} --> {}\n", edge.from, edge.to));
+        }
+        
+        // Add conditional edges with labels
+        for conditional_edge in &self.conditional_edges {
+            for (condition, target) in &conditional_edge.mapping {
+                mermaid.push_str(&format!(
+                    "    {} -->|{}| {}\n", 
+                    conditional_edge.from, condition, target
+                ));
+            }
+        }
+        
+        // Add styling
+        mermaid.push_str("    classDef startEnd fill:#e1f5fe,stroke:#01579b,stroke-width:2px\n");
+        mermaid.push_str("    class __start__,__end__ startEnd\n");
+        
+        mermaid
     }
 }
 
