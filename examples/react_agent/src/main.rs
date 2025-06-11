@@ -3,8 +3,8 @@
 use ai::{
     chat_completions::{
         ChatCompletion, ChatCompletionMessage, ChatCompletionMessageToolCall,
-        ChatCompletionRequestBuilder, ChatCompletionRequestStreamOptionsBuilder,
-        ChatCompletionTool, ChatCompletionToolFunctionDefinitionBuilder, FinishReason,
+        ChatCompletionRequestBuilder, ChatCompletionTool,
+        ChatCompletionToolFunctionDefinitionBuilder, FinishReason,
     },
     Result,
 };
@@ -93,11 +93,6 @@ Be thorough and make sure to gather all necessary facts before concluding."#.int
                 .messages(messages.clone())
                 .tools(self.tools.clone())
                 .temperature(0.0)
-                .stream_options(
-                    ChatCompletionRequestStreamOptionsBuilder::default()
-                        .include_usage(false)
-                        .build()?,
-                )
                 .build()?;
 
             // Use streaming to show real-time thinking
