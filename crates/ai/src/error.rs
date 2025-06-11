@@ -103,6 +103,10 @@ pub enum Error {
     #[error("The operation was cancelled")]
     Cancelled,
 
+    /// Represents graph execution errors.
+    #[error(transparent)]
+    GraphError(#[from] crate::graph::GraphError),
+
     /// Represents errors that are unknown or not yet categorized.
     #[error("Unknown error: {0}")]
     UnknownError(String),

@@ -5,11 +5,11 @@ use std::pin::Pin;
 pub const START: &str = "__start__";
 pub const END: &str = "__end__";
 
-
 pub type NodeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub type NodeFn<T> =
     Box<dyn Fn(T) -> Pin<Box<dyn Future<Output = NodeResult<T>> + Send>> + Send + Sync>;
-pub type ConditionalFn<T> = Box<dyn Fn(T) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+pub type ConditionalFn<T> =
+    Box<dyn Fn(T) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Edge {
