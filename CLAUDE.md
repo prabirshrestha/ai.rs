@@ -18,6 +18,7 @@ Examples are in the `examples/` directory. Run them with:
 - `cargo run --bin chat_completions_streaming`
 - `cargo run --bin chat_console`
 - `cargo run --bin graph_example`
+- `cargo run --bin react_agent`
 
 Each example has its own Cargo.toml and can be run from its directory.
 
