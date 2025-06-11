@@ -53,14 +53,17 @@ impl ReactAgent {
         let query_lower = query.to_lowercase();
 
         if query_lower.contains("ronaldo") {
-            Ok("Cristiano Ronaldo was born on February 5, 1985, in Funchal, Madeira, Portugal. He is currently 39 years old.".to_string())
+            Ok(
+                "Cristiano Ronaldo was born on February 5, 1985, in Funchal, Madeira, Portugal."
+                    .to_string(),
+            )
         } else if query_lower.contains("messi") {
-            Ok("Lionel Messi was born on June 24, 1987, in Rosario, Argentina. He is currently 37 years old.".to_string())
+            Ok("Lionel Messi was born on June 24, 1987, in Rosario, Argentina.".to_string())
         } else if query_lower.contains("birth")
             || query_lower.contains("age")
             || query_lower.contains("older")
         {
-            Ok("Search results: Cristiano Ronaldo - Born February 5, 1985 (age 39). Lionel Messi - Born June 24, 1987 (age 37).".to_string())
+            Ok("Search results: Cristiano Ronaldo - Born February 5, 1985. Lionel Messi - Born June 24, 1987".to_string())
         } else {
             Ok(format!(
                 "Search simulation: No specific information found for query '{}'",
