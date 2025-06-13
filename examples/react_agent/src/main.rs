@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
     let client = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
     let agent = ReactAgent::new(Box::new(client));
 
-    let query = "Who is older, Cristiano Ronaldo or Lionel Messi? I need their birth dates to determine this.";
+    let query = "Who is older, Cristiano Ronaldo or Lionel Messi?";
 
     match agent.run(query).await {
         Ok(answer) => {

@@ -30,7 +30,7 @@ impl AgentState {
     pub fn new(query: &str, max_iterations: usize) -> Self {
         let messages = vec![
             ChatCompletionMessage::System(
-                r#"You are a ReAct (Reasoning and Acting) agent. When you need information to answer a question, use the available tools to gather that information.
+                r#"/no_think You are a ReAct (Reasoning and Acting) agent. When you need information to answer a question, use the available tools to gather that information.
 
 Think step by step:
 1. Analyze what information you need
@@ -355,7 +355,7 @@ async fn main() -> Result<()> {
     let client = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
     let agent = ReactAgentGraph::new(Box::new(client));
 
-    let query = "Who is older, Cristiano Ronaldo or Lionel Messi? I need their birth dates to determine this.";
+    let query = "Who is older, Cristiano Ronaldo or Lionel Messi?";
 
     match agent.run(query).await {
         Ok(answer) => {
