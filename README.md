@@ -29,6 +29,16 @@ servers.
 cargo add ai
 ```
 
+For comprehensive usage documentation in your projects, download the CLAUDE.md guide:
+
+```bash
+# Using wget
+wget https://raw.githubusercontent.com/prabirshrestha/ai.rs/refs/heads/main/examples/CLAUDE.md
+
+# Using curl
+curl -O https://raw.githubusercontent.com/prabirshrestha/ai.rs/refs/heads/main/examples/CLAUDE.md
+```
+
 # Cargo Features
 
 | Feature               | Description                               | Default |
