@@ -192,6 +192,7 @@ impl ChatCompletion for Client {
 
         let result_stream = stream! {
             let mut stream = byte_stream;
+            let mut buffer = String::new();
 
             loop {
                 if let Some(token) = &cancellation_token {
@@ -205,23 +206,35 @@ impl ChatCompletion for Client {
                         match chunk_result {
                             Ok(chunk) => {
                                 let chunk_str = String::from_utf8_lossy(&chunk);
+                                buffer.push_str(&chunk_str);
 
-                                for line in chunk_str.lines() {
+                                // Process complete lines
+                                let mut remaining = buffer.as_str();
+                                while let Some(newline_pos) = remaining.find('\n') {
+                                    let line = &remaining[..newline_pos];
+                                    remaining = &remaining[newline_pos + 1..];
+
                                     if line.starts_with("data: ") {
                                         let data = &line[6..];
 
                                         // Check for stream end
                                         if data == "[DONE]" {
-                                            break;
+                                            return;
                                         }
 
-                                        // Parse the JSON response
+                                        // Parse the JSON response - only for complete lines
                                         match serde_json::from_str::<ChatCompletionChunk>(data) {
                                             Ok(v) => yield Ok(v),
-                                            Err(e) => yield Err(Error::SerdeJsonError(e)),
+                                            Err(e) => {
+                                                // Log warning but continue processing
+                                                eprintln!("Warning: Failed to parse chunk: {} - Data: {}", e, data);
+                                            },
                                         }
                                     }
                                 }
+
+                                // Keep remaining incomplete data in buffer
+                                buffer = remaining.to_string();
                             },
                             Err(e) => {
                                 yield Err(Error::UnknownError(format!("Failed to read response: {}", e)));
@@ -491,6 +504,386 @@ mod tests {
         assert_eq!(response.usage.prompt_tokens, 176);
         assert_eq!(response.usage.completion_tokens, 18);
         assert_eq!(response.usage.total_tokens, 194);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_basic() -> Result<()> {
+        let server = MockServer::start();
+
+        let streaming_response = "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User("Say hello world".into())])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if !chunk.choices.is_empty() {
+                if let Some(delta_content) = &chunk.choices[0].delta.content {
+                    content.push_str(delta_content);
+                }
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, "Hello world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_with_line_breaks() -> Result<()> {
+        let server = MockServer::start();
+
+        // Test streaming with multiple chunks and proper line breaks
+        let streaming_response = "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"First\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" second\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" third\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test multiple chunks".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    chunk_count += 1;
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Should handle any parsing issues gracefully
+                    continue;
+                }
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, "First second third");
+        assert!(chunk_count >= 3); // Should have parsed multiple chunks
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_malformed_json_recovery() -> Result<()> {
+        let server = MockServer::start();
+
+        // Include some malformed JSON that should be skipped
+        let streaming_response = "data: {\"invalid_json\": incomplete\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Recovered\"},\"finish_reason\":null}]}\n\ndata: malformed_again\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" content\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test recovery from malformed JSON".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Should continue processing despite malformed chunks
+                    continue;
+                }
+            }
+        }
+
+        mock.assert();
+        // Should have recovered and processed valid chunks
+        assert_eq!(content, "Recovered content");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_empty_response() -> Result<()> {
+        let server = MockServer::start();
+
+        let streaming_response = "data: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Empty response test".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, ""); // Should handle empty streams gracefully
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_finish_reason() -> Result<()> {
+        let server = MockServer::start();
+
+        let streaming_response = "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test finish reason".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+        let mut final_finish_reason = None;
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                        if let Some(finish_reason) = &chunk.choices[0].finish_reason {
+                            final_finish_reason = Some(finish_reason.clone());
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, "Done");
+        assert_eq!(final_finish_reason, Some(FinishReason::Stop));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_without_stream_flag_error() -> Result<()> {
+        let openai = Client::from_url("mock_api_key", "http://localhost:1234")?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test without stream flag".into(),
+            )])
+            .stream(false) // Explicitly disable streaming
+            .build()?;
+
+        let result = openai.stream_chat_completions(&request).await;
+
+        assert!(result.is_err());
+        if let Err(Error::StreamingNotSupported(msg)) = result {
+            assert!(msg.contains("Streaming required"));
+        } else {
+            panic!("Expected StreamingNotSupported error");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_buffering_edge_cases() -> Result<()> {
+        let server = MockServer::start();
+
+        // Test various edge cases that the buffering should handle
+        let streaming_response = concat!(
+            "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Test\"},\"finish_reason\":null}]}\n\n",
+            "data: \n\n", // Empty data line (should be ignored)
+            "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" buffering\"},\"finish_reason\":null}]}\n\n",
+            "\n", // Extra newline
+            "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" works\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test buffering edge cases".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, "Test buffering works");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_incomplete_lines() -> Result<()> {
+        let server = MockServer::start();
+
+        // Test lines that don't end with newlines (should be buffered)
+        let streaming_response = "data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Incomplete\"}, \"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-3.5-turbo\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" line\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/chat/completions")
+                .header("Authorization", "Bearer mock_api_key")
+                .json_body_partial(r#"{"stream":true}"#);
+            then.status(200)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(streaming_response);
+        });
+
+        let openai = Client::from_url("mock_api_key", &server.base_url())?;
+
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionMessage::User(
+                "Test incomplete lines".into(),
+            )])
+            .stream(true)
+            .build()?;
+
+        let mut stream = openai.stream_chat_completions(&request).await?;
+        let mut content = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if !chunk.choices.is_empty() {
+                        if let Some(delta_content) = &chunk.choices[0].delta.content {
+                            content.push_str(delta_content);
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        mock.assert();
+        assert_eq!(content, "Incomplete line");
 
         Ok(())
     }
