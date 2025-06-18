@@ -192,6 +192,7 @@ impl ChatCompletion for Client {
 
         let result_stream = stream! {
             let mut stream = byte_stream;
+            let mut buffer = String::new();
 
             loop {
                 if let Some(token) = &cancellation_token {
@@ -205,23 +206,35 @@ impl ChatCompletion for Client {
                         match chunk_result {
                             Ok(chunk) => {
                                 let chunk_str = String::from_utf8_lossy(&chunk);
+                                buffer.push_str(&chunk_str);
 
-                                for line in chunk_str.lines() {
+                                // Process complete lines
+                                let mut remaining = buffer.as_str();
+                                while let Some(newline_pos) = remaining.find('\n') {
+                                    let line = &remaining[..newline_pos];
+                                    remaining = &remaining[newline_pos + 1..];
+
                                     if line.starts_with("data: ") {
                                         let data = &line[6..];
 
                                         // Check for stream end
                                         if data == "[DONE]" {
-                                            break;
+                                            return;
                                         }
 
-                                        // Parse the JSON response
+                                        // Parse the JSON response - only for complete lines
                                         match serde_json::from_str::<ChatCompletionChunk>(data) {
                                             Ok(v) => yield Ok(v),
-                                            Err(e) => yield Err(Error::SerdeJsonError(e)),
+                                            Err(e) => {
+                                                // Log warning but continue processing
+                                                eprintln!("Warning: Failed to parse chunk: {} - Data: {}", e, data);
+                                            },
                                         }
                                     }
                                 }
+
+                                // Keep remaining incomplete data in buffer
+                                buffer = remaining.to_string();
                             },
                             Err(e) => {
                                 yield Err(Error::UnknownError(format!("Failed to read response: {}", e)));
