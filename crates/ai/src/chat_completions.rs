@@ -228,6 +228,9 @@ pub struct ChatCompletionRequest {
     pub tools: Option<Vec<ChatCompletionTool>>,
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
     #[builder(default = "None")]
     #[serde(skip)]
@@ -452,5 +455,30 @@ mod test {
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("max_completion_tokens"));
         assert!(json.contains("100"));
+    }
+
+    #[test]
+    fn test_parallel_tool_calls() {
+        let request = ChatCompletionRequestBuilder::default()
+            .model("gpt-4".to_string())
+            .messages(vec![ChatCompletionMessage::User("Hello".into())])
+            .parallel_tool_calls(false)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("parallel_tool_calls"));
+        assert!(json.contains("false"));
+
+        let request_true = ChatCompletionRequestBuilder::default()
+            .model("gpt-4".to_string())
+            .messages(vec![ChatCompletionMessage::User("Hello".into())])
+            .parallel_tool_calls(true)
+            .build()
+            .unwrap();
+
+        let json_true = serde_json::to_string(&request_true).unwrap();
+        assert!(json_true.contains("parallel_tool_calls"));
+        assert!(json_true.contains("true"));
     }
 }
