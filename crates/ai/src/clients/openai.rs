@@ -518,7 +518,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -561,7 +561,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -616,7 +616,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -668,7 +668,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -716,7 +716,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -801,7 +801,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
@@ -850,7 +850,7 @@ mod tests {
             when.method(POST)
                 .path("/chat/completions")
                 .header("Authorization", "Bearer mock_api_key")
-                .json_body_partial(r#"{"stream":true}"#);
+                .json_body_includes(r#"{"stream":true}"#);
             then.status(200)
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(streaming_response);
