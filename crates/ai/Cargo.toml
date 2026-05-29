@@ -12,6 +12,7 @@ readme = "../../README.md"
 async-stream.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+regex.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

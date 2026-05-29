@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod azure_openai_responses;
+pub mod cloudflare;
 pub mod faux;
 pub mod images;
 pub mod openai_codex_responses;
