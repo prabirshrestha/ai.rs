@@ -1080,7 +1080,9 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, ModelCost};
+    use crate::types::{Message, ModelCost, ToolResultMessage};
+
+    const COPILOT_RAW_TOOL_CALL_ID: &str = "call_4VnzVawQXPB9MgYib7CiQFEY|I9b95oN1wD/cHXKTw3PpRkL6KkCtzTJhUxMouMWYwHeTo2j3htzfSk7YPx2vifiIM4g3A8XXyOj8q4Bt6SLUG7gqY1E3ELkrkVQNHglRfUmWj84lqxJY+Puieb3VKyX0FB+83TUzn91cDMF/4gzt990IzqVrc+nIb9RRscRD070Du16q1glydVjWR0SBJsE6TbY/esOjFpqplogQqrajm1eI++f3eLi73R6q7hVusY0QbeFySVxABCjhN0lXB04caBe1rzHjYzul6MAXj7uq+0r17VLq+yrtyYhN12wkmFqHeqTyEei6EFPbMy24Nc+IbJlkP0OCg02W+gOnyBFcbi2ctvJFSOhSjt1CqBdqCnnhwUqXjbWiT0wh3DmLScRgTHmGkaI+oAcQQjfic65nxj+TnEkReA==";
 
     fn model() -> Model {
         Model {
@@ -1120,5 +1122,175 @@ mod tests {
         assert_eq!(payload["input"][0]["role"], "developer");
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
+        let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
+        let assistant = AssistantMessage {
+            content: vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "private reasoning".to_string(),
+                    thinking_signature: None,
+                    redacted: None,
+                }),
+                AssistantContent::Text(TextContent {
+                    text: "visible answer".to_string(),
+                    text_signature: None,
+                }),
+            ],
+            api: "anthropic-messages".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 2,
+        };
+        let context = Context {
+            system_prompt: Some("You are concise.".to_string()),
+            messages: vec![Message::user_text("hello"), Message::Assistant(assistant)],
+            tools: Vec::new(),
+        };
+
+        let input = convert_responses_messages(
+            &model,
+            &context,
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+        let message_ids = input
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(message_ids, ["msg_pi_1", "msg_pi_1_1"]);
+    }
+
+    #[test]
+    fn hashes_foreign_tool_item_ids_for_responses_models() {
+        let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
+        let assistant = AssistantMessage {
+            content: vec![AssistantContent::ToolCall(ToolCall {
+                id: COPILOT_RAW_TOOL_CALL_ID.to_string(),
+                name: "edit".to_string(),
+                arguments: json!({ "path": "src/styles/app.css" }),
+                thought_signature: None,
+            })],
+            api: "openai-responses".to_string(),
+            provider: "github-copilot".to_string(),
+            model: "gpt-5.5".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 2,
+        };
+        let tool_result = ToolResultMessage {
+            tool_call_id: COPILOT_RAW_TOOL_CALL_ID.to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ToolResultContent::text("ok")],
+            details: None,
+            is_error: false,
+            timestamp: 3,
+        };
+        let context = Context {
+            system_prompt: Some("You are concise.".to_string()),
+            messages: vec![
+                Message::user_text("Use the tool."),
+                Message::Assistant(assistant),
+                Message::ToolResult(tool_result),
+            ],
+            tools: Vec::new(),
+        };
+
+        let input = convert_responses_messages(
+            &model,
+            &context,
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+        let function_call = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .expect("function_call item");
+        let item_id = function_call
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("function call item id");
+        let raw_item_id = COPILOT_RAW_TOOL_CALL_ID
+            .split_once('|')
+            .expect("raw item id")
+            .1;
+        let expected_item_id = format!("fc_{}", crate::utils::hash::short_hash(raw_item_id));
+
+        assert_eq!(item_id, expected_item_id);
+        assert!(item_id.len() <= 64);
+        assert!(item_id.starts_with("fc_"));
+        assert!(
+            item_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        );
+    }
+
+    #[test]
+    fn tool_result_images_stay_inside_function_call_output() {
+        let model = model();
+        let tool_result = ToolResultMessage {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "get_image".to_string(),
+            content: vec![
+                ToolResultContent::text("A red circle."),
+                ToolResultContent::Image(ImageContent {
+                    data: "iVBORw0KGgo=".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+            ],
+            details: None,
+            is_error: false,
+            timestamp: 2,
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::ToolResult(tool_result)],
+            tools: Vec::new(),
+        };
+
+        let input = convert_responses_messages(
+            &model,
+            &context,
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+        let function_output = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .expect("function_call_output item");
+        let output = function_output
+            .get("output")
+            .and_then(Value::as_array)
+            .expect("content array output");
+
+        assert!(output.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("input_text")
+                && item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains("A red circle."))
+        }));
+        assert!(output.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("input_image")
+                && item
+                    .get("image_url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+        }));
     }
 }
