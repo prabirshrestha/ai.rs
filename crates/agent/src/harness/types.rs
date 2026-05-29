@@ -57,6 +57,17 @@ pub struct SessionMetadata {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonlSessionMetadata {
+    pub id: String,
+    pub created_at: String,
+    pub cwd: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionTreeEntryType {
@@ -348,6 +359,23 @@ pub struct SessionCreateOptions {
     pub id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonlSessionCreateOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonlSessionListOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionForkPosition {
@@ -366,6 +394,30 @@ pub struct SessionForkOptions {
     pub id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonlSessionForkOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<SessionForkPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_path: Option<String>,
+}
+
+impl From<&JsonlSessionForkOptions> for SessionForkOptions {
+    fn from(value: &JsonlSessionForkOptions) -> Self {
+        Self {
+            entry_id: value.entry_id.clone(),
+            position: value.position,
+            id: value.id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoveToSummary {
@@ -381,10 +433,12 @@ pub trait SessionRepo<
     TMetadata = SessionMetadata,
     TCreateOptions = SessionCreateOptions,
     TListOptions = (),
+    TForkOptions = SessionForkOptions,
 >: Send + Sync where
     TMetadata: Clone + Send + Sync + 'static,
     TCreateOptions: Send + Sync + 'static,
     TListOptions: Send + Sync + 'static,
+    TForkOptions: Send + Sync + 'static,
 {
     async fn create(
         &self,
@@ -396,6 +450,6 @@ pub trait SessionRepo<
     async fn fork(
         &self,
         source: TMetadata,
-        options: SessionForkOptions,
+        options: TForkOptions,
     ) -> SessionResult<super::session::Session<TMetadata>>;
 }

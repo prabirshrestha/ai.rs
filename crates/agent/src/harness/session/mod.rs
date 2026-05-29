@@ -1,3 +1,5 @@
+mod jsonl_repo;
+mod jsonl_storage;
 mod memory_repo;
 mod memory_storage;
 mod repo_utils;
@@ -7,6 +9,8 @@ use std::sync::Arc;
 use ai::{Message, TextContent, UserContent, UserMessage, UserMessageContent};
 use serde_json::Value;
 
+pub use jsonl_repo::{JsonlSessionRepo, encode_cwd};
+pub use jsonl_storage::{JsonlSessionStorage, load_jsonl_session_metadata};
 pub use memory_repo::InMemorySessionRepo;
 pub use memory_storage::{InMemorySessionStorage, InMemorySessionStorageOptions};
 pub use repo_utils::{create_entry_id, create_session_id, create_timestamp, get_entries_to_fork};
