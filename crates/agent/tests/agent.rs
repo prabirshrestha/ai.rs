@@ -118,6 +118,16 @@ fn message_role(message: &Message) -> &'static str {
     }
 }
 
+fn user_text(message: &Message) -> Option<&str> {
+    let Message::User(user) = message else {
+        return None;
+    };
+    match &user.content {
+        ai::UserMessageContent::Text(text) => Some(text.as_str()),
+        ai::UserMessageContent::Parts(_) => None,
+    }
+}
+
 struct EchoTool;
 
 #[async_trait]
@@ -241,4 +251,49 @@ async fn stateful_agent_records_tool_result_messages() {
     );
     assert!(state.pending_tool_calls.is_empty());
     assert!(state.streaming_message.is_none());
+}
+
+#[tokio::test]
+async fn stateful_agent_forwards_config_hooks_to_loop() {
+    let captured_api_key = Arc::new(Mutex::new(None));
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let mut options = AgentOptions::new(create_model());
+    options.transform_context = Some(Arc::new(|_messages, _signal| {
+        Box::pin(async { vec![Message::user_text("transformed")] })
+    }));
+    options.convert_to_llm = Some(Arc::new(|messages| Box::pin(async move { messages })));
+    options.get_api_key = Some(Arc::new(|provider| {
+        Box::pin(async move {
+            assert_eq!(provider, "openai");
+            Some("dynamic-key".to_string())
+        })
+    }));
+    options.stream_fn = Some(Arc::new({
+        let captured_api_key = captured_api_key.clone();
+        let captured_messages = captured_messages.clone();
+        move |_model: Model, context: Context, options: SimpleStreamOptions| {
+            let captured_api_key = captured_api_key.clone();
+            let captured_messages = captured_messages.clone();
+            Box::pin(async move {
+                *captured_api_key.lock().await = options.stream.api_key;
+                *captured_messages.lock().await = context.messages;
+                let message = assistant_text("ok");
+                let reason = message.stop_reason;
+                let (mut sender, stream) = AssistantMessageEventStream::channel();
+                sender.push(AssistantMessageEvent::Done { reason, message });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+
+    agent.prompt_text("original", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        captured_api_key.lock().await.as_deref(),
+        Some("dynamic-key")
+    );
+    let messages = captured_messages.lock().await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(user_text(&messages[0]), Some("transformed"));
 }

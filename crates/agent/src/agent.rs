@@ -10,8 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::types::{
-    AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage, DynAgentTool,
-    QueueMode, StreamFn, ToolExecutionMode, user_message,
+    AfterToolCallFn, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage,
+    BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn, PrepareNextTurnFn, QueueMode,
+    ShouldStopAfterTurnFn, StreamFn, ToolExecutionMode, TransformContextFn, user_message,
 };
 use crate::{AgentError, Result};
 
@@ -47,7 +48,14 @@ impl AgentState {
 #[derive(Clone)]
 pub struct AgentOptions {
     pub initial_state: AgentState,
+    pub convert_to_llm: Option<ConvertToLlmFn>,
+    pub transform_context: Option<TransformContextFn>,
     pub stream_fn: Option<StreamFn>,
+    pub get_api_key: Option<GetApiKeyFn>,
+    pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
+    pub prepare_next_turn: Option<PrepareNextTurnFn>,
+    pub before_tool_call: Option<BeforeToolCallFn>,
+    pub after_tool_call: Option<AfterToolCallFn>,
     pub session_id: Option<String>,
     pub options: SimpleStreamOptions,
     pub steering_mode: QueueMode,
@@ -59,7 +67,14 @@ impl AgentOptions {
     pub fn new(model: Model) -> Self {
         Self {
             initial_state: AgentState::new(model),
+            convert_to_llm: None,
+            transform_context: None,
             stream_fn: None,
+            get_api_key: None,
+            should_stop_after_turn: None,
+            prepare_next_turn: None,
+            before_tool_call: None,
+            after_tool_call: None,
             session_id: None,
             options: SimpleStreamOptions::default(),
             steering_mode: QueueMode::OneAtATime,
@@ -113,7 +128,14 @@ pub struct Agent {
     listeners: Arc<Mutex<Vec<AgentEventSink>>>,
     steering_queue: Arc<Mutex<PendingMessageQueue>>,
     follow_up_queue: Arc<Mutex<PendingMessageQueue>>,
+    convert_to_llm: Option<ConvertToLlmFn>,
+    transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
+    get_api_key: Option<GetApiKeyFn>,
+    should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
+    prepare_next_turn: Option<PrepareNextTurnFn>,
+    before_tool_call: Option<BeforeToolCallFn>,
+    after_tool_call: Option<AfterToolCallFn>,
     session_id: Option<String>,
     base_options: SimpleStreamOptions,
     active_token: Arc<Mutex<Option<CancellationToken>>>,
@@ -127,7 +149,14 @@ impl Agent {
             listeners: Arc::new(Mutex::new(Vec::new())),
             steering_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.steering_mode))),
             follow_up_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.follow_up_mode))),
+            convert_to_llm: options.convert_to_llm,
+            transform_context: options.transform_context,
             stream_fn: options.stream_fn,
+            get_api_key: options.get_api_key,
+            should_stop_after_turn: options.should_stop_after_turn,
+            prepare_next_turn: options.prepare_next_turn,
+            before_tool_call: options.before_tool_call,
+            after_tool_call: options.after_tool_call,
             session_id: options.session_id,
             base_options: options.options,
             active_token: Arc::new(Mutex::new(None)),
@@ -333,11 +362,11 @@ impl Agent {
         AgentLoopConfig {
             model: state.model.clone(),
             options,
-            convert_to_llm: None,
-            transform_context: None,
-            get_api_key: None,
-            should_stop_after_turn: None,
-            prepare_next_turn: None,
+            convert_to_llm: self.convert_to_llm.clone(),
+            transform_context: self.transform_context.clone(),
+            get_api_key: self.get_api_key.clone(),
+            should_stop_after_turn: self.should_stop_after_turn.clone(),
+            prepare_next_turn: self.prepare_next_turn.clone(),
             get_steering_messages: Some(Arc::new(move || {
                 let steering_queue = steering_queue.clone();
                 Box::pin(async move { steering_queue.lock().await.drain() })
@@ -346,8 +375,8 @@ impl Agent {
                 let follow_up_queue = follow_up_queue.clone();
                 Box::pin(async move { follow_up_queue.lock().await.drain() })
             })),
-            before_tool_call: None,
-            after_tool_call: None,
+            before_tool_call: self.before_tool_call.clone(),
+            after_tool_call: self.after_tool_call.clone(),
             tool_execution: self.tool_execution,
         }
     }
