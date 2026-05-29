@@ -1,13 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use ai::{Message, UserContent, UserMessage, UserMessageContent};
+use ai::{
+    AssistantContent, Context, Message, Model, SimpleStreamOptions, StopReason, StreamOptions,
+    UserContent, UserMessage, UserMessageContent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
-use super::planning::estimate_tokens;
-use super::utils::{FileOperations, create_file_ops, extract_file_ops_from_message};
+use super::planning::{SUMMARIZATION_SYSTEM_PROMPT, estimate_tokens};
+use super::utils::{
+    FileOperations, compute_file_lists, create_file_ops, extract_file_ops_from_message,
+    format_file_operations, serialize_conversation,
+};
 use crate::harness::session::Session;
-use crate::harness::types::{SessionError, SessionErrorCode, SessionResult, SessionTreeEntry};
+use crate::harness::types::{
+    BranchSummaryError, BranchSummaryErrorCode, BranchSummaryGenerationResult, SessionError,
+    SessionErrorCode, SessionResult, SessionTreeEntry,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +37,39 @@ pub struct BranchPreparation {
 pub struct CollectEntriesResult {
     pub entries: Vec<SessionTreeEntry>,
     pub common_ancestor_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateBranchSummaryOptions {
+    pub model: Model,
+    pub api_key: String,
+    pub headers: HashMap<String, String>,
+    pub cancellation_token: Option<CancellationToken>,
+    pub custom_instructions: Option<String>,
+    pub replace_instructions: bool,
+    pub reserve_tokens: usize,
+}
+
+impl GenerateBranchSummaryOptions {
+    pub fn new(model: Model, api_key: impl Into<String>) -> Self {
+        Self {
+            model,
+            api_key: api_key.into(),
+            headers: HashMap::new(),
+            cancellation_token: None,
+            custom_instructions: None,
+            replace_instructions: false,
+            reserve_tokens: DEFAULT_BRANCH_SUMMARY_RESERVE_TOKENS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummaryResult {
+    pub summary: String,
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
 }
 
 pub async fn collect_entries_for_branch_summary<TMetadata>(
@@ -124,6 +167,149 @@ pub fn prepare_branch_entries(
         file_ops,
         total_tokens,
     }
+}
+
+const DEFAULT_BRANCH_SUMMARY_RESERVE_TOKENS: usize = 16_384;
+
+const BRANCH_SUMMARY_PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
+
+const BRANCH_SUMMARY_PROMPT: &str = r#"Create a structured summary of this conversation branch for context when returning later.
+
+Use this EXACT format:
+
+## Goal
+[What was the user trying to accomplish in this branch?]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Work that was started but not finished]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [What should happen next to continue this work]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."#;
+
+pub async fn generate_branch_summary(
+    entries: &[SessionTreeEntry],
+    options: GenerateBranchSummaryOptions,
+) -> BranchSummaryGenerationResult<BranchSummaryResult> {
+    let context_window = if options.model.context_window == 0 {
+        128_000
+    } else {
+        options.model.context_window as usize
+    };
+    let token_budget = context_window.saturating_sub(options.reserve_tokens);
+    let BranchPreparation {
+        messages, file_ops, ..
+    } = prepare_branch_entries(entries, Some(token_budget));
+
+    if messages.is_empty() {
+        return Ok(BranchSummaryResult {
+            summary: "No content to summarize".to_string(),
+            read_files: Vec::new(),
+            modified_files: Vec::new(),
+        });
+    }
+
+    let conversation_text = serialize_conversation(&messages);
+    let instructions = match (
+        options.replace_instructions,
+        options.custom_instructions.as_deref(),
+    ) {
+        (true, Some(custom_instructions)) => custom_instructions.to_string(),
+        (false, Some(custom_instructions)) => {
+            format!("{BRANCH_SUMMARY_PROMPT}\n\nAdditional focus: {custom_instructions}")
+        }
+        _ => BRANCH_SUMMARY_PROMPT.to_string(),
+    };
+    let prompt_text =
+        format!("<conversation>\n{conversation_text}\n</conversation>\n\n{instructions}");
+    let summarization_messages = vec![Message::User(UserMessage {
+        content: UserMessageContent::Parts(vec![UserContent::text(prompt_text)]),
+        timestamp: ai::utils::time::now_millis(),
+    })];
+
+    let response = ai::complete_simple(
+        options.model,
+        Context {
+            system_prompt: Some(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+            messages: summarization_messages,
+            tools: Vec::new(),
+        },
+        Some(SimpleStreamOptions {
+            stream: StreamOptions {
+                max_tokens: Some(2048),
+                cancellation_token: options.cancellation_token,
+                api_key: Some(options.api_key),
+                headers: options.headers,
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+    .await
+    .map_err(|error| {
+        BranchSummaryError::new(
+            BranchSummaryErrorCode::SummarizationFailed,
+            format!("Branch summary failed: {error}"),
+        )
+    })?;
+
+    if response.stop_reason == StopReason::Aborted {
+        return Err(BranchSummaryError::new(
+            BranchSummaryErrorCode::Aborted,
+            response
+                .error_message
+                .unwrap_or_else(|| "Branch summary aborted".to_string()),
+        ));
+    }
+    if response.stop_reason == StopReason::Error {
+        return Err(BranchSummaryError::new(
+            BranchSummaryErrorCode::SummarizationFailed,
+            format!(
+                "Branch summary failed: {}",
+                response
+                    .error_message
+                    .unwrap_or_else(|| "Unknown error".to_string())
+            ),
+        ));
+    }
+
+    let mut summary = response
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    summary = format!("{BRANCH_SUMMARY_PREAMBLE}{summary}");
+    let (read_files, modified_files) = compute_file_lists(&file_ops);
+    summary.push_str(&format_file_operations(&read_files, &modified_files));
+
+    Ok(BranchSummaryResult {
+        summary: if summary.is_empty() {
+            "No summary generated".to_string()
+        } else {
+            summary
+        },
+        read_files,
+        modified_files,
+    })
 }
 
 fn get_message_from_entry(entry: &SessionTreeEntry) -> Option<Message> {

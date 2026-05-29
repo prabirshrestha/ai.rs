@@ -25,6 +25,8 @@ pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
     keep_recent_tokens: 20_000,
 };
 
+pub const SUMMARIZATION_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
+
 pub fn calculate_context_tokens(usage: &Usage) -> usize {
     let total = usage.total_tokens;
     if total > 0 {

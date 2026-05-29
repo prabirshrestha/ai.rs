@@ -194,6 +194,36 @@ impl CompactionError {
 
 pub type CompactionResult<T> = std::result::Result<T, CompactionError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchSummaryErrorCode {
+    Aborted,
+    SummarizationFailed,
+    InvalidSession,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct BranchSummaryError {
+    pub code: BranchSummaryErrorCode,
+    message: String,
+}
+
+impl BranchSummaryError {
+    pub fn new(code: BranchSummaryErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+pub type BranchSummaryGenerationResult<T> = std::result::Result<T, BranchSummaryError>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
