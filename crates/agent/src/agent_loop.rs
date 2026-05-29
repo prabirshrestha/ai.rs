@@ -352,7 +352,9 @@ async fn execute_tool_calls_sequential(
         let finalized =
             execute_one_tool(context, tool_call, emit.clone(), cancellation_token.clone()).await?;
         terminate_flags.push(finalized.2.terminate);
-        results.push(create_tool_result_message(finalized));
+        let result_message = create_tool_result_message(finalized);
+        emit_tool_result_message(&result_message, &emit).await?;
+        results.push(result_message);
         if cancellation_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -388,6 +390,9 @@ async fn execute_tool_calls_parallel(
         let finalized = item?;
         terminate_flags.push(finalized.2.terminate);
         messages.push(create_tool_result_message(finalized));
+    }
+    for message in &messages {
+        emit_tool_result_message(message, &emit).await?;
     }
     Ok(ExecutedToolBatch {
         messages,
@@ -490,4 +495,16 @@ fn create_tool_result_message(
         is_error,
         timestamp: ai::utils::time::now_millis(),
     }
+}
+
+async fn emit_tool_result_message(
+    message: &ToolResultMessage,
+    emit: &AgentEventSink,
+) -> Result<()> {
+    let message = ai::Message::ToolResult(message.clone());
+    emit(AgentEvent::MessageStart {
+        message: message.clone(),
+    })
+    .await?;
+    emit(AgentEvent::MessageEnd { message }).await
 }
