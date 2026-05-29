@@ -113,6 +113,29 @@ pub type MessageQueueFn =
 pub type ShouldStopAfterTurnFn = Arc<
     dyn Fn(ShouldStopAfterTurnContext) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
 >;
+pub type PrepareNextTurnFn = Arc<
+    dyn Fn(
+            PrepareNextTurnContext,
+        ) -> Pin<Box<dyn Future<Output = Option<AgentLoopTurnUpdate>> + Send>>
+        + Send
+        + Sync,
+>;
+pub type BeforeToolCallFn = Arc<
+    dyn Fn(
+            BeforeToolCallContext,
+            Option<CancellationToken>,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<BeforeToolCallResult>>> + Send>>
+        + Send
+        + Sync,
+>;
+pub type AfterToolCallFn = Arc<
+    dyn Fn(
+            AfterToolCallContext,
+            Option<CancellationToken>,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<AfterToolCallResult>>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -122,8 +145,11 @@ pub struct AgentLoopConfig {
     pub transform_context: Option<TransformContextFn>,
     pub get_api_key: Option<GetApiKeyFn>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
+    pub prepare_next_turn: Option<PrepareNextTurnFn>,
     pub get_steering_messages: Option<MessageQueueFn>,
     pub get_follow_up_messages: Option<MessageQueueFn>,
+    pub before_tool_call: Option<BeforeToolCallFn>,
+    pub after_tool_call: Option<AfterToolCallFn>,
     pub tool_execution: ToolExecutionMode,
 }
 
@@ -136,8 +162,11 @@ impl AgentLoopConfig {
             transform_context: None,
             get_api_key: None,
             should_stop_after_turn: None,
+            prepare_next_turn: None,
             get_steering_messages: None,
             get_follow_up_messages: None,
+            before_tool_call: None,
+            after_tool_call: None,
             tool_execution: ToolExecutionMode::Parallel,
         }
     }
@@ -149,6 +178,48 @@ pub struct ShouldStopAfterTurnContext {
     pub tool_results: Vec<ToolResultMessage>,
     pub context: AgentContext,
     pub new_messages: Vec<AgentMessage>,
+}
+
+pub type PrepareNextTurnContext = ShouldStopAfterTurnContext;
+
+#[derive(Clone)]
+pub struct AgentLoopTurnUpdate {
+    pub context: Option<AgentContext>,
+    pub model: Option<Model>,
+    pub reasoning_level: Option<ai::ModelThinkingLevel>,
+}
+
+#[derive(Clone)]
+pub struct BeforeToolCallContext {
+    pub assistant_message: AssistantMessage,
+    pub tool_call: ai::ToolCall,
+    pub args: Value,
+    pub context: AgentContext,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BeforeToolCallResult {
+    pub block: bool,
+    pub reason: Option<String>,
+    pub args: Option<Value>,
+}
+
+#[derive(Clone)]
+pub struct AfterToolCallContext {
+    pub assistant_message: AssistantMessage,
+    pub tool_call: ai::ToolCall,
+    pub args: Value,
+    pub result: AgentToolResult,
+    pub is_error: bool,
+    pub context: AgentContext,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AfterToolCallResult {
+    pub content: Option<Vec<ToolResultContent>>,
+    pub details: Option<Value>,
+    pub is_error: Option<bool>,
+    pub terminate: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

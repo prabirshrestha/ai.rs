@@ -6,8 +6,8 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::types::{
-    AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage, AgentToolResult,
-    ToolExecutionMode, assistant_tool_calls,
+    AfterToolCallContext, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage,
+    AgentToolResult, BeforeToolCallContext, ToolExecutionMode, assistant_tool_calls,
 };
 use crate::{AgentError, Result};
 
@@ -84,7 +84,7 @@ pub async fn run_agent_loop_continue(
 async fn run_loop(
     context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
-    config: AgentLoopConfig,
+    mut config: AgentLoopConfig,
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
     stream_fn: Option<crate::types::StreamFn>,
@@ -167,6 +167,32 @@ async fn run_loop(
                 tool_results: tool_results.clone(),
             })
             .await?;
+
+            if let Some(prepare_next_turn) = config.prepare_next_turn.clone() {
+                if let Some(update) = prepare_next_turn(crate::types::PrepareNextTurnContext {
+                    message: assistant.clone(),
+                    tool_results: tool_results.clone(),
+                    context: context.clone(),
+                    new_messages: new_messages.clone(),
+                })
+                .await
+                {
+                    if let Some(next_context) = update.context {
+                        *context = next_context;
+                    }
+                    if let Some(next_model) = update.model {
+                        config.model = next_model;
+                    }
+                    if let Some(reasoning_level) = update.reasoning_level {
+                        config.options.reasoning = if reasoning_level == ai::ModelThinkingLevel::Off
+                        {
+                            None
+                        } else {
+                            Some(reasoning_level)
+                        };
+                    }
+                }
+            }
 
             if let Some(should_stop) = &config.should_stop_after_turn {
                 if should_stop(crate::types::ShouldStopAfterTurnContext {
@@ -334,23 +360,48 @@ async fn execute_tool_calls(
             == Some(ToolExecutionMode::Sequential)
     });
     if config.tool_execution == ToolExecutionMode::Sequential || has_sequential {
-        execute_tool_calls_sequential(context, tool_calls, emit, cancellation_token).await
+        execute_tool_calls_sequential(
+            context,
+            assistant,
+            tool_calls,
+            config,
+            emit,
+            cancellation_token,
+        )
+        .await
     } else {
-        execute_tool_calls_parallel(context, tool_calls, emit, cancellation_token).await
+        execute_tool_calls_parallel(
+            context,
+            assistant,
+            tool_calls,
+            config,
+            emit,
+            cancellation_token,
+        )
+        .await
     }
 }
 
 async fn execute_tool_calls_sequential(
     context: &AgentContext,
+    assistant: &ai::AssistantMessage,
     tool_calls: Vec<ai::ToolCall>,
+    config: &AgentLoopConfig,
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<ExecutedToolBatch> {
     let mut results = Vec::new();
     let mut terminate_flags = Vec::new();
     for tool_call in tool_calls {
-        let finalized =
-            execute_one_tool(context, tool_call, emit.clone(), cancellation_token.clone()).await?;
+        let finalized = execute_one_tool(
+            context,
+            assistant,
+            tool_call,
+            config,
+            emit.clone(),
+            cancellation_token.clone(),
+        )
+        .await?;
         terminate_flags.push(finalized.2.terminate);
         let result_message = create_tool_result_message(finalized);
         emit_tool_result_message(&result_message, &emit).await?;
@@ -370,7 +421,9 @@ async fn execute_tool_calls_sequential(
 
 async fn execute_tool_calls_parallel(
     context: &AgentContext,
+    assistant: &ai::AssistantMessage,
     tool_calls: Vec<ai::ToolCall>,
+    config: &AgentLoopConfig,
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<ExecutedToolBatch> {
@@ -378,9 +431,21 @@ async fn execute_tool_calls_parallel(
         .into_iter()
         .map(|tool_call| {
             let context = context.clone();
+            let assistant = assistant.clone();
+            let config = config.clone();
             let emit = emit.clone();
             let cancellation_token = cancellation_token.clone();
-            async move { execute_one_tool(&context, tool_call, emit, cancellation_token).await }
+            async move {
+                execute_one_tool(
+                    &context,
+                    &assistant,
+                    tool_call,
+                    &config,
+                    emit,
+                    cancellation_token,
+                )
+                .await
+            }
         })
         .collect::<Vec<_>>();
     let finalized = futures::future::join_all(futures).await;
@@ -402,7 +467,9 @@ async fn execute_tool_calls_parallel(
 
 async fn execute_one_tool(
     context: &AgentContext,
+    assistant: &ai::AssistantMessage,
     tool_call: ai::ToolCall,
+    config: &AgentLoopConfig,
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<(ai::ToolCall, bool, AgentToolResult)> {
@@ -430,7 +497,7 @@ async fn execute_one_tool(
         return Ok((tool_call, true, result));
     };
 
-    let prepared_args = match tool.prepare_arguments(tool_call.arguments.clone()) {
+    let mut prepared_args = match tool.prepare_arguments(tool_call.arguments.clone()) {
         Ok(args) => args,
         Err(error) => {
             let result = AgentToolResult::text(error.to_string());
@@ -444,6 +511,68 @@ async fn execute_one_tool(
             return Ok((tool_call, true, result));
         }
     };
+
+    if let Some(before_tool_call) = &config.before_tool_call {
+        match before_tool_call(
+            BeforeToolCallContext {
+                assistant_message: assistant.clone(),
+                tool_call: tool_call.clone(),
+                args: prepared_args.clone(),
+                context: context.clone(),
+            },
+            cancellation_token.clone(),
+        )
+        .await
+        {
+            Ok(Some(before_result)) => {
+                if before_result.block {
+                    let result = AgentToolResult::text(
+                        before_result
+                            .reason
+                            .unwrap_or_else(|| "Tool execution was blocked".to_string()),
+                    );
+                    emit(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        result: result.clone(),
+                        is_error: true,
+                    })
+                    .await?;
+                    return Ok((tool_call, true, result));
+                }
+                if let Some(args) = before_result.args {
+                    prepared_args = args;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let result = AgentToolResult::text(error.to_string());
+                emit(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    result: result.clone(),
+                    is_error: true,
+                })
+                .await?;
+                return Ok((tool_call, true, result));
+            }
+        }
+    }
+
+    if cancellation_token
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        let result = AgentToolResult::text("Operation aborted");
+        emit(AgentEvent::ToolExecutionEnd {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            result: result.clone(),
+            is_error: true,
+        })
+        .await?;
+        return Ok((tool_call, true, result));
+    }
 
     let emit_for_update = emit.clone();
     let update_tool_call = tool_call.clone();
@@ -461,10 +590,10 @@ async fn execute_one_tool(
         }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     });
 
-    let (is_error, result) = match tool
+    let (mut is_error, mut result) = match tool
         .execute(
             &tool_call.id,
-            prepared_args,
+            prepared_args.clone(),
             cancellation_token.clone(),
             Some(on_update),
         )
@@ -473,6 +602,43 @@ async fn execute_one_tool(
         Ok(result) => (false, result),
         Err(error) => (true, AgentToolResult::text(error.to_string())),
     };
+
+    if let Some(after_tool_call) = &config.after_tool_call {
+        match after_tool_call(
+            AfterToolCallContext {
+                assistant_message: assistant.clone(),
+                tool_call: tool_call.clone(),
+                args: prepared_args,
+                result: result.clone(),
+                is_error,
+                context: context.clone(),
+            },
+            cancellation_token.clone(),
+        )
+        .await
+        {
+            Ok(Some(after_result)) => {
+                if let Some(content) = after_result.content {
+                    result.content = content;
+                }
+                if let Some(details) = after_result.details {
+                    result.details = Some(details);
+                }
+                if let Some(terminate) = after_result.terminate {
+                    result.terminate = terminate;
+                }
+                if let Some(next_is_error) = after_result.is_error {
+                    is_error = next_is_error;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                result = AgentToolResult::text(error.to_string());
+                is_error = true;
+            }
+        }
+    }
+
     emit(AgentEvent::ToolExecutionEnd {
         tool_call_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),

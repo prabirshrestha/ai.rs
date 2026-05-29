@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use agent::{
-    AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentTool, AgentToolResult,
-    StreamFn, ToolExecutionMode, run_agent_loop,
+    AfterToolCallResult, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig,
+    AgentLoopTurnUpdate, AgentTool, AgentToolResult, BeforeToolCallResult, StreamFn,
+    ToolExecutionMode, run_agent_loop,
 };
 use ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
@@ -120,6 +121,13 @@ fn message_role(message: &Message) -> &'static str {
         Message::Assistant(_) => "assistant",
         Message::ToolResult(_) => "toolResult",
     }
+}
+
+fn tool_result_text(content: &[ToolResultContent]) -> Option<&str> {
+    content.iter().find_map(|content| match content {
+        ToolResultContent::Text(text) => Some(text.text.as_str()),
+        ToolResultContent::Image(_) => None,
+    })
 }
 
 #[derive(Clone)]
@@ -428,4 +436,253 @@ async fn parallel_tool_end_events_follow_completion_order_but_results_use_source
     assert!(parallel_observed.load(Ordering::SeqCst));
     assert_eq!(tool_end_ids, ["tool-2", "tool-1"]);
     assert_eq!(tool_result_ids, ["tool-1", "tool-2"]);
+}
+
+#[tokio::test]
+async fn before_tool_call_can_override_arguments_without_revalidating() {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(EchoTool::new(executed.clone()));
+    let context = AgentContext {
+        system_prompt: Some(String::new()),
+        messages: Vec::new(),
+        tools: vec![tool],
+    };
+    let mut config = AgentLoopConfig::new(create_model());
+    config.before_tool_call = Some(Arc::new(|context, _signal| {
+        Box::pin(async move {
+            assert_eq!(context.tool_call.id, "tool-1");
+            assert_eq!(context.args, json!({ "value": "original" }));
+            Ok(Some(BeforeToolCallResult {
+                args: Some(json!({ "value": "changed" })),
+                ..BeforeToolCallResult::default()
+            }))
+        })
+    }));
+
+    run_agent_loop(
+        vec![Message::user_text("echo something")],
+        context,
+        config,
+        collecting_sink(Arc::new(Mutex::new(Vec::new()))),
+        None,
+        Some(scripted_stream(vec![
+            assistant_message(
+                vec![assistant_tool_call(
+                    "tool-1",
+                    "echo",
+                    json!({ "value": "original" }),
+                )],
+                StopReason::ToolUse,
+            ),
+            assistant_text("done"),
+        ])),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(executed.lock().await.as_slice(), ["changed"]);
+}
+
+#[tokio::test]
+async fn before_tool_call_can_block_execution_with_error_tool_result() {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(EchoTool::new(executed.clone()));
+    let context = AgentContext {
+        system_prompt: Some(String::new()),
+        messages: Vec::new(),
+        tools: vec![tool],
+    };
+    let mut config = AgentLoopConfig::new(create_model());
+    config.before_tool_call = Some(Arc::new(|_context, _signal| {
+        Box::pin(async move {
+            Ok(Some(BeforeToolCallResult {
+                block: true,
+                reason: Some("blocked by policy".to_string()),
+                args: None,
+            }))
+        })
+    }));
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("echo something")],
+        context,
+        config,
+        collecting_sink(events.clone()),
+        None,
+        Some(scripted_stream(vec![
+            assistant_message(
+                vec![assistant_tool_call(
+                    "tool-1",
+                    "echo",
+                    json!({ "value": "hello" }),
+                )],
+                StopReason::ToolUse,
+            ),
+            assistant_text("done"),
+        ])),
+    )
+    .await
+    .unwrap();
+
+    assert!(executed.lock().await.is_empty());
+    assert_eq!(
+        messages.iter().map(message_role).collect::<Vec<_>>(),
+        ["user", "assistant", "toolResult", "assistant"]
+    );
+    let events = events.lock().await;
+    let tool_result = events.iter().find_map(|event| match event {
+        AgentEvent::MessageEnd {
+            message: Message::ToolResult(result),
+        } => Some(result),
+        _ => None,
+    });
+    let tool_result = tool_result.expect("tool result event");
+    assert!(tool_result.is_error);
+    assert_eq!(
+        tool_result_text(&tool_result.content),
+        Some("blocked by policy")
+    );
+}
+
+#[tokio::test]
+async fn after_tool_call_can_override_result_and_terminate_batch() {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(EchoTool::new(executed.clone()));
+    let context = AgentContext {
+        system_prompt: Some(String::new()),
+        messages: Vec::new(),
+        tools: vec![tool],
+    };
+    let mut config = AgentLoopConfig::new(create_model());
+    config.after_tool_call = Some(Arc::new(|context, _signal| {
+        Box::pin(async move {
+            assert!(!context.is_error);
+            assert_eq!(context.args, json!({ "value": "hello" }));
+            Ok(Some(AfterToolCallResult {
+                content: Some(vec![ToolResultContent::text("overridden")]),
+                details: Some(json!({ "source": "after" })),
+                is_error: Some(false),
+                terminate: Some(true),
+            }))
+        })
+    }));
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("echo something")],
+        context,
+        config,
+        collecting_sink(events.clone()),
+        None,
+        Some(scripted_stream(vec![assistant_message(
+            vec![assistant_tool_call(
+                "tool-1",
+                "echo",
+                json!({ "value": "hello" }),
+            )],
+            StopReason::ToolUse,
+        )])),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(executed.lock().await.as_slice(), ["hello"]);
+    assert_eq!(
+        messages.iter().map(message_role).collect::<Vec<_>>(),
+        ["user", "assistant", "toolResult"]
+    );
+    let events = events.lock().await;
+    let tool_result = events.iter().find_map(|event| match event {
+        AgentEvent::MessageEnd {
+            message: Message::ToolResult(result),
+        } => Some(result),
+        _ => None,
+    });
+    let tool_result = tool_result.expect("tool result event");
+    assert_eq!(tool_result_text(&tool_result.content), Some("overridden"));
+    assert_eq!(tool_result.details, Some(json!({ "source": "after" })));
+}
+
+#[tokio::test]
+async fn prepare_next_turn_updates_context_before_continuing() {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(EchoTool::new(executed));
+    let context = AgentContext {
+        system_prompt: Some("first prompt".to_string()),
+        messages: Vec::new(),
+        tools: vec![tool],
+    };
+    let prepared = Arc::new(AtomicBool::new(false));
+    let mut config = AgentLoopConfig::new(create_model());
+    config.prepare_next_turn = Some(Arc::new({
+        let prepared = prepared.clone();
+        move |context| {
+            let prepared = prepared.clone();
+            Box::pin(async move {
+                if prepared.swap(true, Ordering::SeqCst) {
+                    return None;
+                }
+                Some(AgentLoopTurnUpdate {
+                    context: Some(AgentContext {
+                        system_prompt: Some("second prompt".to_string()),
+                        messages: context.context.messages,
+                        tools: context.context.tools,
+                    }),
+                    model: None,
+                    reasoning_level: None,
+                })
+            })
+        }
+    }));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let second_system_prompt = Arc::new(Mutex::new(None));
+    let stream_fn: StreamFn = Arc::new({
+        let calls = calls.clone();
+        let second_system_prompt = second_system_prompt.clone();
+        move |_model, context, _options| {
+            let calls = calls.clone();
+            let second_system_prompt = second_system_prompt.clone();
+            Box::pin(async move {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 2 {
+                    *second_system_prompt.lock().await = context.system_prompt.clone();
+                }
+                let message = if call == 1 {
+                    assistant_message(
+                        vec![assistant_tool_call(
+                            "tool-1",
+                            "echo",
+                            json!({ "value": "hello" }),
+                        )],
+                        StopReason::ToolUse,
+                    )
+                } else {
+                    assistant_text("done")
+                };
+                let reason = message.stop_reason;
+                let (mut sender, stream) = AssistantMessageEventStream::channel();
+                sender.push(AssistantMessageEvent::Done { reason, message });
+                Ok(stream)
+            })
+        }
+    });
+
+    run_agent_loop(
+        vec![Message::user_text("echo something")],
+        context,
+        config,
+        collecting_sink(Arc::new(Mutex::new(Vec::new()))),
+        None,
+        Some(stream_fn),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        second_system_prompt.lock().await.as_deref(),
+        Some("second prompt")
+    );
 }

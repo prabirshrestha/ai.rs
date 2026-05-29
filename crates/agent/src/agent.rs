@@ -283,6 +283,7 @@ impl Agent {
             transform_context: None,
             get_api_key: None,
             should_stop_after_turn: None,
+            prepare_next_turn: None,
             get_steering_messages: Some(Arc::new(move || {
                 let steering_queue = steering_queue.clone();
                 Box::pin(async move { steering_queue.lock().await.drain() })
@@ -291,6 +292,8 @@ impl Agent {
                 let follow_up_queue = follow_up_queue.clone();
                 Box::pin(async move { follow_up_queue.lock().await.drain() })
             })),
+            before_tool_call: None,
+            after_tool_call: None,
             tool_execution: self.tool_execution,
         }
     }
