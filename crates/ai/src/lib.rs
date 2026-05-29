@@ -7,6 +7,7 @@ pub mod images;
 pub mod images_api_registry;
 pub mod models;
 pub mod providers;
+pub mod session_resources;
 pub mod stream;
 pub mod types;
 pub mod utils;
@@ -27,6 +28,10 @@ pub use providers::faux::{
     FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,
     RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
     register_faux_provider,
+};
+pub use session_resources::{
+    SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
+    register_session_resource_cleanup,
 };
 pub use stream::{complete, complete_simple, stream, stream_simple};
 pub use types::*;
