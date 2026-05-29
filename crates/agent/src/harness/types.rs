@@ -163,6 +163,37 @@ impl ExecutionError {
 pub type FileResult<T> = std::result::Result<T, FileError>;
 pub type ExecutionResult<T> = std::result::Result<T, ExecutionError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionErrorCode {
+    Aborted,
+    SummarizationFailed,
+    InvalidSession,
+    Unknown,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct CompactionError {
+    pub code: CompactionErrorCode,
+    message: String,
+}
+
+impl CompactionError {
+    pub fn new(code: CompactionErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+pub type CompactionResult<T> = std::result::Result<T, CompactionError>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
