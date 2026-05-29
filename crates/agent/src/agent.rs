@@ -217,7 +217,7 @@ impl Agent {
     }
 
     pub async fn prompt_messages(&self, messages: Vec<AgentMessage>) -> Result<()> {
-        self.run_with_lifecycle(messages, false).await
+        self.run_with_lifecycle(messages, false, false).await
     }
 
     pub async fn continue_run(&self) -> Result<()> {
@@ -227,17 +227,17 @@ impl Agent {
             Some(Message::Assistant(_)) => {
                 let queued = self.steering_queue.lock().await.drain();
                 if !queued.is_empty() {
-                    self.run_with_lifecycle(queued, false).await
+                    self.run_with_lifecycle(queued, false, true).await
                 } else {
                     let follow_up = self.follow_up_queue.lock().await.drain();
                     if follow_up.is_empty() {
                         Err(AgentError::CannotContinueFromAssistant)
                     } else {
-                        self.run_with_lifecycle(follow_up, false).await
+                        self.run_with_lifecycle(follow_up, false, false).await
                     }
                 }
             }
-            Some(_) => self.run_with_lifecycle(Vec::new(), true).await,
+            Some(_) => self.run_with_lifecycle(Vec::new(), true, false).await,
         }
     }
 
@@ -245,6 +245,7 @@ impl Agent {
         &self,
         prompts: Vec<AgentMessage>,
         continue_existing: bool,
+        skip_initial_steering_poll: bool,
     ) -> Result<()> {
         {
             let mut active = self.active_token.lock().await;
@@ -264,7 +265,7 @@ impl Agent {
         let result = if continue_existing {
             run_agent_loop_continue(
                 self.create_context_snapshot().await,
-                self.create_loop_config().await,
+                self.create_loop_config(skip_initial_steering_poll).await,
                 self.event_sink(),
                 token.clone(),
                 self.stream_fn.clone(),
@@ -274,7 +275,7 @@ impl Agent {
             run_agent_loop(
                 prompts,
                 self.create_context_snapshot().await,
-                self.create_loop_config().await,
+                self.create_loop_config(skip_initial_steering_poll).await,
                 self.event_sink(),
                 token.clone(),
                 self.stream_fn.clone(),
@@ -351,7 +352,7 @@ impl Agent {
         }
     }
 
-    async fn create_loop_config(&self) -> AgentLoopConfig {
+    async fn create_loop_config(&self, skip_initial_steering_poll: bool) -> AgentLoopConfig {
         let state = self.state.lock().await;
         let mut options = self.base_options.clone();
         options.reasoning = state.reasoning_level;
@@ -359,6 +360,7 @@ impl Agent {
 
         let steering_queue = self.steering_queue.clone();
         let follow_up_queue = self.follow_up_queue.clone();
+        let skip_initial_steering_poll = Arc::new(Mutex::new(skip_initial_steering_poll));
         AgentLoopConfig {
             model: state.model.clone(),
             options,
@@ -369,7 +371,17 @@ impl Agent {
             prepare_next_turn: self.prepare_next_turn.clone(),
             get_steering_messages: Some(Arc::new(move || {
                 let steering_queue = steering_queue.clone();
-                Box::pin(async move { steering_queue.lock().await.drain() })
+                let skip_initial_steering_poll = skip_initial_steering_poll.clone();
+                Box::pin(async move {
+                    let mut skip = skip_initial_steering_poll.lock().await;
+                    if *skip {
+                        *skip = false;
+                        Vec::new()
+                    } else {
+                        drop(skip);
+                        steering_queue.lock().await.drain()
+                    }
+                })
             })),
             get_follow_up_messages: Some(Arc::new(move || {
                 let follow_up_queue = follow_up_queue.clone();

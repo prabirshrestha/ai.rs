@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use agent::{
     Agent, AgentEvent, AgentEventSink, AgentOptions, AgentTool, AgentToolResult, StreamFn,
@@ -296,4 +299,47 @@ async fn stateful_agent_forwards_config_hooks_to_loop() {
     let messages = captured_messages.lock().await;
     assert_eq!(messages.len(), 1);
     assert_eq!(user_text(&messages[0]), Some("transformed"));
+}
+
+#[tokio::test]
+async fn continue_from_assistant_preserves_one_at_a_time_steering() {
+    let response_count = Arc::new(AtomicUsize::new(0));
+    let mut options = AgentOptions::new(create_model());
+    options.initial_state.messages = vec![
+        Message::user_text("Initial"),
+        Message::Assistant(assistant_text("Initial response")),
+    ];
+    options.stream_fn = Some(Arc::new({
+        let response_count = response_count.clone();
+        move |_model: Model, _context: Context, _options: SimpleStreamOptions| {
+            let response_count = response_count.clone();
+            Box::pin(async move {
+                let count = response_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let message = assistant_text(&format!("Processed {count}"));
+                let reason = message.stop_reason;
+                let (mut sender, stream) = AssistantMessageEventStream::channel();
+                sender.push(AssistantMessageEvent::Done { reason, message });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+    agent.steer(Message::user_text("Steering 1")).await;
+    agent.steer(Message::user_text("Steering 2")).await;
+
+    agent.continue_run().await.unwrap();
+
+    let state = agent.state().await;
+    let recent_roles = state
+        .messages
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(message_role)
+        .collect::<Vec<_>>();
+    assert_eq!(recent_roles, ["user", "assistant", "user", "assistant"]);
+    assert_eq!(response_count.load(Ordering::SeqCst), 2);
 }
