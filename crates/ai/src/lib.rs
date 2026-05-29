@@ -18,7 +18,9 @@ pub mod utils;
 
 pub use agent::{Agent, AgentOptions, AgentState};
 pub use agent_error::{AgentError, AgentResult};
-pub use agent_loop::{run_agent_loop, run_agent_loop_continue};
+pub use agent_loop::{
+    AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
+};
 pub use agent_types::*;
 pub use env_api_keys::{api_key_env_vars, find_env_keys, get_env_api_key};
 pub use error::{Error, Result};

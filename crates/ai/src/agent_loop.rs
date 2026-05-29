@@ -1,8 +1,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use crate::{AssistantMessageEvent, StopReason, ToolResultMessage};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_types::{
@@ -10,6 +12,100 @@ use crate::agent_types::{
     AgentToolResult, BeforeToolCallContext, ToolExecutionMode, assistant_tool_calls,
 };
 use crate::{AgentError, AgentResult};
+
+pub struct AgentEventStream {
+    receiver: mpsc::UnboundedReceiver<AgentEvent>,
+    result_receiver: Option<oneshot::Receiver<AgentResult<Vec<AgentMessage>>>>,
+}
+
+impl AgentEventStream {
+    pub async fn result(&mut self) -> AgentResult<Vec<AgentMessage>> {
+        let receiver = self
+            .result_receiver
+            .take()
+            .ok_or(AgentError::StreamClosed)?;
+        receiver.await.map_err(|_| AgentError::StreamClosed)?
+    }
+}
+
+impl Stream for AgentEventStream {
+    type Item = AgentEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(cx)
+    }
+}
+
+pub fn agent_loop(
+    prompts: Vec<AgentMessage>,
+    context: AgentContext,
+    config: AgentLoopConfig,
+    cancellation_token: Option<CancellationToken>,
+    stream_fn: Option<crate::agent_types::StreamFn>,
+) -> AgentEventStream {
+    let (event_sender, receiver) = mpsc::unbounded_channel();
+    let (result_sender, result_receiver) = oneshot::channel();
+    let emit: AgentEventSink = Arc::new(move |event| {
+        let event_sender = event_sender.clone();
+        Box::pin(async move {
+            let _ = event_sender.send(event);
+            Ok(())
+        })
+    });
+
+    tokio::spawn(async move {
+        let result = run_agent_loop(
+            prompts,
+            context,
+            config,
+            emit,
+            cancellation_token,
+            stream_fn,
+        )
+        .await;
+        let _ = result_sender.send(result);
+    });
+
+    AgentEventStream {
+        receiver,
+        result_receiver: Some(result_receiver),
+    }
+}
+
+pub fn agent_loop_continue(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    cancellation_token: Option<CancellationToken>,
+    stream_fn: Option<crate::agent_types::StreamFn>,
+) -> AgentResult<AgentEventStream> {
+    if context.messages.is_empty() {
+        return Err(AgentError::NoMessagesToContinue);
+    }
+    if matches!(context.messages.last(), Some(crate::Message::Assistant(_))) {
+        return Err(AgentError::CannotContinueFromAssistant);
+    }
+
+    let (event_sender, receiver) = mpsc::unbounded_channel();
+    let (result_sender, result_receiver) = oneshot::channel();
+    let emit: AgentEventSink = Arc::new(move |event| {
+        let event_sender = event_sender.clone();
+        Box::pin(async move {
+            let _ = event_sender.send(event);
+            Ok(())
+        })
+    });
+
+    tokio::spawn(async move {
+        let result =
+            run_agent_loop_continue(context, config, emit, cancellation_token, stream_fn).await;
+        let _ = result_sender.send(result);
+    });
+
+    Ok(AgentEventStream {
+        receiver,
+        result_receiver: Some(result_receiver),
+    })
+}
 
 pub async fn run_agent_loop(
     prompts: Vec<AgentMessage>,

@@ -108,7 +108,7 @@ pub fn stream_simple_anthropic(
         .stream
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
     };
@@ -224,12 +224,17 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let api_key = options
+    let Some(api_key) = options
         .base
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider))
-        .unwrap_or_default();
+        .filter(|key| !key.trim().is_empty())
+    else {
+        return Err(StreamFailure::new(
+            output,
+            format!("No API key for provider: {}", model.provider),
+        ));
+    };
     let is_oauth = is_oauth_token(&api_key);
     let compat = get_anthropic_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
@@ -1151,10 +1156,6 @@ fn map_stop_reason(reason: &str) -> StopReason {
 
 fn is_oauth_token(api_key: &str) -> bool {
     api_key.contains("sk-ant-oat")
-}
-
-fn env_api_key(provider: &str) -> Option<String> {
-    crate::env_api_keys::get_env_api_key(provider)
 }
 
 fn trim_end_slash(url: &str) -> &str {

@@ -18,6 +18,9 @@ pub enum AgentError {
     #[error("operation aborted")]
     Aborted,
 
+    #[error("agent event stream closed before producing final messages")]
+    StreamClosed,
+
     #[error("{0}")]
     Other(String),
 }

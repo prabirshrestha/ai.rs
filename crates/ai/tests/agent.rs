@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use ai::{
-    Agent, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentOptions, Message,
-    faux_assistant_message, faux_text, register_faux_provider, run_agent_loop,
+    Agent, AgentContext, AgentError, AgentEvent, AgentEventSink, AgentLoopConfig, AgentOptions,
+    Message, agent_loop, agent_loop_continue, faux_assistant_message, faux_text,
+    register_faux_provider, run_agent_loop,
 };
+use futures::StreamExt;
 use tokio::sync::Mutex;
 
 #[tokio::test]
@@ -58,6 +60,72 @@ async fn run_agent_loop_is_exported_from_ai_crate() {
 
     assert_eq!(messages.len(), 2);
     assert!(events.lock().await.contains(&"agent_end"));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_loop_event_stream_is_exported_from_ai_crate() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("streamed", None)]);
+
+    let mut stream = agent_loop(
+        vec![Message::user_text("hi")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        None,
+        None,
+    );
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event_name(&event));
+    }
+    let messages = stream.result().await.unwrap();
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(events.last(), Some(&"agent_end"));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_loop_continue_rejects_invalid_contexts() {
+    let registration = register_faux_provider(None);
+    let config = AgentLoopConfig::new(registration.get_model());
+
+    let empty = agent_loop_continue(
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+        config.clone(),
+        None,
+        None,
+    )
+    .err();
+    assert!(matches!(empty, Some(AgentError::NoMessagesToContinue)));
+
+    let assistant_tail = agent_loop_continue(
+        AgentContext {
+            system_prompt: None,
+            messages: vec![Message::Assistant(faux_assistant_message("done", None))],
+            tools: Vec::new(),
+        },
+        config,
+        None,
+        None,
+    )
+    .err();
+    assert!(matches!(
+        assistant_tail,
+        Some(AgentError::CannotContinueFromAssistant)
+    ));
 
     registration.unregister();
 }

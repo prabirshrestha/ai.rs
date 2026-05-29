@@ -62,7 +62,7 @@ pub fn stream_simple_openai_completions(
         .stream
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
 
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
@@ -150,12 +150,17 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let api_key = options
+    let Some(api_key) = options
         .base
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider))
-        .unwrap_or_default();
+        .filter(|key| !key.trim().is_empty())
+    else {
+        return Err(StreamFailure::new(
+            output,
+            format!("No API key for provider: {}", model.provider),
+        ));
+    };
     let compat = get_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let mut payload =
@@ -1375,10 +1380,6 @@ fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .iter()
         .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
         .collect()
-}
-
-fn env_api_key(provider: &str) -> Option<String> {
-    crate::env_api_keys::get_env_api_key(provider)
 }
 
 fn trim_end_slash(url: &str) -> &str {
