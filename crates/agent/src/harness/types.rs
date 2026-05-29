@@ -61,6 +61,17 @@ pub struct PromptTemplate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub file_path: String,
+    #[serde(default)]
+    pub disable_model_invocation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
     pub id: String,
     pub created_at: String,
