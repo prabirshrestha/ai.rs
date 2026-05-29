@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(registry.len(), 32);
         assert_eq!(
             registry.values().map(|models| models.len()).sum::<usize>(),
-            932
+            931
         );
     }
 
