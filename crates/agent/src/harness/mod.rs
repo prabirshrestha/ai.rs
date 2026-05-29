@@ -1,3 +1,4 @@
+pub mod compaction;
 pub mod env;
 pub mod messages;
 pub mod prompt_templates;
@@ -7,6 +8,7 @@ pub mod system_prompt;
 pub mod types;
 pub mod utils;
 
+pub use compaction::*;
 pub use env::*;
 pub use messages::*;
 pub use prompt_templates::*;
