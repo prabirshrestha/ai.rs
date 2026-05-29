@@ -178,11 +178,11 @@ impl AgentTool for EchoTool {
         _cancellation_token: Option<CancellationToken>,
         _on_update: Option<agent::AgentToolUpdateCallback>,
     ) -> agent::Result<AgentToolResult> {
-        let value = args
-            .get("value")
-            .and_then(Value::as_str)
-            .expect("value argument")
-            .to_string();
+        let value_arg = args.get("value").cloned().expect("value argument");
+        let value = value_arg
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| value_arg.to_string());
 
         if value == "first" {
             self.first_started.notify_one();
@@ -453,7 +453,7 @@ async fn before_tool_call_can_override_arguments_without_revalidating() {
             assert_eq!(context.tool_call.id, "tool-1");
             assert_eq!(context.args, json!({ "value": "original" }));
             Ok(Some(BeforeToolCallResult {
-                args: Some(json!({ "value": "changed" })),
+                args: Some(json!({ "value": 123 })),
                 ..BeforeToolCallResult::default()
             }))
         })
@@ -480,7 +480,7 @@ async fn before_tool_call_can_override_arguments_without_revalidating() {
     .await
     .unwrap();
 
-    assert_eq!(executed.lock().await.as_slice(), ["changed"]);
+    assert_eq!(executed.lock().await.as_slice(), ["123"]);
 }
 
 #[tokio::test]
@@ -542,6 +542,55 @@ async fn before_tool_call_can_block_execution_with_error_tool_result() {
     assert_eq!(
         tool_result_text(&tool_result.content),
         Some("blocked by policy")
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_emit_error_result_without_execution() {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(EchoTool::new(executed.clone()));
+    let context = AgentContext {
+        system_prompt: Some(String::new()),
+        messages: Vec::new(),
+        tools: vec![tool],
+    };
+    let config = AgentLoopConfig::new(create_model());
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    run_agent_loop(
+        vec![Message::user_text("echo something")],
+        context,
+        config,
+        collecting_sink(events.clone()),
+        None,
+        Some(scripted_stream(vec![
+            assistant_message(
+                vec![assistant_tool_call(
+                    "tool-1",
+                    "echo",
+                    json!({ "value": { "not": "a string" } }),
+                )],
+                StopReason::ToolUse,
+            ),
+            assistant_text("done"),
+        ])),
+    )
+    .await
+    .unwrap();
+
+    assert!(executed.lock().await.is_empty());
+    let events = events.lock().await;
+    let tool_result = events.iter().find_map(|event| match event {
+        AgentEvent::MessageEnd {
+            message: Message::ToolResult(result),
+        } => Some(result),
+        _ => None,
+    });
+    let tool_result = tool_result.expect("tool result event");
+    assert!(tool_result.is_error);
+    assert!(
+        tool_result_text(&tool_result.content)
+            .is_some_and(|text| text.contains("Validation failed"))
     );
 }
 

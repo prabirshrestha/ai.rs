@@ -26,6 +26,9 @@ pub enum Error {
     #[error("provider error: {0}")]
     Provider(String),
 
+    #[error("{0}")]
+    Validation(String),
+
     #[error("request was cancelled")]
     Cancelled,
 

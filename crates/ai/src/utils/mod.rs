@@ -4,3 +4,4 @@ pub mod sanitize;
 pub mod sse;
 pub mod time;
 pub mod transform_messages;
+pub mod validation;

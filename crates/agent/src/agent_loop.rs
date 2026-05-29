@@ -512,6 +512,26 @@ async fn execute_one_tool(
         }
     };
 
+    let mut prepared_tool_call = tool_call.clone();
+    prepared_tool_call.arguments = prepared_args;
+    prepared_args = match ai::utils::validation::validate_tool_arguments(
+        &tool.definition(),
+        &prepared_tool_call,
+    ) {
+        Ok(args) => args,
+        Err(error) => {
+            let result = AgentToolResult::text(error.to_string());
+            emit(AgentEvent::ToolExecutionEnd {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                result: result.clone(),
+                is_error: true,
+            })
+            .await?;
+            return Ok((tool_call, true, result));
+        }
+    };
+
     if let Some(before_tool_call) = &config.before_tool_call {
         match before_tool_call(
             BeforeToolCallContext {
