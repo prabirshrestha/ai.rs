@@ -15,5 +15,11 @@ pub use models::{
     calculate_cost, clamp_thinking_level, get_model, get_models, get_providers,
     get_supported_thinking_levels, models_are_equal, register_model,
 };
+pub use providers::faux::{
+    FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
+    FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,
+    RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
+    register_faux_provider,
+};
 pub use stream::{complete, complete_simple, stream, stream_simple};
 pub use types::*;
