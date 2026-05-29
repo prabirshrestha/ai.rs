@@ -24,11 +24,11 @@ use super::types::{
     SessionStorage, SessionTreeEntry, SessionTreeEntryType, ThinkingLevelChangeEntry,
 };
 
-pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
-pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
-pub const BRANCH_SUMMARY_PREFIX: &str =
+const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+const BRANCH_SUMMARY_PREFIX: &str =
     "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
-pub const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
+const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
 
 #[derive(Clone)]
 pub struct Session<TMetadata = SessionMetadata>

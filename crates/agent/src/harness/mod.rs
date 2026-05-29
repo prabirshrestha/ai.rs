@@ -1,4 +1,5 @@
 pub mod env;
+pub mod messages;
 pub mod prompt_templates;
 pub mod session;
 pub mod skills;
@@ -7,6 +8,7 @@ pub mod types;
 pub mod utils;
 
 pub use env::*;
+pub use messages::*;
 pub use prompt_templates::*;
 pub use session::*;
 pub use skills::*;
