@@ -104,3 +104,116 @@ where
         stream(model, context, options)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crate::types::{
+        AssistantContent, AssistantMessage, AssistantMessageEvent, ModelCost, StopReason,
+        TextContent, Usage,
+    };
+
+    use super::*;
+
+    fn test_model(api: &str) -> Model {
+        Model {
+            id: "mock".to_string(),
+            name: "mock".to_string(),
+            api: api.to_string(),
+            provider: "test-provider".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            reasoning: false,
+            input: vec![crate::ModelInput::Text],
+            cost: ModelCost::default(),
+            context_window: 8192,
+            max_tokens: 2048,
+            ..Model::default()
+        }
+    }
+
+    fn assistant_text(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: text.to_string(),
+                text_signature: None,
+            })],
+            api: "test-custom-api".to_string(),
+            provider: "test-provider".to_string(),
+            model: "mock".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+
+    fn done_stream(message: AssistantMessage) -> AssistantMessageEventStream {
+        let reason = message.stop_reason;
+        let (mut sender, stream) = AssistantMessageEventStream::channel();
+        sender.push(AssistantMessageEvent::Done { reason, message });
+        stream
+    }
+
+    #[tokio::test]
+    async fn registered_provider_dispatches_stream_simple() {
+        let source_id = "api-registry-test";
+        let called = Arc::new(AtomicBool::new(false));
+        register_api_provider(
+            ApiProvider {
+                api: "test-custom-api".to_string(),
+                stream: wrap_stream("test-custom-api", |_model, _context, _options| {
+                    Ok(done_stream(assistant_text("stream")))
+                }),
+                stream_simple: wrap_stream_simple("test-custom-api", {
+                    let called = called.clone();
+                    move |_model, _context, _options| {
+                        called.store(true, Ordering::SeqCst);
+                        Ok(done_stream(assistant_text("simple")))
+                    }
+                }),
+            },
+            Some(source_id.to_string()),
+        );
+
+        let mut stream =
+            crate::stream_simple(test_model("test-custom-api"), Context::default(), None)
+                .expect("custom provider stream");
+        while futures::StreamExt::next(&mut stream).await.is_some() {}
+        let message = stream.result().await.expect("stream result");
+
+        assert!(called.load(Ordering::SeqCst));
+        assert!(matches!(
+            message.content.first(),
+            Some(AssistantContent::Text(text)) if text.text == "simple"
+        ));
+
+        unregister_api_providers(source_id);
+        assert!(get_api_provider("test-custom-api").is_none());
+    }
+
+    #[test]
+    fn wrapped_provider_rejects_mismatched_api() {
+        let provider = wrap_stream_simple("expected-api", |_model, _context, _options| {
+            Ok(done_stream(assistant_text("unreachable")))
+        });
+        let error = match provider(
+            test_model("actual-api"),
+            Context::default(),
+            SimpleStreamOptions::default(),
+        ) {
+            Ok(_) => panic!("expected mismatched api error"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, Error::UnsupportedApi(message) if message == "Mismatched api: actual-api expected expected-api")
+        );
+    }
+}

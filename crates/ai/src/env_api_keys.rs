@@ -88,3 +88,75 @@ pub fn get_env_api_key(provider: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct SavedEnv {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl SavedEnv {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var(key).ok(),
+            }
+        }
+
+        fn restore(self) {
+            unsafe {
+                if let Some(value) = self.value {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_oauth_token_precedes_api_key() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let oauth = SavedEnv::capture("ANTHROPIC_OAUTH_TOKEN");
+        let api_key = SavedEnv::capture("ANTHROPIC_API_KEY");
+
+        unsafe {
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "oauth-token");
+            std::env::set_var("ANTHROPIC_API_KEY", "api-key");
+        }
+
+        assert_eq!(
+            find_env_keys("anthropic"),
+            Some(vec![
+                "ANTHROPIC_OAUTH_TOKEN".to_string(),
+                "ANTHROPIC_API_KEY".to_string()
+            ])
+        );
+        assert_eq!(get_env_api_key("anthropic").as_deref(), Some("oauth-token"));
+
+        oauth.restore();
+        api_key.restore();
+    }
+
+    #[test]
+    fn empty_env_values_are_ignored() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let openai = SavedEnv::capture("OPENAI_API_KEY");
+
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "");
+        }
+
+        assert_eq!(find_env_keys("openai"), None);
+        assert_eq!(get_env_api_key("openai"), None);
+
+        openai.restore();
+    }
+}
