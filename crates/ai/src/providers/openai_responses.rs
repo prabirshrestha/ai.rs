@@ -8,6 +8,10 @@ use serde_json::{Value, json};
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::{calculate_cost, clamp_thinking_level};
 use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
+use crate::providers::github_copilot_headers::{
+    build_copilot_dynamic_headers, has_copilot_vision_input,
+};
+use crate::providers::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::providers::simple_options::build_base_options;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
@@ -184,6 +188,7 @@ async fn run_stream(
         .headers(
             match headers(
                 &model,
+                &context,
                 &options.base,
                 &api_key,
                 &compat,
@@ -663,7 +668,7 @@ pub fn build_responses_payload(
         if let Some(session_id) = &options.base.session_id {
             object.insert(
                 "prompt_cache_key".to_string(),
-                json!(clamp_openai_prompt_cache_key(session_id)),
+                json!(clamp_openai_prompt_cache_key(Some(session_id))),
             );
         }
     }
@@ -1021,6 +1026,7 @@ fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRete
 
 fn headers(
     model: &Model,
+    context: &Context,
     options: &StreamOptions,
     api_key: &str,
     compat: &ResolvedOpenAIResponsesCompat,
@@ -1047,7 +1053,28 @@ fn headers(
         }
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    for (name, value) in model.headers.iter().chain(options.headers.iter()) {
+    for (name, value) in &model.headers {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+        headers.insert(name, value);
+    }
+    if model.provider == "github-copilot" {
+        for (name, value) in build_copilot_dynamic_headers(
+            &context.messages,
+            has_copilot_vision_input(&context.messages),
+        ) {
+            let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            let value = HeaderValue::from_str(&value)
+                .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+            headers.insert(name, value);
+        }
+    }
+    for (name, value) in &options.headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };
@@ -1079,10 +1106,6 @@ fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .iter()
         .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
         .collect()
-}
-
-fn clamp_openai_prompt_cache_key(session_id: &str) -> String {
-    session_id.chars().take(64).collect()
 }
 
 fn get_service_tier_multiplier(model: &Model, service_tier: &str) -> f64 {

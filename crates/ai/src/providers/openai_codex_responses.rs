@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::models::clamp_thinking_level;
+use crate::providers::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::providers::openai_responses::{
     OpenAIResponsesOptions, convert_responses_messages, convert_responses_tools,
     stream_openai_responses,
@@ -123,7 +124,7 @@ fn build_request_body(
     if let Some(session_id) = &options.base.session_id {
         object.insert(
             "prompt_cache_key".to_string(),
-            json!(clamp_openai_prompt_cache_key(session_id)),
+            json!(clamp_openai_prompt_cache_key(Some(session_id))),
         );
     }
     if let Some(temperature) = options.base.temperature {
@@ -259,10 +260,6 @@ fn decode_base64_url(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(output)
-}
-
-fn clamp_openai_prompt_cache_key(session_id: &str) -> String {
-    session_id.chars().take(64).collect()
 }
 
 fn env_api_key(provider: &str) -> Option<String> {

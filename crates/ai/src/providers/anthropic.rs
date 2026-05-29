@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
+use crate::providers::github_copilot_headers::{
+    build_copilot_dynamic_headers, has_copilot_vision_input,
+};
 use crate::providers::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
 };
@@ -1065,7 +1068,28 @@ fn headers(
             );
         }
     }
-    for (name, value) in model.headers.iter().chain(options.base.headers.iter()) {
+    for (name, value) in &model.headers {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+        headers.insert(name, value);
+    }
+    if model.provider == "github-copilot" {
+        for (name, value) in build_copilot_dynamic_headers(
+            &context.messages,
+            has_copilot_vision_input(&context.messages),
+        ) {
+            let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            let value = HeaderValue::from_str(&value)
+                .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+            headers.insert(name, value);
+        }
+    }
+    for (name, value) in &options.base.headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };
