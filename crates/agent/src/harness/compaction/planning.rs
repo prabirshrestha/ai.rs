@@ -1,11 +1,17 @@
+use std::collections::HashMap;
+
 use ai::{
-    AssistantContent, Message, StopReason, ToolResultContent, Usage, UserContent, UserMessage,
-    UserMessageContent,
+    AssistantContent, Context, Message, Model, ModelThinkingLevel, SimpleStreamOptions, StopReason,
+    StreamOptions, ToolResultContent, Usage, UserContent, UserMessage, UserMessageContent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
-use super::utils::{FileOperations, create_file_ops, extract_file_ops_from_message};
+use super::utils::{
+    FileOperations, compute_file_lists, create_file_ops, extract_file_ops_from_message,
+    format_file_operations, serialize_conversation,
+};
 use crate::harness::session::build_session_context;
 use crate::harness::types::{
     CompactionError, CompactionErrorCode, CompactionResult, SessionTreeEntry,
@@ -26,6 +32,150 @@ pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
 };
 
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
+
+const SUMMARIZATION_PROMPT: &str = r#"The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."#;
+
+const UPDATE_SUMMARIZATION_PROMPT: &str = r#"The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."#;
+
+const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = r#"This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix."#;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionDetails {
+    pub read_files: Vec<String>,
+    pub modified_files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateSummaryOptions {
+    pub model: Model,
+    pub reserve_tokens: usize,
+    pub api_key: String,
+    pub headers: HashMap<String, String>,
+    pub cancellation_token: Option<CancellationToken>,
+    pub custom_instructions: Option<String>,
+    pub previous_summary: Option<String>,
+    pub thinking_level: Option<ModelThinkingLevel>,
+}
+
+impl GenerateSummaryOptions {
+    pub fn new(model: Model, reserve_tokens: usize, api_key: impl Into<String>) -> Self {
+        Self {
+            model,
+            reserve_tokens,
+            api_key: api_key.into(),
+            headers: HashMap::new(),
+            cancellation_token: None,
+            custom_instructions: None,
+            previous_summary: None,
+            thinking_level: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactOptions {
+    pub model: Model,
+    pub api_key: String,
+    pub headers: HashMap<String, String>,
+    pub custom_instructions: Option<String>,
+    pub cancellation_token: Option<CancellationToken>,
+    pub thinking_level: Option<ModelThinkingLevel>,
+}
+
+impl CompactOptions {
+    pub fn new(model: Model, api_key: impl Into<String>) -> Self {
+        Self {
+            model,
+            api_key: api_key.into(),
+            headers: HashMap::new(),
+            custom_instructions: None,
+            cancellation_token: None,
+            thinking_level: None,
+        }
+    }
+}
 
 pub fn calculate_context_tokens(usage: &Usage) -> usize {
     let total = usage.total_tokens;
@@ -211,6 +361,15 @@ pub struct CompactionPreparation {
     pub settings: CompactionSettings,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedCompaction {
+    pub summary: String,
+    pub first_kept_entry_id: String,
+    pub tokens_before: usize,
+    pub details: CompactionDetails,
+}
+
 pub fn prepare_compaction(
     path_entries: &[SessionTreeEntry],
     settings: CompactionSettings,
@@ -291,6 +450,256 @@ pub fn prepare_compaction(
         file_ops,
         settings,
     }))
+}
+
+pub async fn generate_summary(
+    current_messages: &[Message],
+    options: GenerateSummaryOptions,
+) -> CompactionResult<String> {
+    let mut base_prompt = if options.previous_summary.is_some() {
+        UPDATE_SUMMARIZATION_PROMPT.to_string()
+    } else {
+        SUMMARIZATION_PROMPT.to_string()
+    };
+    if let Some(custom_instructions) = options.custom_instructions.as_deref() {
+        base_prompt.push_str("\n\nAdditional focus: ");
+        base_prompt.push_str(custom_instructions);
+    }
+
+    let conversation_text = serialize_conversation(current_messages);
+    let mut prompt_text = format!("<conversation>\n{conversation_text}\n</conversation>\n\n");
+    if let Some(previous_summary) = options.previous_summary.as_deref() {
+        prompt_text.push_str(&format!(
+            "<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
+        ));
+    }
+    prompt_text.push_str(&base_prompt);
+
+    let max_tokens = summary_max_tokens(options.reserve_tokens, 0.8, options.model.max_tokens);
+    let response = run_summarization_request(
+        options.model,
+        prompt_text,
+        max_tokens,
+        options.api_key,
+        options.headers,
+        options.cancellation_token,
+        options.thinking_level,
+    )
+    .await
+    .map_err(|error| {
+        CompactionError::new(
+            CompactionErrorCode::SummarizationFailed,
+            format!("Summarization failed: {error}"),
+        )
+    })?;
+
+    if response.stop_reason == StopReason::Aborted {
+        return Err(CompactionError::new(
+            CompactionErrorCode::Aborted,
+            response
+                .error_message
+                .unwrap_or_else(|| "Summarization aborted".to_string()),
+        ));
+    }
+    if response.stop_reason == StopReason::Error {
+        return Err(CompactionError::new(
+            CompactionErrorCode::SummarizationFailed,
+            format!(
+                "Summarization failed: {}",
+                response
+                    .error_message
+                    .unwrap_or_else(|| "Unknown error".to_string())
+            ),
+        ));
+    }
+
+    Ok(extract_text_content(&response.content))
+}
+
+pub async fn compact(
+    preparation: CompactionPreparation,
+    options: CompactOptions,
+) -> CompactionResult<GeneratedCompaction> {
+    if preparation.first_kept_entry_id.is_empty() {
+        return Err(CompactionError::new(
+            CompactionErrorCode::InvalidSession,
+            "First kept entry has no UUID - session may need migration",
+        ));
+    }
+
+    let summary = if preparation.is_split_turn && !preparation.turn_prefix_messages.is_empty() {
+        let history_options = GenerateSummaryOptions {
+            model: options.model.clone(),
+            reserve_tokens: preparation.settings.reserve_tokens,
+            api_key: options.api_key.clone(),
+            headers: options.headers.clone(),
+            cancellation_token: options.cancellation_token.clone(),
+            custom_instructions: options.custom_instructions.clone(),
+            previous_summary: preparation.previous_summary.clone(),
+            thinking_level: options.thinking_level,
+        };
+        let turn_prefix_options = GenerateSummaryOptions {
+            model: options.model.clone(),
+            reserve_tokens: preparation.settings.reserve_tokens,
+            api_key: options.api_key.clone(),
+            headers: options.headers.clone(),
+            cancellation_token: options.cancellation_token.clone(),
+            custom_instructions: None,
+            previous_summary: None,
+            thinking_level: options.thinking_level,
+        };
+        let (history_summary, turn_prefix_summary) = tokio::try_join!(
+            async {
+                if preparation.messages_to_summarize.is_empty() {
+                    Ok("No prior history.".to_string())
+                } else {
+                    generate_summary(&preparation.messages_to_summarize, history_options).await
+                }
+            },
+            generate_turn_prefix_summary(&preparation.turn_prefix_messages, turn_prefix_options)
+        )?;
+        format!(
+            "{history_summary}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_summary}"
+        )
+    } else {
+        generate_summary(
+            &preparation.messages_to_summarize,
+            GenerateSummaryOptions {
+                model: options.model,
+                reserve_tokens: preparation.settings.reserve_tokens,
+                api_key: options.api_key,
+                headers: options.headers,
+                cancellation_token: options.cancellation_token,
+                custom_instructions: options.custom_instructions,
+                previous_summary: preparation.previous_summary.clone(),
+                thinking_level: options.thinking_level,
+            },
+        )
+        .await?
+    };
+
+    let (read_files, modified_files) = compute_file_lists(&preparation.file_ops);
+    let mut summary = summary;
+    summary.push_str(&format_file_operations(&read_files, &modified_files));
+
+    Ok(GeneratedCompaction {
+        summary,
+        first_kept_entry_id: preparation.first_kept_entry_id,
+        tokens_before: preparation.tokens_before,
+        details: CompactionDetails {
+            read_files,
+            modified_files,
+        },
+    })
+}
+
+async fn generate_turn_prefix_summary(
+    messages: &[Message],
+    options: GenerateSummaryOptions,
+) -> CompactionResult<String> {
+    let conversation_text = serialize_conversation(messages);
+    let prompt_text = format!(
+        "<conversation>\n{conversation_text}\n</conversation>\n\n{TURN_PREFIX_SUMMARIZATION_PROMPT}"
+    );
+    let max_tokens = summary_max_tokens(options.reserve_tokens, 0.5, options.model.max_tokens);
+    let response = run_summarization_request(
+        options.model,
+        prompt_text,
+        max_tokens,
+        options.api_key,
+        options.headers,
+        options.cancellation_token,
+        options.thinking_level,
+    )
+    .await
+    .map_err(|error| {
+        CompactionError::new(
+            CompactionErrorCode::SummarizationFailed,
+            format!("Turn prefix summarization failed: {error}"),
+        )
+    })?;
+
+    if response.stop_reason == StopReason::Aborted {
+        return Err(CompactionError::new(
+            CompactionErrorCode::Aborted,
+            response
+                .error_message
+                .unwrap_or_else(|| "Turn prefix summarization aborted".to_string()),
+        ));
+    }
+    if response.stop_reason == StopReason::Error {
+        return Err(CompactionError::new(
+            CompactionErrorCode::SummarizationFailed,
+            format!(
+                "Turn prefix summarization failed: {}",
+                response
+                    .error_message
+                    .unwrap_or_else(|| "Unknown error".to_string())
+            ),
+        ));
+    }
+
+    Ok(extract_text_content(&response.content))
+}
+
+async fn run_summarization_request(
+    model: Model,
+    prompt_text: String,
+    max_tokens: u32,
+    api_key: String,
+    headers: HashMap<String, String>,
+    cancellation_token: Option<CancellationToken>,
+    thinking_level: Option<ModelThinkingLevel>,
+) -> ai::Result<ai::AssistantMessage> {
+    let reasoning = if model.reasoning {
+        thinking_level.filter(|level| *level != ModelThinkingLevel::Off)
+    } else {
+        None
+    };
+    ai::complete_simple(
+        model,
+        Context {
+            system_prompt: Some(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Parts(vec![UserContent::text(prompt_text)]),
+                timestamp: ai::utils::time::now_millis(),
+            })],
+            tools: Vec::new(),
+        },
+        Some(SimpleStreamOptions {
+            stream: StreamOptions {
+                max_tokens: Some(max_tokens),
+                cancellation_token,
+                api_key: Some(api_key),
+                headers,
+                ..Default::default()
+            },
+            reasoning,
+            ..Default::default()
+        }),
+    )
+    .await
+}
+
+fn summary_max_tokens(reserve_tokens: usize, ratio: f64, model_max_tokens: u32) -> u32 {
+    let reserved = ((reserve_tokens as f64) * ratio).floor() as u64;
+    let reserved = reserved.min(u32::MAX as u64) as u32;
+    if model_max_tokens > 0 {
+        reserved.min(model_max_tokens)
+    } else {
+        reserved
+    }
+}
+
+fn extract_text_content(content: &[AssistantContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn get_assistant_usage(message: &Message) -> Option<Usage> {

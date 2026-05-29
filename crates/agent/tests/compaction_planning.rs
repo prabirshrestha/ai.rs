@@ -1,11 +1,16 @@
+use std::sync::{Arc, Mutex};
+
 use agent::{
-    ActiveToolsChangeEntry, CompactionEntry, CompactionSettings, MessageEntry, SessionTreeEntry,
-    calculate_context_tokens, estimate_context_tokens, estimate_tokens, find_cut_point,
+    ActiveToolsChangeEntry, CompactOptions, CompactionEntry, CompactionErrorCode,
+    CompactionPreparation, CompactionSettings, GenerateSummaryOptions, MessageEntry,
+    SUMMARIZATION_SYSTEM_PROMPT, SessionTreeEntry, calculate_context_tokens, compact,
+    create_file_ops, estimate_context_tokens, estimate_tokens, find_cut_point, generate_summary,
     get_last_assistant_usage, prepare_compaction, should_compact,
 };
 use ai::{
-    AssistantContent, AssistantMessage, Message, StopReason, TextContent, ToolCall, Usage,
-    UsageCost,
+    AssistantContent, AssistantMessage, Context, FauxAssistantMessageOptions, FauxResponseStep,
+    Message, StopReason, StreamOptions, TextContent, ToolCall, Usage, UsageCost, UserContent,
+    UserMessageContent, faux_assistant_message, register_faux_provider,
 };
 use serde_json::json;
 
@@ -60,6 +65,19 @@ fn usage(total_tokens: u32) -> Usage {
         total_tokens,
         cost: UsageCost::default(),
     }
+}
+
+fn user_prompt_from_context(context: &Context) -> &str {
+    let Message::User(message) = &context.messages[0] else {
+        panic!("expected user summarization message");
+    };
+    let UserMessageContent::Parts(parts) = &message.content else {
+        panic!("expected parts content");
+    };
+    let UserContent::Text(text) = &parts[0] else {
+        panic!("expected text prompt");
+    };
+    &text.text
 }
 
 #[test]
@@ -235,4 +253,131 @@ fn prepare_compaction_skips_empty_or_current_compaction_paths() {
         .unwrap()
         .is_none()
     );
+}
+
+#[tokio::test]
+async fn generate_summary_calls_provider_with_update_prompt() {
+    let registration = register_faux_provider(None);
+    let captured: Arc<Mutex<Option<(Context, StreamOptions)>>> = Arc::new(Mutex::new(None));
+    registration.set_responses([FauxResponseStep::factory({
+        let captured = Arc::clone(&captured);
+        move |context, options, _state, _model| {
+            let captured = Arc::clone(&captured);
+            async move {
+                *captured.lock().unwrap() = Some((context, options));
+                Ok(faux_assistant_message("updated summary", None))
+            }
+        }
+    })]);
+    let mut options = GenerateSummaryOptions::new(registration.get_model(), 100, "test-key");
+    options.previous_summary = Some("previous summary".to_string());
+    options.custom_instructions = Some("focus on blockers".to_string());
+    options
+        .headers
+        .insert("x-test".to_string(), "yes".to_string());
+
+    let summary = generate_summary(&[Message::user_text("new work")], options)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, "updated summary");
+    let captured = captured.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        captured.0.system_prompt.as_deref(),
+        Some(SUMMARIZATION_SYSTEM_PROMPT)
+    );
+    assert_eq!(captured.1.max_tokens, Some(80));
+    assert_eq!(captured.1.api_key.as_deref(), Some("test-key"));
+    assert_eq!(
+        captured.1.headers.get("x-test").map(String::as_str),
+        Some("yes")
+    );
+    let prompt = user_prompt_from_context(&captured.0);
+    assert!(prompt.contains("<conversation>\n[User]: new work"));
+    assert!(prompt.contains("<previous-summary>\nprevious summary\n</previous-summary>"));
+    assert!(prompt.contains("Update the existing structured summary"));
+    assert!(prompt.contains("Additional focus: focus on blockers"));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn compact_generates_split_turn_summary_and_file_details() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        faux_assistant_message("history summary", None),
+        faux_assistant_message("turn prefix summary", None),
+    ]);
+    let mut file_ops = create_file_ops();
+    file_ops.read.insert("README.md".to_string());
+    file_ops.edited.insert("src/lib.rs".to_string());
+    let preparation = CompactionPreparation {
+        first_kept_entry_id: "a2".to_string(),
+        messages_to_summarize: vec![Message::user_text("old history")],
+        turn_prefix_messages: vec![Message::user_text("large turn prefix")],
+        is_split_turn: true,
+        tokens_before: 123,
+        previous_summary: Some("previous".to_string()),
+        file_ops,
+        settings: CompactionSettings {
+            enabled: true,
+            reserve_tokens: 100,
+            keep_recent_tokens: 10,
+        },
+    };
+
+    let result = compact(
+        preparation,
+        CompactOptions::new(registration.get_model(), "test-key"),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.first_kept_entry_id, "a2");
+    assert_eq!(result.tokens_before, 123);
+    assert!(result.summary.contains("history summary"));
+    assert!(result.summary.contains("**Turn Context (split turn):**"));
+    assert!(result.summary.contains("turn prefix summary"));
+    assert!(
+        result
+            .summary
+            .contains("<read-files>\nREADME.md\n</read-files>")
+    );
+    assert!(
+        result
+            .summary
+            .contains("<modified-files>\nsrc/lib.rs\n</modified-files>")
+    );
+    assert_eq!(result.details.read_files, vec!["README.md".to_string()]);
+    assert_eq!(
+        result.details.modified_files,
+        vec!["src/lib.rs".to_string()]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn generate_summary_maps_aborted_provider_result() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message(
+        "",
+        Some(FauxAssistantMessageOptions {
+            stop_reason: Some(StopReason::Aborted),
+            error_message: Some("cancelled".to_string()),
+            ..Default::default()
+        }),
+    )]);
+
+    let error = generate_summary(
+        &[Message::user_text("new work")],
+        GenerateSummaryOptions::new(registration.get_model(), 100, "test-key"),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, CompactionErrorCode::Aborted);
+    assert_eq!(error.message(), "cancelled");
+
+    registration.unregister();
 }
