@@ -21,7 +21,12 @@ use crate::utils::sse;
 use crate::utils::transform_messages::transform_messages;
 use crate::{Error, Result};
 
-const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex", "opencode"];
+const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &[
+    "openai",
+    "openai-codex",
+    "opencode",
+    "azure-openai-responses",
+];
 
 #[derive(Clone, Default)]
 pub struct OpenAIResponsesOptions {
@@ -29,6 +34,17 @@ pub struct OpenAIResponsesOptions {
     pub reasoning_effort: Option<ModelThinkingLevel>,
     pub reasoning_summary: Option<Option<String>>,
     pub service_tier: Option<String>,
+    pub request_url: Option<String>,
+    pub request_model: Option<String>,
+    pub include_store: Option<bool>,
+    pub auth_header: OpenAIResponsesAuthHeader,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAIResponsesAuthHeader {
+    #[default]
+    Bearer,
+    ApiKey,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +79,7 @@ pub fn stream_simple_openai_responses(
             reasoning_effort,
             reasoning_summary: None,
             service_tier: None,
+            ..Default::default()
         },
     )
 }
@@ -151,9 +168,21 @@ async fn run_stream(
 
     let client = reqwest::Client::new();
     let mut request = client
-        .post(format!("{}/responses", trim_end_slash(&model.base_url)))
+        .post(
+            options
+                .request_url
+                .clone()
+                .unwrap_or_else(|| format!("{}/responses", trim_end_slash(&model.base_url))),
+        )
         .headers(
-            match headers(&model, &options.base, &api_key, &compat, cache_retention) {
+            match headers(
+                &model,
+                &options.base,
+                &api_key,
+                &compat,
+                cache_retention,
+                options.auth_header,
+            ) {
                 Ok(headers) => headers,
                 Err(error) => return Err(StreamFailure::new(output, error)),
             },
@@ -600,12 +629,14 @@ pub fn build_responses_payload(
         true,
     );
     let mut payload = json!({
-        "model": model.id,
+        "model": options.request_model.as_deref().unwrap_or(&model.id),
         "input": messages,
-        "stream": true,
-        "store": false
+        "stream": true
     });
     let object = payload.as_object_mut().expect("payload object");
+    if options.include_store.unwrap_or(true) {
+        object.insert("store".to_string(), json!(false));
+    }
     if let Some(max_tokens) = options.base.max_tokens {
         object.insert("max_output_tokens".to_string(), json!(max_tokens));
     }
@@ -957,7 +988,7 @@ fn map_status(status: Option<&str>) -> StopReason {
     }
 }
 
-fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
+pub(crate) fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
     ResolvedOpenAIResponsesCompat {
         send_session_id_header: model
             .compat
@@ -987,14 +1018,26 @@ fn headers(
     api_key: &str,
     compat: &ResolvedOpenAIResponsesCompat,
     cache_retention: CacheRetention,
+    auth_header: OpenAIResponsesAuthHeader,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if !api_key.is_empty() {
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| Error::InvalidHeaderValue("authorization".to_string(), e))?,
-        );
+        match auth_header {
+            OpenAIResponsesAuthHeader::Bearer => {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}"))
+                        .map_err(|e| Error::InvalidHeaderValue("authorization".to_string(), e))?,
+                );
+            }
+            OpenAIResponsesAuthHeader::ApiKey => {
+                headers.insert(
+                    HeaderName::from_static("api-key"),
+                    HeaderValue::from_str(api_key)
+                        .map_err(|e| Error::InvalidHeaderValue("api-key".to_string(), e))?,
+                );
+            }
+        }
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     for (name, value) in model.headers.iter().chain(options.headers.iter()) {

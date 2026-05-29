@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::api_registry::{self, ApiProvider};
-use crate::providers::{anthropic, openai_completions, openai_responses};
+use crate::providers::{anthropic, azure_openai_responses, openai_completions, openai_responses};
 use crate::types::{Context, Model, SimpleStreamOptions};
 use crate::{AssistantMessageEventStream, Result};
 
@@ -52,6 +52,7 @@ pub fn register_builtins() {
                         reasoning_effort: None,
                         reasoning_summary: None,
                         service_tier: None,
+                        ..Default::default()
                     },
                 ))
             }),
@@ -64,6 +65,41 @@ pub fn register_builtins() {
                     Ok(openai_responses::stream_simple_openai_responses(
                         model, context, options,
                     ))
+                },
+            ),
+        },
+        Some("builtin".to_string()),
+    );
+
+    api_registry::register_api_provider(
+        ApiProvider {
+            api: "azure-openai-responses".to_string(),
+            stream: api_registry::wrap_stream(
+                "azure-openai-responses",
+                |model, context, options| {
+                    Ok(azure_openai_responses::stream_azure_openai_responses(
+                        model,
+                        context,
+                        azure_openai_responses::AzureOpenAIResponsesOptions {
+                            base: options,
+                            reasoning_effort: None,
+                            reasoning_summary: None,
+                            ..Default::default()
+                        },
+                    ))
+                },
+            ),
+            stream_simple: api_registry::wrap_stream_simple(
+                "azure-openai-responses",
+                |model: Model,
+                 context: Context,
+                 options: SimpleStreamOptions|
+                 -> Result<AssistantMessageEventStream> {
+                    Ok(
+                        azure_openai_responses::stream_simple_azure_openai_responses(
+                            model, context, options,
+                        ),
+                    )
                 },
             ),
         },
