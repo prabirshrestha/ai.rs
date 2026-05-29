@@ -2,7 +2,8 @@ use std::sync::OnceLock;
 
 use crate::api_registry::{self, ApiProvider};
 use crate::providers::{
-    anthropic, azure_openai_responses, openai_codex_responses, openai_completions, openai_responses,
+    anthropic, azure_openai_responses, mistral, openai_codex_responses, openai_completions,
+    openai_responses,
 };
 use crate::types::{Context, Model, SimpleStreamOptions};
 use crate::{AssistantMessageEventStream, Result};
@@ -164,6 +165,37 @@ pub fn register_builtins() {
                  options: SimpleStreamOptions|
                  -> Result<AssistantMessageEventStream> {
                     Ok(anthropic::stream_simple_anthropic(model, context, options))
+                },
+            ),
+        },
+        Some("builtin".to_string()),
+    );
+
+    api_registry::register_api_provider(
+        ApiProvider {
+            api: "mistral-conversations".to_string(),
+            stream: api_registry::wrap_stream(
+                "mistral-conversations",
+                |model, context, options| {
+                    Ok(mistral::stream_mistral(
+                        model,
+                        context,
+                        mistral::MistralOptions {
+                            base: options,
+                            tool_choice: None,
+                            prompt_mode: None,
+                            reasoning_effort: None,
+                        },
+                    ))
+                },
+            ),
+            stream_simple: api_registry::wrap_stream_simple(
+                "mistral-conversations",
+                |model: Model,
+                 context: Context,
+                 options: SimpleStreamOptions|
+                 -> Result<AssistantMessageEventStream> {
+                    Ok(mistral::stream_simple_mistral(model, context, options))
                 },
             ),
         },
