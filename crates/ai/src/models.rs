@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(registry.len(), 32);
         assert_eq!(
             registry.values().map(|models| models.len()).sum::<usize>(),
-            931
+            932
         );
     }
 
@@ -161,6 +161,9 @@ mod tests {
             opus.compat.anthropic_messages.force_adaptive_thinking,
             Some(true)
         );
+        let step =
+            get_model("openrouter", "stepfun/step-3.7-flash").expect("stepfun/step-3.7-flash");
+        assert_eq!(step.max_tokens, 256_000);
         assert!(get_providers().contains(&"anthropic".to_string()));
     }
 

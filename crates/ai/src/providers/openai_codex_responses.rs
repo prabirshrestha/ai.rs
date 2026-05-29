@@ -32,7 +32,7 @@ pub fn stream_simple_openai_codex_responses(
         .stream
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
     };
@@ -64,7 +64,7 @@ pub fn stream_openai_codex_responses(
         .base
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
     };
@@ -260,10 +260,6 @@ fn decode_base64_url(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(output)
-}
-
-fn env_api_key(provider: &str) -> Option<String> {
-    crate::env_api_keys::get_env_api_key(provider)
 }
 
 fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {

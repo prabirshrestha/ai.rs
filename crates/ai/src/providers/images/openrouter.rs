@@ -4,7 +4,6 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::env_api_keys::get_env_api_key;
 use crate::types::{
     AssistantImages, ImagesContent, ImagesContext, ImagesModel, ImagesOptions, ImagesStopReason,
     ModelInput, ProviderResponse, TextContent, Usage, UsageCost,
@@ -47,13 +46,8 @@ async fn generate_images_openrouter_inner(
     let api_key = options
         .api_key
         .clone()
-        .or_else(|| get_env_api_key(&model.provider))
-        .ok_or_else(|| {
-            Error::Validation(format!(
-                "No API key available for provider: {}",
-                model.provider
-            ))
-        })?;
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| Error::Validation(format!("No API key for provider: {}", model.provider)))?;
     let client = reqwest::Client::new();
     let mut payload = build_params(&model, &context);
     if let Some(on_payload) = options.on_payload.clone() {
@@ -510,7 +504,7 @@ mod tests {
         assert_eq!(output.stop_reason, ImagesStopReason::Error);
         assert_eq!(
             output.error_message.as_deref(),
-            Some("No API key available for provider: openrouter")
+            Some("No API key for provider: openrouter")
         );
     }
 }

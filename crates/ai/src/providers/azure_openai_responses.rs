@@ -27,7 +27,7 @@ pub fn stream_simple_azure_openai_responses(
         .stream
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
     };
@@ -188,10 +188,6 @@ fn normalize_azure_base_url(base_url: &str) -> Result<String, String> {
 
 fn trim_end_slash(url: &str) -> &str {
     url.trim_end_matches('/')
-}
-
-fn env_api_key(provider: &str) -> Option<String> {
-    crate::env_api_keys::get_env_api_key(provider)
 }
 
 fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {

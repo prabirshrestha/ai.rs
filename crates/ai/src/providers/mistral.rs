@@ -42,7 +42,7 @@ pub fn stream_simple_mistral(
         .stream
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider));
+        .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
         return immediate_error(model, "No API key for provider");
     };
@@ -146,17 +146,17 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let api_key = options
+    let Some(api_key) = options
         .base
         .api_key
         .clone()
-        .or_else(|| env_api_key(&model.provider))
-        .ok_or_else(|| {
-            StreamFailure::new(
-                output.clone(),
-                format!("No API key for provider: {}", model.provider),
-            )
-        })?;
+        .filter(|key| !key.trim().is_empty())
+    else {
+        return Err(StreamFailure::new(
+            output,
+            format!("No API key for provider: {}", model.provider),
+        ));
+    };
 
     let normalizer = std::cell::RefCell::new(MistralToolCallIdNormalizer::default());
     let transformed_messages = transform_messages(&context.messages, &model, |id, _, _| {
@@ -1013,10 +1013,6 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
         error: output,
     });
     stream
-}
-
-fn env_api_key(provider: &str) -> Option<String> {
-    crate::env_api_keys::get_env_api_key(provider)
 }
 
 #[cfg(test)]
