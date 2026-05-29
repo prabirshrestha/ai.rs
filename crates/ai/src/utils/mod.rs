@@ -1,4 +1,5 @@
 pub mod hash;
+pub mod headers;
 pub mod json;
 pub mod sanitize;
 pub mod sse;
