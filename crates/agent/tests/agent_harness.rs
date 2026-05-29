@@ -1,11 +1,38 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use agent::{
-    AgentHarnessErrorCode, AgentHarnessStreamOptions, AgentHarnessStreamOptionsPatch, MapPatch,
-    apply_stream_options_patch, create_failure_message, merge_headers, validate_unique_names,
+    AgentHarness, AgentHarnessAuth, AgentHarnessAuthFn, AgentHarnessErrorCode, AgentHarnessOptions,
+    AgentHarnessResources, AgentHarnessStreamOptions, AgentHarnessStreamOptionsPatch,
+    InMemorySessionRepo, MapPatch, NavigateTreeOptions, NodeExecutionEnv, SessionCreateOptions,
+    SessionRepo, apply_stream_options_patch, create_failure_message, merge_headers,
+    validate_unique_names,
 };
-use ai::{CacheRetention, Message, Model, StopReason, Transport};
+use ai::{
+    AssistantContent, CacheRetention, Message, Model, StopReason, TextContent, Transport,
+    faux_assistant_message, register_faux_provider,
+};
 use serde_json::json;
+
+fn auth_fn() -> AgentHarnessAuthFn {
+    Arc::new(|_model| {
+        Box::pin(async {
+            Some(AgentHarnessAuth {
+                api_key: "test-key".to_string(),
+                headers: HashMap::new(),
+            })
+        })
+    })
+}
+
+fn assistant_text(text: &str) -> Message {
+    let mut message = faux_assistant_message(text, None);
+    message.content = vec![AssistantContent::Text(TextContent {
+        text: text.to_string(),
+        text_signature: None,
+    })];
+    Message::Assistant(message)
+}
 
 #[test]
 fn stream_option_patches_set_clear_merge_and_delete_values() {
@@ -104,4 +131,156 @@ fn creates_failure_assistant_messages() {
     assert_eq!(message.stop_reason, StopReason::Aborted);
     assert_eq!(message.error_message.as_deref(), Some("boom"));
     assert!(message.content.len() == 1);
+}
+
+#[tokio::test]
+async fn harness_mutations_update_session_state() {
+    let registration = register_faux_provider(None);
+    let repo = InMemorySessionRepo::new();
+    let session = repo.create(SessionCreateOptions::default()).await.unwrap();
+    let mut options = AgentHarnessOptions::new(
+        NodeExecutionEnv::new("."),
+        session,
+        registration.get_model(),
+    );
+    options.resources = AgentHarnessResources {
+        skills: Vec::new(),
+        prompt_templates: Vec::new(),
+    };
+    let mut harness = AgentHarness::new(options).unwrap();
+    let mut next_model = registration.get_model();
+    next_model.id = "next-model".to_string();
+
+    harness.set_model(next_model.clone()).await.unwrap();
+    harness
+        .set_thinking_level(ai::ModelThinkingLevel::High)
+        .await
+        .unwrap();
+
+    let context = harness.session().build_context().await.unwrap();
+    assert_eq!(context.model.unwrap().model_id, "next-model");
+    assert_eq!(context.thinking_level, "high");
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn harness_compact_generates_and_persists_compaction() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("## Goal\nCompacted", None)]);
+    let repo = InMemorySessionRepo::new();
+    let session = repo.create(SessionCreateOptions::default()).await.unwrap();
+    session
+        .append_message(Message::user_text("old work"))
+        .await
+        .unwrap();
+    let mut options = AgentHarnessOptions::new(
+        NodeExecutionEnv::new("."),
+        session,
+        registration.get_model(),
+    );
+    options.get_api_key_and_headers = Some(auth_fn());
+    let mut harness = AgentHarness::new(options).unwrap();
+
+    let result = harness.compact(None).await.unwrap();
+
+    assert!(result.summary.contains("## Goal\nCompacted"));
+    let leaf = harness.session().get_leaf_id().await.unwrap().unwrap();
+    let entry = harness.session().get_entry(&leaf).await.unwrap().unwrap();
+    assert!(matches!(entry, agent::SessionTreeEntry::Compaction(_)));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn harness_navigate_tree_generates_branch_summary() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("## Goal\nBranch", None)]);
+    let repo = InMemorySessionRepo::new();
+    let session = repo.create(SessionCreateOptions::default()).await.unwrap();
+    let _u1 = session
+        .append_message(Message::user_text("first"))
+        .await
+        .unwrap();
+    let a1 = session
+        .append_message(assistant_text("answer"))
+        .await
+        .unwrap();
+    let _u2 = session
+        .append_message(Message::user_text("second"))
+        .await
+        .unwrap();
+    let _a2 = session
+        .append_message(assistant_text("other branch"))
+        .await
+        .unwrap();
+    let mut options = AgentHarnessOptions::new(
+        NodeExecutionEnv::new("."),
+        session,
+        registration.get_model(),
+    );
+    options.get_api_key_and_headers = Some(auth_fn());
+    let mut harness = AgentHarness::new(options).unwrap();
+
+    let result = harness
+        .navigate_tree(
+            &a1,
+            NavigateTreeOptions {
+                summarize: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let summary = result.summary_entry.unwrap();
+    assert!(summary.summary.contains("## Goal\nBranch"));
+    assert_eq!(
+        harness.session().get_leaf_id().await.unwrap().as_deref(),
+        Some(summary.id.as_str())
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn harness_navigate_tree_to_user_returns_editor_text() {
+    let registration = register_faux_provider(None);
+    let repo = InMemorySessionRepo::new();
+    let session = repo.create(SessionCreateOptions::default()).await.unwrap();
+    let _u1 = session
+        .append_message(Message::user_text("first"))
+        .await
+        .unwrap();
+    let a1 = session
+        .append_message(assistant_text("answer"))
+        .await
+        .unwrap();
+    let u2 = session
+        .append_message(Message::user_text("second"))
+        .await
+        .unwrap();
+    let _a2 = session
+        .append_message(assistant_text("later"))
+        .await
+        .unwrap();
+    let mut harness = AgentHarness::new(AgentHarnessOptions::new(
+        NodeExecutionEnv::new("."),
+        session,
+        registration.get_model(),
+    ))
+    .unwrap();
+
+    let result = harness
+        .navigate_tree(&u2, NavigateTreeOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(result.editor_text.as_deref(), Some("second"));
+    assert_eq!(
+        harness.session().get_leaf_id().await.unwrap().as_deref(),
+        Some(a1.as_str())
+    );
+
+    registration.unregister();
 }
