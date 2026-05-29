@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
+use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
 use crate::providers::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
 };
@@ -240,9 +241,13 @@ async fn run_stream(
         }
     }
 
+    let base_url = match request_base_url(&model) {
+        Ok(base_url) => base_url,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     let client = reqwest::Client::new();
     let mut request = client
-        .post(format!("{}/messages", trim_end_slash(&model.base_url)))
+        .post(format!("{}/messages", trim_end_slash(&base_url)))
         .headers(
             match headers(
                 &model,
@@ -1130,6 +1135,14 @@ fn env_api_key(provider: &str) -> Option<String> {
 
 fn trim_end_slash(url: &str) -> &str {
     url.trim_end_matches('/')
+}
+
+fn request_base_url(model: &Model) -> Result<String> {
+    if is_cloudflare_provider(&model.provider) {
+        resolve_cloudflare_base_url(model)
+    } else {
+        Ok(model.base_url.clone())
+    }
 }
 
 fn to_claude_code_name(name: &str) -> String {

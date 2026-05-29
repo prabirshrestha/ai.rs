@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::{calculate_cost, clamp_thinking_level};
+use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
 use crate::providers::simple_options::build_base_options;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
@@ -169,14 +170,17 @@ async fn run_stream(
         }
     }
 
+    let request_url = if let Some(request_url) = options.request_url.clone() {
+        request_url
+    } else {
+        match request_base_url(&model) {
+            Ok(base_url) => format!("{}/responses", trim_end_slash(&base_url)),
+            Err(error) => return Err(StreamFailure::new(output, error)),
+        }
+    };
     let client = reqwest::Client::new();
     let mut request = client
-        .post(
-            options
-                .request_url
-                .clone()
-                .unwrap_or_else(|| format!("{}/responses", trim_end_slash(&model.base_url))),
-        )
+        .post(request_url)
         .headers(
             match headers(
                 &model,
@@ -1109,6 +1113,14 @@ fn env_api_key(provider: &str) -> Option<String> {
 
 fn trim_end_slash(url: &str) -> &str {
     url.trim_end_matches('/')
+}
+
+fn request_base_url(model: &Model) -> Result<String> {
+    if is_cloudflare_provider(&model.provider) {
+        resolve_cloudflare_base_url(model)
+    } else {
+        Ok(model.base_url.clone())
+    }
 }
 
 fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
