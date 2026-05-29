@@ -9,6 +9,7 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+async-trait.workspace = true
 async-stream.workspace = true
 futures.workspace = true
 reqwest.workspace = true

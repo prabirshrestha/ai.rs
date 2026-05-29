@@ -1,3 +1,7 @@
+pub mod agent;
+pub mod agent_error;
+pub mod agent_loop;
+pub mod agent_types;
 pub mod api_registry;
 pub mod env_api_keys;
 pub mod error;
@@ -12,6 +16,10 @@ pub mod stream;
 pub mod types;
 pub mod utils;
 
+pub use agent::{Agent, AgentOptions, AgentState};
+pub use agent_error::{AgentError, AgentResult};
+pub use agent_loop::{run_agent_loop, run_agent_loop_continue};
+pub use agent_types::*;
 pub use env_api_keys::{api_key_env_vars, find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamSender};
