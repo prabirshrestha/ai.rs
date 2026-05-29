@@ -1,3 +1,4 @@
+pub mod agent_harness;
 pub mod compaction;
 pub mod env;
 pub mod messages;
@@ -8,6 +9,7 @@ pub mod system_prompt;
 pub mod types;
 pub mod utils;
 
+pub use agent_harness::*;
 pub use compaction::*;
 pub use env::*;
 pub use messages::*;
