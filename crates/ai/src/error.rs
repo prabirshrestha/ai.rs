@@ -1,139 +1,36 @@
-/// The main error type for the AI [`crate`].
+use reqwest::StatusCode;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Represents errors that occur during IO operations.
     #[error(transparent)]
-    IOError(#[from] std::io::Error),
+    Http(#[from] reqwest::Error),
 
-    #[error("Streaming required: {0}")]
-    StreamingRequired(String),
-
-    #[error("Streaming not supported: {0}")]
-    StreamingNotSupported(String),
-
-    /// Represents errors that occur during JSON serialization/deserialization.
     #[error(transparent)]
-    SerdeJsonError(#[from] serde_json::Error),
+    Json(#[from] serde_json::Error),
 
-    /// An error type indicating that a component provided to a method was out of range, causing a
-    /// failure.
-    // i64 is the narrowest type fitting all use cases. This eliminates the need for a type parameter.
     #[error(transparent)]
-    TimeComponentRangeError(#[from] time::error::ComponentRange),
+    Io(#[from] std::io::Error),
 
-    /// Represents errors that occur during HTTP operations.
-    #[error(transparent)]
-    ReqwestError(#[from] reqwest::Error),
-
-    /// Represent invalid header name.
-    #[error("Invalid Header Name: {0} {1}")]
-    InvalidHeaderName(String, reqwest::header::InvalidHeaderName),
-
-    /// Represent invalid header values.
-    #[error("Invalid Header Value: {0} {1}")]
+    #[error("invalid header value for {0}: {1}")]
     InvalidHeaderValue(String, reqwest::header::InvalidHeaderValue),
 
-    /// The error type for operations interacting with environment variables.
-    /// Possibly returned from [`std::env::var()`].
-    #[error("Environment variable error: {0} {1}")]
-    EnvVarError(String, std::env::VarError),
+    #[error("missing API key for provider: {0}")]
+    MissingApiKey(String),
 
-    /// Represents [`crate::chat_completions::ChatCompletionRequestBuilder`] errors.
-    #[error(transparent)]
-    ChatCompletionRequestBuilderError(
-        #[from] crate::chat_completions::ChatCompletionRequestBuilderError,
-    ),
+    #[error("unsupported api: {0}")]
+    UnsupportedApi(String),
 
-    /// Represents [`crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError`] errors.
-    #[error(transparent)]
-    ChatCompletionRequestStreamOptionsBuilderError(
-        #[from] crate::chat_completions::ChatCompletionRequestStreamOptionsBuilderError,
-    ),
+    #[error("provider returned HTTP {status}: {body}")]
+    ApiStatus { status: StatusCode, body: String },
 
-    /// Represents [`crate::chat_completions::ChatCompletionResponseBuilder`] errors.
-    #[error(transparent)]
-    ChatCompletionResponseBuilderError(
-        #[from] crate::chat_completions::ChatCompletionResponseBuilderError,
-    ),
+    #[error("provider error: {0}")]
+    Provider(String),
 
-    /// Represents [`crate::chat_completions::ChatCompletionResponseMessageBuilderError`] errors.
-    #[error(transparent)]
-    ChatCompletionResponseMessageBuilderError(
-        #[from] crate::chat_completions::ChatCompletionResponseMessageBuilderError,
-    ),
-
-    /// Represents [`crate::chat_completions::ChatCompletionChunkChoiceBuilderError`] errors.
-    #[error(transparent)]
-    ChatCompletionChunkChoiceBuilderError(
-        #[from] crate::chat_completions::ChatCompletionChunkChoiceBuilderError,
-    ),
-
-    /// Represents [`crate::chat_completions::ChatCompletionChoiceBuilder`] errors.
-    #[error(transparent)]
-    ChatCompletionChoiceBuilderError(
-        #[from] crate::chat_completions::ChatCompletionChoiceBuilderError,
-    ),
-
-    /// Represents [`crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilder`] errors.
-    #[error(transparent)]
-    ChatCompletionToolFunctionDefinitionBuilderError(
-        #[from] crate::chat_completions::ChatCompletionToolFunctionDefinitionBuilderError,
-    ),
-
-    /// Represents [`crate::chat_completions::UsageBuilderError`] errors.
-    #[error(transparent)]
-    ChatCompletionUsageBuilderError(#[from] crate::chat_completions::UsageBuilderError),
-
-    /// Represents [`crate::clients::azure_openai::ClientBuilder`] errors.
-    #[cfg(feature = "azure_openai_client")]
-    #[error(transparent)]
-    AzureOpenAIClientBuilderError(#[from] crate::clients::azure_openai::ClientBuilderError),
-
-    /// Represents [`crate::clients::ollama::ClientBuilder`] errors.
-    #[cfg(feature = "ollama_client")]
-    #[error(transparent)]
-    OllamaClientBuilderError(#[from] crate::clients::ollama::ClientBuilderError),
-
-    /// Represents [`crate::clients::openai::ClientBuilder`] errors.
-    #[cfg(feature = "openai_client")]
-    #[error(transparent)]
-    OpenAIClientBuilderError(#[from] crate::clients::openai::ClientBuilderError),
-
-    /// The operation was cancelled
-    #[error("The operation was cancelled")]
+    #[error("request was cancelled")]
     Cancelled,
 
-    /// Represents graph execution errors.
-    #[error(transparent)]
-    GraphError(#[from] crate::graph::GraphError),
-
-    /// Represents errors that are unknown or not yet categorized.
-    #[error("Unknown error: {0}")]
-    UnknownError(String),
-
-    /// Catches any other error types that don't fit into the above categories.
-    /// Uses a boxed trait object to support a wide range of error types.
-    #[error("OtherError: {0}")]
-    OtherError(Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("stream ended before producing a final assistant message")]
+    StreamClosed,
 }
 
-/// A specialized [`Result`] type for this ai [`crate`].
-///
-/// This type is broadly used across ai [`crate`] for any operation which may
-/// produce an error.
-///
-/// This typedef is generally used to avoid writing out [`Error`] directly and
-/// is otherwise a direct mapping to [`Result`].
-///
-/// # Examples
-///
-/// A convenience function that bubbles an `ai::Result` to its caller:
-///
-/// ```
-///
-/// fn generate_chat_completions() -> ai::Result<()> {
-///     // run some code that may produce an error from the ai code
-///     Ok(())
-/// }
-/// ```
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,23 +1,18 @@
 [package]
-name = "ai"
-version = "0.3.0"
+name = "agent"
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Rust port of the pi ai package"
+description = "Rust port of the pi agent package"
 repository.workspace = true
-readme = "../../README.md"
 
 [dependencies]
-async-stream.workspace = true
+ai.workspace = true
+async-trait.workspace = true
 futures.workspace = true
-reqwest.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true

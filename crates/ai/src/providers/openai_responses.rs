@@ -1,0 +1,1124 @@
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use futures::{StreamExt, pin_mut};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use serde_json::{Value, json};
+
+use crate::event_stream::AssistantMessageEventStreamSender;
+use crate::models::{calculate_cost, clamp_thinking_level};
+use crate::providers::simple_options::build_base_options;
+use crate::types::{
+    AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
+    ImageContent, Model, ModelInput, ModelThinkingLevel, SimpleStreamOptions, StopReason,
+    StreamOptions, TextContent, TextPhase, TextSignatureV1, ThinkingContent, Tool, ToolCall,
+    ToolResultContent, Usage, UserContent, UserMessageContent,
+};
+use crate::utils::hash::short_hash;
+use crate::utils::json::parse_streaming_json;
+use crate::utils::sanitize::sanitize_surrogates;
+use crate::utils::sse;
+use crate::utils::transform_messages::transform_messages;
+use crate::{Error, Result};
+
+const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex", "opencode"];
+
+#[derive(Clone, Default)]
+pub struct OpenAIResponsesOptions {
+    pub base: StreamOptions,
+    pub reasoning_effort: Option<ModelThinkingLevel>,
+    pub reasoning_summary: Option<Option<String>>,
+    pub service_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedOpenAIResponsesCompat {
+    pub send_session_id_header: bool,
+    pub supports_long_cache_retention: bool,
+}
+
+pub fn stream_simple_openai_responses(
+    model: Model,
+    context: Context,
+    options: SimpleStreamOptions,
+) -> crate::AssistantMessageEventStream {
+    let api_key = options
+        .stream
+        .api_key
+        .clone()
+        .or_else(|| env_api_key(&model.provider));
+    let Some(api_key) = api_key else {
+        return immediate_error(model, "No API key for provider");
+    };
+    let base = build_base_options(&model, &options, api_key);
+    let reasoning_effort = options.reasoning.and_then(|reasoning| {
+        let clamped = clamp_thinking_level(&model, reasoning);
+        (clamped != ModelThinkingLevel::Off).then_some(clamped)
+    });
+    stream_openai_responses(
+        model,
+        context,
+        OpenAIResponsesOptions {
+            base,
+            reasoning_effort,
+            reasoning_summary: None,
+            service_tier: None,
+        },
+    )
+}
+
+pub fn stream_openai_responses(
+    model: Model,
+    context: Context,
+    options: OpenAIResponsesOptions,
+) -> crate::AssistantMessageEventStream {
+    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
+    tokio::spawn(async move {
+        let output = AssistantMessage::empty_for(&model);
+        if let Err(error) = run_stream(model, context, options, output, &mut sender).await {
+            let mut message = error.output;
+            message.stop_reason = if error.cancelled {
+                StopReason::Aborted
+            } else {
+                StopReason::Error
+            };
+            message.error_message = Some(error.message);
+            sender.push(AssistantMessageEvent::Error {
+                reason: message.stop_reason,
+                error: message,
+            });
+        }
+    });
+    stream
+}
+
+struct StreamFailure {
+    output: AssistantMessage,
+    message: String,
+    cancelled: bool,
+}
+
+impl StreamFailure {
+    fn new(output: AssistantMessage, error: impl std::fmt::Display) -> Self {
+        Self {
+            output,
+            message: error.to_string(),
+            cancelled: false,
+        }
+    }
+
+    fn cancelled(output: AssistantMessage) -> Self {
+        Self {
+            output,
+            message: "Request was aborted".to_string(),
+            cancelled: true,
+        }
+    }
+}
+
+async fn run_stream(
+    model: Model,
+    context: Context,
+    options: OpenAIResponsesOptions,
+    mut output: AssistantMessage,
+    sender: &mut AssistantMessageEventStreamSender,
+) -> std::result::Result<(), StreamFailure> {
+    if options
+        .base
+        .cancellation_token
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Err(StreamFailure::cancelled(output));
+    }
+
+    let api_key = options
+        .base
+        .api_key
+        .clone()
+        .or_else(|| env_api_key(&model.provider))
+        .unwrap_or_default();
+    let compat = get_compat(&model);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention);
+    let mut payload = build_responses_payload(&model, &context, &options, &compat, cache_retention);
+    if let Some(on_payload) = &options.base.on_payload {
+        match on_payload(payload.clone(), &model).await {
+            Ok(Some(next)) => payload = next,
+            Ok(None) => {}
+            Err(error) => return Err(StreamFailure::new(output, error)),
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(format!("{}/responses", trim_end_slash(&model.base_url)))
+        .headers(
+            match headers(&model, &options.base, &api_key, &compat, cache_retention) {
+                Ok(headers) => headers,
+                Err(error) => return Err(StreamFailure::new(output, error)),
+            },
+        )
+        .json(&payload);
+    if let Some(timeout_ms) = options.base.timeout_ms {
+        request = request.timeout(Duration::from_millis(timeout_ms));
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
+    if let Some(on_response) = &options.base.on_response {
+        let provider_response = crate::types::ProviderResponse {
+            status: response.status().as_u16(),
+            headers: response_headers(response.headers()),
+        };
+        if let Err(error) = on_response(provider_response, &model).await {
+            return Err(StreamFailure::new(output, error));
+        }
+    }
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(StreamFailure::new(
+            output,
+            Error::ApiStatus { status, body },
+        ));
+    }
+
+    sender.push(AssistantMessageEvent::Start {
+        partial: output.clone(),
+    });
+
+    let mut current_item: Option<Value> = None;
+    let mut current_block: Option<usize> = None;
+    let mut partial_json: HashMap<usize, String> = HashMap::new();
+    let events = sse::events(response, options.base.cancellation_token.clone());
+    pin_mut!(events);
+    while let Some(event) = events.next().await {
+        if options
+            .base
+            .cancellation_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            return Err(StreamFailure::cancelled(output));
+        }
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => return Err(StreamFailure::new(output, error)),
+        };
+        if event.data.trim().is_empty() || event.data.trim() == "[DONE]" {
+            continue;
+        }
+        let parsed: Value = match serde_json::from_str(&event.data) {
+            Ok(value) => value,
+            Err(error) => return Err(StreamFailure::new(output, error)),
+        };
+        let event_type = parsed
+            .get("type")
+            .and_then(Value::as_str)
+            .or(event.event.as_deref())
+            .unwrap_or_default();
+        match event_type {
+            "response.created" => {
+                if let Some(id) = parsed.pointer("/response/id").and_then(Value::as_str) {
+                    output.response_id = Some(id.to_string());
+                }
+            }
+            "response.output_item.added" => {
+                let Some(item) = parsed.get("item") else {
+                    continue;
+                };
+                current_item = Some(item.clone());
+                match item.get("type").and_then(Value::as_str) {
+                    Some("reasoning") => {
+                        output
+                            .content
+                            .push(AssistantContent::Thinking(ThinkingContent {
+                                thinking: String::new(),
+                                thinking_signature: None,
+                                redacted: None,
+                            }));
+                        let index = output.content.len() - 1;
+                        current_block = Some(index);
+                        sender.push(AssistantMessageEvent::ThinkingStart {
+                            content_index: index,
+                            partial: output.clone(),
+                        });
+                    }
+                    Some("message") => {
+                        output.content.push(AssistantContent::Text(TextContent {
+                            text: String::new(),
+                            text_signature: None,
+                        }));
+                        let index = output.content.len() - 1;
+                        current_block = Some(index);
+                        sender.push(AssistantMessageEvent::TextStart {
+                            content_index: index,
+                            partial: output.clone(),
+                        });
+                    }
+                    Some("function_call") => {
+                        let index = output.content.len();
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let args = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        output.content.push(AssistantContent::ToolCall(ToolCall {
+                            id: format!("{call_id}|{item_id}"),
+                            name: item
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            arguments: parse_streaming_json(Some(args)),
+                            thought_signature: None,
+                        }));
+                        partial_json.insert(index, args.to_string());
+                        current_block = Some(index);
+                        sender.push(AssistantMessageEvent::ToolCallStart {
+                            content_index: index,
+                            partial: output.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            "response.reasoning_summary_part.added" => {
+                if let Some(item) = current_item.as_mut() {
+                    item["summary"].as_array_mut().map(|summary| {
+                        if let Some(part) = parsed.get("part") {
+                            summary.push(part.clone());
+                        }
+                    });
+                    if item.get("summary").is_none() {
+                        item["summary"] =
+                            json!([parsed.get("part").cloned().unwrap_or(Value::Null)]);
+                    }
+                }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let delta = parsed
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(index) = current_block {
+                    if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
+                        block.thinking.push_str(delta);
+                        sender.push(AssistantMessageEvent::ThinkingDelta {
+                            content_index: index,
+                            delta: delta.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                }
+            }
+            "response.reasoning_summary_part.done" => {
+                if let Some(index) = current_block {
+                    if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
+                        block.thinking.push_str("\n\n");
+                        sender.push(AssistantMessageEvent::ThinkingDelta {
+                            content_index: index,
+                            delta: "\n\n".to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                }
+            }
+            "response.output_text.delta" | "response.refusal.delta" => {
+                let delta = parsed
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(index) = current_block {
+                    if let Some(AssistantContent::Text(block)) = output.content.get_mut(index) {
+                        block.text.push_str(delta);
+                        sender.push(AssistantMessageEvent::TextDelta {
+                            content_index: index,
+                            delta: delta.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                let delta = parsed
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(index) = current_block {
+                    let entry = partial_json.entry(index).or_default();
+                    entry.push_str(delta);
+                    if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index) {
+                        block.arguments = parse_streaming_json(Some(entry));
+                        sender.push(AssistantMessageEvent::ToolCallDelta {
+                            content_index: index,
+                            delta: delta.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                }
+            }
+            "response.function_call_arguments.done" => {
+                let arguments = parsed
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(index) = current_block {
+                    let previous = partial_json
+                        .insert(index, arguments.to_string())
+                        .unwrap_or_default();
+                    if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index) {
+                        block.arguments = parse_streaming_json(Some(arguments));
+                        if let Some(delta) =
+                            arguments.strip_prefix(&previous).filter(|s| !s.is_empty())
+                        {
+                            sender.push(AssistantMessageEvent::ToolCallDelta {
+                                content_index: index,
+                                delta: delta.to_string(),
+                                partial: output.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            "response.output_item.done" => {
+                let item = parsed.get("item").cloned().unwrap_or_default();
+                if let Some(index) = current_block {
+                    match item.get("type").and_then(Value::as_str) {
+                        Some("reasoning") => {
+                            if let Some(AssistantContent::Thinking(block)) =
+                                output.content.get_mut(index)
+                            {
+                                let summary_text = item
+                                    .get("summary")
+                                    .and_then(Value::as_array)
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|part| {
+                                                part.get("text").and_then(Value::as_str)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n")
+                                    })
+                                    .unwrap_or_default();
+                                let content_text = item
+                                    .get("content")
+                                    .and_then(Value::as_array)
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|part| {
+                                                part.get("text").and_then(Value::as_str)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n")
+                                    })
+                                    .unwrap_or_default();
+                                if !summary_text.is_empty() || !content_text.is_empty() {
+                                    block.thinking = if summary_text.is_empty() {
+                                        content_text
+                                    } else {
+                                        summary_text
+                                    };
+                                }
+                                block.thinking_signature = Some(item.to_string());
+                                sender.push(AssistantMessageEvent::ThinkingEnd {
+                                    content_index: index,
+                                    content: block.thinking.clone(),
+                                    partial: output.clone(),
+                                });
+                            }
+                        }
+                        Some("message") => {
+                            if let Some(AssistantContent::Text(block)) =
+                                output.content.get_mut(index)
+                            {
+                                let text = item
+                                    .get("content")
+                                    .and_then(Value::as_array)
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|part| {
+                                                part.get("text")
+                                                    .or_else(|| part.get("refusal"))
+                                                    .and_then(Value::as_str)
+                                            })
+                                            .collect::<String>()
+                                    })
+                                    .unwrap_or_else(|| block.text.clone());
+                                block.text = text;
+                                if let Some(id) = item.get("id").and_then(Value::as_str) {
+                                    let phase = match item.get("phase").and_then(Value::as_str) {
+                                        Some("commentary") => Some(TextPhase::Commentary),
+                                        Some("final_answer") => Some(TextPhase::FinalAnswer),
+                                        _ => None,
+                                    };
+                                    block.text_signature =
+                                        serde_json::to_string(&TextSignatureV1 {
+                                            v: 1,
+                                            id: id.to_string(),
+                                            phase,
+                                        })
+                                        .ok();
+                                }
+                                sender.push(AssistantMessageEvent::TextEnd {
+                                    content_index: index,
+                                    content: block.text.clone(),
+                                    partial: output.clone(),
+                                });
+                            }
+                        }
+                        Some("function_call") => {
+                            if let Some(AssistantContent::ToolCall(block)) =
+                                output.content.get_mut(index)
+                            {
+                                let args = partial_json
+                                    .get(&index)
+                                    .map(String::as_str)
+                                    .or_else(|| item.get("arguments").and_then(Value::as_str))
+                                    .unwrap_or("{}");
+                                block.arguments = parse_streaming_json(Some(args));
+                                sender.push(AssistantMessageEvent::ToolCallEnd {
+                                    content_index: index,
+                                    tool_call: block.clone(),
+                                    partial: output.clone(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current_block = None;
+                current_item = None;
+            }
+            "response.completed" => {
+                let response = parsed.get("response").unwrap_or(&parsed);
+                if let Some(id) = response.get("id").and_then(Value::as_str) {
+                    output.response_id = Some(id.to_string());
+                }
+                if let Some(usage) = response.get("usage") {
+                    output.usage = parse_response_usage(usage, &model);
+                    if let Some(service_tier) = options
+                        .service_tier
+                        .as_deref()
+                        .or_else(|| response.get("service_tier").and_then(Value::as_str))
+                    {
+                        apply_service_tier_pricing(&mut output.usage, service_tier, &model);
+                    }
+                }
+                output.stop_reason = map_status(response.get("status").and_then(Value::as_str));
+                if output
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, AssistantContent::ToolCall(_)))
+                    && output.stop_reason == StopReason::Stop
+                {
+                    output.stop_reason = StopReason::ToolUse;
+                }
+            }
+            "error" => {
+                let code = parsed
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let message = parsed
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown error");
+                return Err(StreamFailure::new(
+                    output,
+                    format!("Error Code {code}: {message}"),
+                ));
+            }
+            "response.failed" => {
+                let response = parsed.get("response").unwrap_or(&parsed);
+                let message = response
+                    .get("error")
+                    .map(|error| {
+                        format!(
+                            "{}: {}",
+                            error
+                                .get("code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
+                            error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("no message")
+                        )
+                    })
+                    .or_else(|| {
+                        response
+                            .pointer("/incomplete_details/reason")
+                            .and_then(Value::as_str)
+                            .map(|reason| format!("incomplete: {reason}"))
+                    })
+                    .unwrap_or_else(|| "Unknown error (no error details in response)".to_string());
+                return Err(StreamFailure::new(output, message));
+            }
+            _ => {}
+        }
+    }
+
+    if options
+        .base
+        .cancellation_token
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Err(StreamFailure::cancelled(output));
+    }
+    if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
+        return Err(StreamFailure::new(output, "An unknown error occurred"));
+    }
+    sender.push(AssistantMessageEvent::Done {
+        reason: output.stop_reason,
+        message: output,
+    });
+    Ok(())
+}
+
+pub fn build_responses_payload(
+    model: &Model,
+    context: &Context,
+    options: &OpenAIResponsesOptions,
+    compat: &ResolvedOpenAIResponsesCompat,
+    cache_retention: CacheRetention,
+) -> Value {
+    let messages = convert_responses_messages(
+        model,
+        context,
+        &OPENAI_TOOL_CALL_PROVIDERS.iter().copied().collect(),
+        true,
+    );
+    let mut payload = json!({
+        "model": model.id,
+        "input": messages,
+        "stream": true,
+        "store": false
+    });
+    let object = payload.as_object_mut().expect("payload object");
+    if let Some(max_tokens) = options.base.max_tokens {
+        object.insert("max_output_tokens".to_string(), json!(max_tokens));
+    }
+    if let Some(temperature) = options.base.temperature {
+        object.insert("temperature".to_string(), json!(temperature));
+    }
+    if let Some(service_tier) = &options.service_tier {
+        object.insert("service_tier".to_string(), json!(service_tier));
+    }
+    if !context.tools.is_empty() {
+        object.insert(
+            "tools".to_string(),
+            Value::Array(convert_responses_tools(&context.tools, Some(false))),
+        );
+    }
+    if cache_retention != CacheRetention::None {
+        if let Some(session_id) = &options.base.session_id {
+            object.insert(
+                "prompt_cache_key".to_string(),
+                json!(clamp_openai_prompt_cache_key(session_id)),
+            );
+        }
+    }
+    if cache_retention == CacheRetention::Long && compat.supports_long_cache_retention {
+        object.insert("prompt_cache_retention".to_string(), json!("24h"));
+    }
+    if model.reasoning {
+        if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
+            let effort = options
+                .reasoning_effort
+                .and_then(|effort| {
+                    model
+                        .thinking_level_map
+                        .get(effort.as_str())
+                        .cloned()
+                        .flatten()
+                })
+                .or_else(|| {
+                    options
+                        .reasoning_effort
+                        .map(|effort| effort.as_str().to_string())
+                })
+                .unwrap_or_else(|| "medium".to_string());
+            let summary = options
+                .reasoning_summary
+                .clone()
+                .flatten()
+                .unwrap_or_else(|| "auto".to_string());
+            object.insert(
+                "reasoning".to_string(),
+                json!({ "effort": effort, "summary": summary }),
+            );
+            object.insert(
+                "include".to_string(),
+                json!(["reasoning.encrypted_content"]),
+            );
+        } else if model.provider != "github-copilot"
+            && model.thinking_level_map.get("off") != Some(&None)
+        {
+            object.insert(
+                "reasoning".to_string(),
+                json!({ "effort": model.thinking_level_map.get("off").and_then(Clone::clone).unwrap_or_else(|| "none".to_string()) }),
+            );
+        }
+    }
+    payload
+}
+
+pub fn convert_responses_messages(
+    model: &Model,
+    context: &Context,
+    allowed_tool_call_providers: &HashSet<&str>,
+    include_system_prompt: bool,
+) -> Vec<Value> {
+    let mut messages = Vec::new();
+    let transformed = transform_messages(
+        context.messages.as_slice(),
+        model,
+        |id, target_model, source| {
+            normalize_responses_tool_call_id(id, target_model, source, allowed_tool_call_providers)
+        },
+    );
+    if include_system_prompt {
+        if let Some(system_prompt) = &context.system_prompt {
+            messages.push(json!({
+                "role": if model.reasoning { "developer" } else { "system" },
+                "content": sanitize_surrogates(system_prompt),
+            }));
+        }
+    }
+
+    let mut msg_index = 0usize;
+    for msg in transformed {
+        match msg {
+            crate::types::Message::User(user) => match user.content {
+                UserMessageContent::Text(text) => messages.push(json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": sanitize_surrogates(&text) }]
+                })),
+                UserMessageContent::Parts(parts) => {
+                    let content: Vec<Value> = parts
+                        .iter()
+                        .map(|item| match item {
+                            UserContent::Text(text) => {
+                                json!({ "type": "input_text", "text": sanitize_surrogates(&text.text) })
+                            }
+                            UserContent::Image(image) => json!({
+                                "type": "input_image",
+                                "detail": "auto",
+                                "image_url": format!("data:{};base64,{}", image.mime_type, image.data)
+                            }),
+                        })
+                        .collect();
+                    if !content.is_empty() {
+                        messages.push(json!({ "role": "user", "content": content }));
+                    }
+                }
+            },
+            crate::types::Message::Assistant(assistant) => {
+                let mut output = Vec::new();
+                let is_different_model = assistant.model != model.id
+                    && assistant.provider == model.provider
+                    && assistant.api == model.api;
+                let mut text_block_index = 0usize;
+                for block in assistant.content {
+                    match block {
+                        AssistantContent::Thinking(thinking) => {
+                            if let Some(signature) = thinking.thinking_signature {
+                                if let Ok(reasoning_item) =
+                                    serde_json::from_str::<Value>(&signature)
+                                {
+                                    output.push(reasoning_item);
+                                }
+                            }
+                        }
+                        AssistantContent::Text(text) => {
+                            let parsed_signature =
+                                parse_text_signature(text.text_signature.as_deref());
+                            let fallback_id = if text_block_index == 0 {
+                                format!("msg_pi_{msg_index}")
+                            } else {
+                                format!("msg_pi_{msg_index}_{text_block_index}")
+                            };
+                            text_block_index += 1;
+                            let msg_id = parsed_signature
+                                .as_ref()
+                                .map(|sig| sig.0.clone())
+                                .unwrap_or(fallback_id);
+                            let msg_id = if msg_id.len() > 64 {
+                                format!("msg_{}", short_hash(&msg_id))
+                            } else {
+                                msg_id
+                            };
+                            let mut item = json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{ "type": "output_text", "text": sanitize_surrogates(&text.text), "annotations": [] }],
+                                "status": "completed",
+                                "id": msg_id,
+                            });
+                            if let Some((_, Some(phase))) = parsed_signature {
+                                item["phase"] = json!(match phase {
+                                    TextPhase::Commentary => "commentary",
+                                    TextPhase::FinalAnswer => "final_answer",
+                                });
+                            }
+                            output.push(item);
+                        }
+                        AssistantContent::ToolCall(tool_call) => {
+                            let (call_id, item_id_raw) = tool_call
+                                .id
+                                .split_once('|')
+                                .map(|(call_id, item_id)| {
+                                    (call_id.to_string(), Some(item_id.to_string()))
+                                })
+                                .unwrap_or_else(|| (tool_call.id.clone(), None));
+                            let item_id = if is_different_model
+                                && item_id_raw
+                                    .as_deref()
+                                    .is_some_and(|id| id.starts_with("fc_"))
+                            {
+                                None
+                            } else {
+                                item_id_raw
+                            };
+                            output.push(json!({
+                                "type": "function_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": tool_call.name,
+                                "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_else(|_| "{}".to_string())
+                            }));
+                        }
+                    }
+                }
+                messages.extend(output);
+            }
+            crate::types::Message::ToolResult(tool_result) => {
+                let text_result = tool_result
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        ToolResultContent::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let has_images = tool_result
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, ToolResultContent::Image(_)));
+                let (call_id, _) = tool_result
+                    .tool_call_id
+                    .split_once('|')
+                    .unwrap_or((&tool_result.tool_call_id, ""));
+                let output = if has_images && model.input.contains(&ModelInput::Image) {
+                    let mut content = Vec::new();
+                    if !text_result.is_empty() {
+                        content.push(json!({ "type": "input_text", "text": sanitize_surrogates(&text_result) }));
+                    }
+                    for block in tool_result.content {
+                        if let ToolResultContent::Image(ImageContent { data, mime_type }) = block {
+                            content.push(json!({
+                                "type": "input_image",
+                                "detail": "auto",
+                                "image_url": format!("data:{mime_type};base64,{data}")
+                            }));
+                        }
+                    }
+                    Value::Array(content)
+                } else {
+                    json!(sanitize_surrogates(if text_result.is_empty() {
+                        "(see attached image)"
+                    } else {
+                        &text_result
+                    }))
+                };
+                messages.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output
+                }));
+            }
+        }
+        msg_index += 1;
+    }
+    messages
+}
+
+pub fn convert_responses_tools(tools: &[Tool], strict: Option<bool>) -> Vec<Value> {
+    let strict = strict.unwrap_or(false);
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": strict
+            })
+        })
+        .collect()
+}
+
+fn normalize_responses_tool_call_id(
+    id: &str,
+    model: &Model,
+    source: &AssistantMessage,
+    allowed_tool_call_providers: &HashSet<&str>,
+) -> String {
+    let normalize_id_part = |part: &str| {
+        let sanitized: String = part
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        sanitized
+            .chars()
+            .take(64)
+            .collect::<String>()
+            .trim_end_matches('_')
+            .to_string()
+    };
+    if !allowed_tool_call_providers.contains(model.provider.as_str()) {
+        return normalize_id_part(id);
+    }
+    if !id.contains('|') {
+        return normalize_id_part(id);
+    }
+    let (call_id, item_id) = id.split_once('|').unwrap_or((id, ""));
+    let normalized_call_id = normalize_id_part(call_id);
+    let is_foreign = source.provider != model.provider || source.api != model.api;
+    let mut normalized_item_id = if is_foreign {
+        format!("fc_{}", short_hash(item_id))
+    } else {
+        normalize_id_part(item_id)
+    };
+    if !normalized_item_id.starts_with("fc_") {
+        normalized_item_id = normalize_id_part(&format!("fc_{normalized_item_id}"));
+    }
+    format!("{normalized_call_id}|{normalized_item_id}")
+}
+
+fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextPhase>)> {
+    let signature = signature?;
+    if signature.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<TextSignatureV1>(signature) {
+            return Some((parsed.id, parsed.phase));
+        }
+    }
+    Some((signature.to_string(), None))
+}
+
+fn parse_response_usage(raw: &Value, model: &Model) -> Usage {
+    let input_tokens = raw.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let output_tokens = raw
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let cached_tokens = raw
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let mut usage = Usage {
+        input: input_tokens.saturating_sub(cached_tokens),
+        output: output_tokens,
+        cache_read: cached_tokens,
+        cache_write: 0,
+        total_tokens: raw.get("total_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+        cost: Default::default(),
+    };
+    calculate_cost(model, &mut usage);
+    usage
+}
+
+fn map_status(status: Option<&str>) -> StopReason {
+    match status {
+        Some("completed") | None => StopReason::Stop,
+        Some("incomplete") => StopReason::Length,
+        Some("failed") | Some("cancelled") => StopReason::Error,
+        Some("in_progress") | Some("queued") => StopReason::Stop,
+        Some(_) => StopReason::Error,
+    }
+}
+
+fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
+    ResolvedOpenAIResponsesCompat {
+        send_session_id_header: model
+            .compat
+            .openai_responses
+            .send_session_id_header
+            .unwrap_or(true),
+        supports_long_cache_retention: model
+            .compat
+            .openai_responses
+            .supports_long_cache_retention
+            .unwrap_or(true),
+    }
+}
+
+fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+    cache_retention
+        .or_else(|| {
+            (std::env::var("PI_CACHE_RETENTION").ok().as_deref() == Some("long"))
+                .then_some(CacheRetention::Long)
+        })
+        .unwrap_or(CacheRetention::Short)
+}
+
+fn headers(
+    model: &Model,
+    options: &StreamOptions,
+    api_key: &str,
+    compat: &ResolvedOpenAIResponsesCompat,
+    cache_retention: CacheRetention,
+) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    if !api_key.is_empty() {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|e| Error::InvalidHeaderValue("authorization".to_string(), e))?,
+        );
+    }
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    for (name, value) in model.headers.iter().chain(options.headers.iter()) {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+        headers.insert(name, value);
+    }
+    if let Some(session_id) = &options.session_id {
+        if cache_retention != CacheRetention::None {
+            if compat.send_session_id_header {
+                headers.insert(
+                    HeaderName::from_static("session_id"),
+                    HeaderValue::from_str(session_id)
+                        .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
+                );
+            }
+            headers.insert(
+                HeaderName::from_static("x-client-request-id"),
+                HeaderValue::from_str(session_id)
+                    .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
+            );
+        }
+    }
+    Ok(headers)
+}
+
+fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
+}
+
+fn clamp_openai_prompt_cache_key(session_id: &str) -> String {
+    session_id.chars().take(64).collect()
+}
+
+fn get_service_tier_multiplier(model: &Model, service_tier: &str) -> f64 {
+    match service_tier {
+        "flex" => 0.5,
+        "priority" if model.id == "gpt-5.5" => 2.5,
+        "priority" => 2.0,
+        _ => 1.0,
+    }
+}
+
+fn apply_service_tier_pricing(usage: &mut Usage, service_tier: &str, model: &Model) {
+    let multiplier = get_service_tier_multiplier(model, service_tier);
+    if multiplier == 1.0 {
+        return;
+    }
+    usage.cost.input *= multiplier;
+    usage.cost.output *= multiplier;
+    usage.cost.cache_read *= multiplier;
+    usage.cost.cache_write *= multiplier;
+    usage.cost.total =
+        usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
+}
+
+fn env_api_key(provider: &str) -> Option<String> {
+    crate::env_api_keys::get_env_api_key(provider)
+}
+
+fn trim_end_slash(url: &str) -> &str {
+    url.trim_end_matches('/')
+}
+
+fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
+    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
+    let mut output = AssistantMessage::empty_for(&model);
+    output.stop_reason = StopReason::Error;
+    output.error_message = Some(format!("{message}: {}", model.provider));
+    sender.push(AssistantMessageEvent::Error {
+        reason: StopReason::Error,
+        error: output,
+    });
+    stream
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Message, ModelCost};
+
+    fn model() -> Model {
+        Model {
+            id: "gpt-5.5".to_string(),
+            name: "GPT 5.5".to_string(),
+            api: "openai-responses".to_string(),
+            provider: "openai".to_string(),
+            base_url: "http://localhost:4141/v1".to_string(),
+            reasoning: true,
+            input: vec![ModelInput::Text, ModelInput::Image],
+            cost: ModelCost::default(),
+            context_window: 1_000_000,
+            max_tokens: 4096,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn builds_responses_payload_with_reasoning() {
+        let model = model();
+        let context = Context {
+            system_prompt: Some("sys".to_string()),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let options = OpenAIResponsesOptions {
+            reasoning_effort: Some(ModelThinkingLevel::Low),
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+        assert_eq!(payload["input"][0]["role"], "developer");
+        assert_eq!(payload["reasoning"]["effort"], "low");
+        assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+}
