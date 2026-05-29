@@ -75,6 +75,7 @@ pub fn stream_azure_openai_responses(
                 config.api_version
             )),
             request_model: Some(deployment_name),
+            payload_override: None,
             include_store: Some(false),
             auth_header: OpenAIResponsesAuthHeader::ApiKey,
         },

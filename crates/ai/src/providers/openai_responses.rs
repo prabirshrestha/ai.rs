@@ -36,6 +36,7 @@ pub struct OpenAIResponsesOptions {
     pub service_tier: Option<String>,
     pub request_url: Option<String>,
     pub request_model: Option<String>,
+    pub payload_override: Option<Value>,
     pub include_store: Option<bool>,
     pub auth_header: OpenAIResponsesAuthHeader,
 }
@@ -157,7 +158,9 @@ async fn run_stream(
         .unwrap_or_default();
     let compat = get_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
-    let mut payload = build_responses_payload(&model, &context, &options, &compat, cache_retention);
+    let mut payload = options.payload_override.clone().unwrap_or_else(|| {
+        build_responses_payload(&model, &context, &options, &compat, cache_retention)
+    });
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -528,7 +531,7 @@ async fn run_stream(
                 current_block = None;
                 current_item = None;
             }
-            "response.completed" => {
+            "response.completed" | "response.done" | "response.incomplete" => {
                 let response = parsed.get("response").unwrap_or(&parsed);
                 if let Some(id) = response.get("id").and_then(Value::as_str) {
                     output.response_id = Some(id.to_string());

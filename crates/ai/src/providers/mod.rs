@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod azure_openai_responses;
+pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
 pub mod register_builtins;

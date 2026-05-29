@@ -1,7 +1,9 @@
 use std::sync::OnceLock;
 
 use crate::api_registry::{self, ApiProvider};
-use crate::providers::{anthropic, azure_openai_responses, openai_completions, openai_responses};
+use crate::providers::{
+    anthropic, azure_openai_responses, openai_codex_responses, openai_completions, openai_responses,
+};
 use crate::types::{Context, Model, SimpleStreamOptions};
 use crate::{AssistantMessageEventStream, Result};
 
@@ -97,6 +99,42 @@ pub fn register_builtins() {
                  -> Result<AssistantMessageEventStream> {
                     Ok(
                         azure_openai_responses::stream_simple_azure_openai_responses(
+                            model, context, options,
+                        ),
+                    )
+                },
+            ),
+        },
+        Some("builtin".to_string()),
+    );
+
+    api_registry::register_api_provider(
+        ApiProvider {
+            api: "openai-codex-responses".to_string(),
+            stream: api_registry::wrap_stream(
+                "openai-codex-responses",
+                |model, context, options| {
+                    Ok(openai_codex_responses::stream_openai_codex_responses(
+                        model,
+                        context,
+                        openai_codex_responses::OpenAICodexResponsesOptions {
+                            base: options,
+                            reasoning_effort: None,
+                            reasoning_summary: None,
+                            service_tier: None,
+                            text_verbosity: None,
+                        },
+                    ))
+                },
+            ),
+            stream_simple: api_registry::wrap_stream_simple(
+                "openai-codex-responses",
+                |model: Model,
+                 context: Context,
+                 options: SimpleStreamOptions|
+                 -> Result<AssistantMessageEventStream> {
+                    Ok(
+                        openai_codex_responses::stream_simple_openai_codex_responses(
                             model, context, options,
                         ),
                     )
