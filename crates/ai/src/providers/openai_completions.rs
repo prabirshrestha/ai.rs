@@ -1369,7 +1369,9 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, ModelCost};
+    use crate::types::{
+        Message, ModelCompat, ModelCost, OpenAICompletionsCompat, ToolResultMessage,
+    };
 
     fn model() -> Model {
         Model {
@@ -1410,5 +1412,248 @@ mod tests {
         assert_eq!(payload["messages"][0]["role"], "developer");
         assert_eq!(payload["reasoning_effort"], "low");
         assert_eq!(payload["stream"], true);
+    }
+
+    fn assistant_message(content: Vec<AssistantContent>, model: &Model) -> AssistantMessage {
+        AssistantMessage {
+            content,
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 2,
+        }
+    }
+
+    fn tool_result(tool_call_id: &str, timestamp: u64) -> ToolResultMessage {
+        ToolResultMessage {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "read".to_string(),
+            content: vec![
+                ToolResultContent::text("Read image file [image/png]"),
+                ToolResultContent::Image(ImageContent {
+                    data: "ZmFrZQ==".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+            ],
+            details: None,
+            is_error: false,
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn serializes_same_model_thinking_plus_text_as_text_parts() {
+        let model = model();
+        let mut compat = get_compat(&model);
+        compat.requires_thinking_as_text = true;
+        let assistant = assistant_message(
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "internal reasoning".to_string(),
+                    thinking_signature: None,
+                    redacted: None,
+                }),
+                AssistantContent::Text(TextContent {
+                    text: "visible answer".to_string(),
+                    text_signature: None,
+                }),
+            ],
+            &model,
+        );
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("hello"),
+                Message::Assistant(assistant),
+                Message::user_text("continue"),
+            ],
+            tools: Vec::new(),
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+
+        assert_eq!(
+            messages[1],
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "internal reasoning" },
+                    { "type": "text", "text": "visible answer" }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_same_model_thinking_only_as_text_parts() {
+        let model = model();
+        let mut compat = get_compat(&model);
+        compat.requires_thinking_as_text = true;
+        let assistant = assistant_message(
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "internal reasoning".to_string(),
+                thinking_signature: None,
+                redacted: None,
+            })],
+            &model,
+        );
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("hello"),
+                Message::Assistant(assistant),
+                Message::user_text("continue"),
+            ],
+            tools: Vec::new(),
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+
+        assert_eq!(
+            messages[1],
+            json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "internal reasoning" }]
+            })
+        );
+    }
+
+    #[test]
+    fn batches_tool_result_images_after_consecutive_tool_results() {
+        let model = model();
+        let compat = get_compat(&model);
+        let assistant = assistant_message(
+            vec![
+                AssistantContent::ToolCall(ToolCall {
+                    id: "tool-1".to_string(),
+                    name: "read".to_string(),
+                    arguments: json!({ "path": "img-1.png" }),
+                    thought_signature: None,
+                }),
+                AssistantContent::ToolCall(ToolCall {
+                    id: "tool-2".to_string(),
+                    name: "read".to_string(),
+                    arguments: json!({ "path": "img-2.png" }),
+                    thought_signature: None,
+                }),
+            ],
+            &model,
+        );
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("Read the images"),
+                Message::Assistant(assistant),
+                Message::ToolResult(tool_result("tool-1", 3)),
+                Message::ToolResult(tool_result("tool-2", 4)),
+            ],
+            tools: Vec::new(),
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+        let roles = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let image_parts = messages
+            .last()
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .expect("image user content")
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+            .count();
+
+        assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
+        assert_eq!(image_parts, 2);
+    }
+
+    #[test]
+    fn applies_anthropic_cache_markers_when_compat_enables_them() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                cache_control_format: Some(CacheControlFormat::Anthropic),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let compat = get_compat(&model);
+        let context = Context {
+            system_prompt: Some("System prompt".to_string()),
+            messages: vec![Message::user_text("Hello")],
+            tools: vec![Tool {
+                name: "read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            }],
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            payload["tools"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            payload["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn omits_anthropic_cache_markers_when_cache_retention_is_none() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                cache_control_format: Some(CacheControlFormat::Anthropic),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let compat = get_compat(&model);
+        let context = Context {
+            system_prompt: Some("System prompt".to_string()),
+            messages: vec![Message::user_text("Hello")],
+            tools: vec![Tool {
+                name: "read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: json!({ "type": "object" }),
+            }],
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::None,
+        );
+
+        assert!(payload["messages"][0]["content"].as_str().is_some());
+        assert!(payload["tools"][0].get("cache_control").is_none());
+        assert!(payload["messages"][1]["content"].as_str().is_some());
     }
 }
