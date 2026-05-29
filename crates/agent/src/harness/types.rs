@@ -70,6 +70,99 @@ pub struct Skill {
     pub disable_model_invocation: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileErrorCode {
+    Aborted,
+    NotFound,
+    PermissionDenied,
+    NotDirectory,
+    IsDirectory,
+    Invalid,
+    NotSupported,
+    Unknown,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct FileError {
+    pub code: FileErrorCode,
+    message: String,
+    pub path: Option<String>,
+}
+
+impl FileError {
+    pub fn new(code: FileErrorCode, message: impl Into<String>, path: Option<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            path,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInfo {
+    pub kind: FileKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMetadata {
+    pub name: String,
+    pub path: String,
+    pub kind: FileKind,
+    pub size: u64,
+    pub mtime_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionErrorCode {
+    Aborted,
+    Timeout,
+    ShellUnavailable,
+    SpawnError,
+    CallbackError,
+    Unknown,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct ExecutionError {
+    pub code: ExecutionErrorCode,
+    message: String,
+}
+
+impl ExecutionError {
+    pub fn new(code: ExecutionErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+pub type FileResult<T> = std::result::Result<T, FileError>;
+pub type ExecutionResult<T> = std::result::Result<T, ExecutionError>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
