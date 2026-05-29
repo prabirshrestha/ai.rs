@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ai::{ImageContent, Message, Model, SimpleStreamOptions};
+use ai::{
+    AssistantContent, AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions,
+    StopReason, TextContent, Usage,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -234,7 +237,7 @@ impl Agent {
                 self.create_context_snapshot().await,
                 self.create_loop_config().await,
                 self.event_sink(),
-                token,
+                token.clone(),
                 self.stream_fn.clone(),
             )
             .await
@@ -244,10 +247,17 @@ impl Agent {
                 self.create_context_snapshot().await,
                 self.create_loop_config().await,
                 self.event_sink(),
-                token,
+                token.clone(),
                 self.stream_fn.clone(),
             )
             .await
+        };
+
+        let failure_result = if let Err(error) = result {
+            let aborted = token.as_ref().is_some_and(CancellationToken::is_cancelled);
+            self.emit_run_failure(error, aborted).await
+        } else {
+            Ok(())
         };
 
         let mut state = self.state.lock().await;
@@ -256,7 +266,51 @@ impl Agent {
         state.pending_tool_calls.clear();
         drop(state);
         *self.active_token.lock().await = None;
-        result.map(|_| ())
+        failure_result
+    }
+
+    async fn emit_run_failure(&self, error: AgentError, aborted: bool) -> Result<()> {
+        let state = self.state.lock().await;
+        let failure = Message::Assistant(AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            })],
+            api: state.model.api.clone(),
+            provider: state.model.provider.clone(),
+            model: state.model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: if aborted {
+                StopReason::Aborted
+            } else {
+                StopReason::Error
+            },
+            error_message: Some(error.to_string()),
+            timestamp: ai::utils::time::now_millis(),
+        });
+        drop(state);
+
+        let sink = self.event_sink();
+        sink(AgentEvent::MessageStart {
+            message: failure.clone(),
+        })
+        .await?;
+        sink(AgentEvent::MessageEnd {
+            message: failure.clone(),
+        })
+        .await?;
+        sink(AgentEvent::TurnEnd {
+            message: failure.clone(),
+            tool_results: Vec::new(),
+        })
+        .await?;
+        sink(AgentEvent::AgentEnd {
+            messages: vec![failure],
+        })
+        .await
     }
 
     async fn create_context_snapshot(&self) -> AgentContext {
