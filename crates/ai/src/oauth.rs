@@ -29,6 +29,7 @@ const ANTHROPIC_REDIRECT_URI: &str = "http://localhost:53692/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const OAUTH_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
+const ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
 const DEFAULT_COPILOT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 const CANCEL_MESSAGE: &str = "Login cancelled";
@@ -591,6 +592,13 @@ pub async fn login_anthropic(callbacks: OAuthLoginCallbacks) -> Result<OAuthCred
             .and_then(|input| input.code.as_ref())
             .is_none()
         {
+            if callbacks
+                .cancellation_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(Error::Provider(CANCEL_MESSAGE.to_string()));
+            }
             let input = (callbacks.on_prompt)(OAuthPrompt {
                 message: "Paste the authorization code or full redirect URL:".to_string(),
                 placeholder: Some(ANTHROPIC_REDIRECT_URI.to_string()),
@@ -743,6 +751,7 @@ fn parse_authorization_input(input: &str) -> AuthorizationInput {
     }
 
     if value.contains("code=") {
+        let value = value.strip_prefix('?').unwrap_or(value);
         return AuthorizationInput {
             code: query_param(value, "code"),
             state: query_param(value, "state"),
@@ -1182,6 +1191,7 @@ async fn exchange_anthropic_authorization_code_at(
     let response = client
         .post(token_url)
         .header("Accept", "application/json")
+        .timeout(Duration::from_millis(ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS))
         .json(&serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": ANTHROPIC_CLIENT_ID,
@@ -1203,6 +1213,7 @@ async fn refresh_anthropic_token_at(
     let response = client
         .post(token_url)
         .header("Accept", "application/json")
+        .timeout(Duration::from_millis(ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS))
         .json(&serde_json::json!({
             "grant_type": "refresh_token",
             "client_id": ANTHROPIC_CLIENT_ID,
@@ -1484,6 +1495,13 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_authorization_input("?code=abc&state=verifier"),
+            AuthorizationInput {
+                code: Some("abc".to_string()),
+                state: Some("verifier".to_string())
+            }
+        );
+        assert_eq!(
             parse_authorization_input("code=abc%2Bdef&state=verifier%2Bvalue"),
             AuthorizationInput {
                 code: Some("abc+def".to_string()),
@@ -1553,6 +1571,38 @@ mod tests {
             error.to_string(),
             "provider error: Anthropic OAuth login requires an on_auth callback"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anthropic_login_cancellation_does_not_fall_back_to_prompt() {
+        let cancellation_token = CancellationToken::new();
+        let prompt_calls = Arc::new(Mutex::new(0_usize));
+        let callbacks = OAuthLoginCallbacks {
+            on_auth: Some({
+                let cancellation_token = cancellation_token.clone();
+                Arc::new(move |_| cancellation_token.cancel())
+            }),
+            on_device_code: Arc::new(|_| {}),
+            on_prompt: {
+                let prompt_calls = Arc::clone(&prompt_calls);
+                Arc::new(move |_| {
+                    *prompt_calls.lock().expect("prompt lock poisoned") += 1;
+                    Box::pin(async { Err(Error::Provider("prompt should not run".to_string())) })
+                })
+            },
+            on_progress: None,
+            on_manual_code_input: None,
+            on_select: None,
+            cancellation_token: Some(cancellation_token),
+        };
+
+        let error = tokio::time::timeout(Duration::from_secs(2), login_anthropic(callbacks))
+            .await
+            .expect("login should observe cancellation")
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "provider error: Login cancelled");
+        assert_eq!(*prompt_calls.lock().expect("prompt lock poisoned"), 0);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::{StreamExt, pin_mut};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -68,6 +70,7 @@ impl AnthropicThinkingDisplay {
 #[derive(Clone)]
 pub struct AnthropicOptions {
     pub base: StreamOptions,
+    pub client: Option<Arc<dyn AnthropicClient>>,
     pub thinking_enabled: Option<bool>,
     pub thinking_budget_tokens: Option<u32>,
     pub effort: Option<AnthropicEffort>,
@@ -80,6 +83,7 @@ impl Default for AnthropicOptions {
     fn default() -> Self {
         Self {
             base: StreamOptions::default(),
+            client: None,
             thinking_enabled: None,
             thinking_budget_tokens: None,
             effort: None,
@@ -88,6 +92,20 @@ impl Default for AnthropicOptions {
             tool_choice: None,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct AnthropicClientRequest {
+    pub url: String,
+    pub headers: HeaderMap,
+    pub payload: Value,
+    pub model: Model,
+    pub options: StreamOptions,
+}
+
+#[async_trait]
+pub trait AnthropicClient: Send + Sync {
+    async fn send_stream(&self, request: AnthropicClientRequest) -> Result<reqwest::Response>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -229,17 +247,18 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let Some(api_key) = options
+    let api_key = options
         .base
         .api_key
         .clone()
-        .filter(|key| !key.trim().is_empty())
-    else {
+        .filter(|key| !key.trim().is_empty());
+    if api_key.is_none() && options.client.is_none() {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
         ));
-    };
+    }
+    let api_key = api_key.unwrap_or_default();
     let is_oauth = is_oauth_token(&api_key);
     let compat = get_anthropic_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
@@ -272,15 +291,27 @@ async fn run_stream(
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let client = reqwest::Client::new();
-    let response = match send_with_retries(&options.base, || {
+    let response_result = if let Some(client) = options.client.clone() {
         client
-            .post(request_url.as_str())
-            .headers(request_headers.clone())
-            .json(&payload)
-            .timeout(request_timeout(options.base.timeout_ms))
-    })
-    .await
-    {
+            .send_stream(AnthropicClientRequest {
+                url: request_url,
+                headers: request_headers,
+                payload,
+                model: model.clone(),
+                options: options.base.clone(),
+            })
+            .await
+    } else {
+        send_with_retries(&options.base, || {
+            client
+                .post(request_url.as_str())
+                .headers(request_headers.clone())
+                .json(&payload)
+                .timeout(request_timeout(options.base.timeout_ms))
+        })
+        .await
+    };
+    let response = match response_result {
         Ok(response) => response,
         Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
         Err(error) => return Err(StreamFailure::new(output, error)),
@@ -958,8 +989,6 @@ fn update_anthropic_usage(output: &mut AssistantMessage, usage: &Value, model: &
 
 fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
     let is_fireworks = model.provider == "fireworks";
-    let is_cloudflare_anthropic =
-        model.provider == "cloudflare-ai-gateway" && model.base_url.contains("anthropic");
     let compat = &model.compat.anthropic_messages;
     ResolvedAnthropicCompat {
         supports_eager_tool_input_streaming: compat
@@ -968,9 +997,7 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         supports_long_cache_retention: compat
             .supports_long_cache_retention
             .unwrap_or(!is_fireworks),
-        send_session_affinity_headers: compat
-            .send_session_affinity_headers
-            .unwrap_or(is_fireworks || is_cloudflare_anthropic),
+        send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(is_fireworks),
         supports_cache_control_on_tools: compat
             .supports_cache_control_on_tools
             .unwrap_or(!is_fireworks),
@@ -1980,12 +2007,7 @@ mod tests {
         );
         assert!(request_headers.get("x-api-key").is_none());
         assert!(request_headers.get("authorization").is_none());
-        assert_eq!(
-            request_headers
-                .get("x-session-affinity")
-                .and_then(|value| value.to_str().ok()),
-            Some("session-123")
-        );
+        assert!(request_headers.get("x-session-affinity").is_none());
 
         options.base.headers.insert(
             "authorization".to_string(),
