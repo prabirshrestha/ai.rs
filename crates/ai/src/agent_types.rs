@@ -268,6 +268,12 @@ pub enum AgentEvent {
 pub type AgentEventSink =
     Arc<dyn Fn(AgentEvent) -> Pin<Box<dyn Future<Output = AgentResult<()>> + Send>> + Send + Sync>;
 
+pub type AgentEventListener = Arc<
+    dyn Fn(AgentEvent, CancellationToken) -> Pin<Box<dyn Future<Output = AgentResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub fn assistant_tool_calls(message: &AssistantMessage) -> Vec<crate::ToolCall> {
     message
         .content

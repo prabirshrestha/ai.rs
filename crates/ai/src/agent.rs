@@ -11,9 +11,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::agent_types::{
-    AfterToolCallFn, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage,
-    BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn, PrepareNextTurnFn, QueueMode,
-    ShouldStopAfterTurnFn, StreamFn, ToolExecutionMode, TransformContextFn, user_message,
+    AfterToolCallFn, AgentContext, AgentEvent, AgentEventListener, AgentEventSink, AgentLoopConfig,
+    AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn, PrepareNextTurnFn,
+    QueueMode, ShouldStopAfterTurnFn, StreamFn, ToolExecutionMode, TransformContextFn,
+    user_message,
 };
 use crate::{AgentError, AgentResult};
 
@@ -128,7 +129,7 @@ impl PendingMessageQueue {
 
 pub struct Agent {
     state: Arc<Mutex<AgentState>>,
-    listeners: Arc<Mutex<Vec<(AgentListenerId, AgentEventSink)>>>,
+    listeners: Arc<Mutex<Vec<(AgentListenerId, AgentEventListener)>>>,
     next_listener_id: Arc<AtomicU64>,
     steering_queue: Arc<Mutex<PendingMessageQueue>>,
     follow_up_queue: Arc<Mutex<PendingMessageQueue>>,
@@ -235,7 +236,7 @@ impl Agent {
         self.base_options.lock().await.stream.max_retry_delay_ms = max_retry_delay_ms;
     }
 
-    pub async fn subscribe(&self, listener: AgentEventSink) -> AgentListenerId {
+    pub async fn subscribe(&self, listener: AgentEventListener) -> AgentListenerId {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().await.push((id, listener));
         id
@@ -517,9 +518,11 @@ impl Agent {
     fn event_sink(&self) -> AgentEventSink {
         let state = self.state.clone();
         let listeners = self.listeners.clone();
+        let active_token = self.active_token.clone();
         Arc::new(move |event| {
             let state = state.clone();
             let listeners = listeners.clone();
+            let active_token = active_token.clone();
             Box::pin(async move {
                 {
                     let mut state = state.lock().await;
@@ -552,8 +555,11 @@ impl Agent {
                     }
                 }
                 let listeners = listeners.lock().await.clone();
+                let token = active_token.lock().await.clone().ok_or_else(|| {
+                    AgentError::Other("agent listener invoked outside active run".to_string())
+                })?;
                 for (_, listener) in listeners {
-                    listener(event.clone()).await?;
+                    listener(event.clone(), token.clone()).await?;
                 }
                 Ok(())
             })

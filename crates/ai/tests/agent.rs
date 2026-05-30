@@ -89,7 +89,7 @@ async fn agent_prompt_emits_full_lifecycle_for_provider_failures() {
     agent
         .subscribe(Arc::new({
             let events = Arc::clone(&events);
-            move |event| {
+            move |event, _token| {
                 let events = Arc::clone(&events);
                 Box::pin(async move {
                     events.lock().await.push(event_name(&event));
@@ -141,7 +141,7 @@ async fn agent_subscribe_can_unsubscribe_listener() {
     let listener_id = agent
         .subscribe(Arc::new({
             let event_count = Arc::clone(&event_count);
-            move |_event| {
+            move |_event, _token| {
                 let event_count = Arc::clone(&event_count);
                 Box::pin(async move {
                     event_count.fetch_add(1, Ordering::SeqCst);
@@ -172,7 +172,7 @@ async fn agent_wait_for_idle_waits_for_async_listeners() {
         .subscribe(Arc::new({
             let listener_entered = Arc::clone(&listener_entered);
             let release_listener = Arc::clone(&release_listener);
-            move |event| {
+            move |event, _token| {
                 let listener_entered = Arc::clone(&listener_entered);
                 let release_listener = Arc::clone(&release_listener);
                 Box::pin(async move {
@@ -217,15 +217,12 @@ async fn agent_exposes_active_cancellation_token() {
 
     agent
         .subscribe(Arc::new({
-            let agent = Arc::clone(&agent);
             let saw_active_token = Arc::clone(&saw_active_token);
-            move |event| {
-                let agent = Arc::clone(&agent);
+            move |event, token| {
                 let saw_active_token = Arc::clone(&saw_active_token);
                 Box::pin(async move {
                     if matches!(event, AgentEvent::AgentStart) {
-                        saw_active_token
-                            .store(agent.cancellation_token().await.is_some(), Ordering::SeqCst);
+                        saw_active_token.store(!token.is_cancelled(), Ordering::SeqCst);
                     }
                     Ok(())
                 })
@@ -253,15 +250,21 @@ async fn agent_abort_cancels_active_prompt() {
     registration.set_responses([faux_assistant_message("abcdefghijklmnopqrstuvwxyz", None)]);
     let agent = Arc::new(Agent::new(AgentOptions::new(registration.get_model())));
     let abort_requested = Arc::new(AtomicBool::new(false));
+    let listener_token = Arc::new(Mutex::new(None::<CancellationToken>));
 
     agent
         .subscribe(Arc::new({
             let agent = Arc::clone(&agent);
             let abort_requested = Arc::clone(&abort_requested);
-            move |event| {
+            let listener_token = Arc::clone(&listener_token);
+            move |event, token| {
                 let agent = Arc::clone(&agent);
                 let abort_requested = Arc::clone(&abort_requested);
+                let listener_token = Arc::clone(&listener_token);
                 Box::pin(async move {
+                    if matches!(event, AgentEvent::AgentStart) {
+                        *listener_token.lock().await = Some(token.clone());
+                    }
                     if matches!(
                         event,
                         AgentEvent::MessageUpdate {
@@ -283,6 +286,13 @@ async fn agent_abort_cancels_active_prompt() {
     let state = agent.state().await;
     assert!(!state.is_streaming);
     assert!(agent.cancellation_token().await.is_none());
+    assert!(
+        listener_token
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    );
     assert_eq!(state.error_message.as_deref(), Some("Request was aborted"));
     let Message::Assistant(assistant) = state.messages.last().expect("assistant message") else {
         panic!("expected assistant message");
@@ -308,7 +318,7 @@ async fn agent_continue_run_rejects_while_processing_before_context_validation()
         .subscribe(Arc::new({
             let listener_entered = Arc::clone(&listener_entered);
             let release_listener = Arc::clone(&release_listener);
-            move |event| {
+            move |event, _token| {
                 let listener_entered = Arc::clone(&listener_entered);
                 let release_listener = Arc::clone(&release_listener);
                 Box::pin(async move {
@@ -350,7 +360,7 @@ async fn agent_prompt_rejects_while_processing() {
         .subscribe(Arc::new({
             let listener_entered = Arc::clone(&listener_entered);
             let release_listener = Arc::clone(&release_listener);
-            move |event| {
+            move |event, _token| {
                 let listener_entered = Arc::clone(&listener_entered);
                 let release_listener = Arc::clone(&release_listener);
                 Box::pin(async move {
