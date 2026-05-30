@@ -5,7 +5,7 @@ use ai::{
     AfterToolCallContext, Agent, AgentContext, AgentError, AgentEvent, AgentEventSink,
     AgentLoopConfig, AgentLoopTurnUpdate, AgentOptions, AgentResult, AgentTool, AgentToolResult,
     BeforeToolCallContext, BeforeToolCallResult, FauxAssistantMessageOptions, FauxResponseStep,
-    Message, StopReason, Tool, ToolExecutionMode, agent_loop, agent_loop_continue,
+    Message, QueueMode, StopReason, Tool, ToolExecutionMode, agent_loop, agent_loop_continue,
     faux_assistant_message, faux_text, faux_tool_call, register_faux_provider, run_agent_loop,
 };
 use async_trait::async_trait;
@@ -187,6 +187,23 @@ async fn agent_state_mutators_update_runtime_configuration() {
 
     agent.clear_messages().await;
     assert!(agent.state().await.messages.is_empty());
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_queue_modes_can_be_changed_after_construction() {
+    let registration = register_faux_provider(None);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+
+    assert_eq!(agent.steering_mode().await, QueueMode::OneAtATime);
+    assert_eq!(agent.follow_up_mode().await, QueueMode::OneAtATime);
+
+    agent.set_steering_mode(QueueMode::All).await;
+    agent.set_follow_up_mode(QueueMode::All).await;
+
+    assert_eq!(agent.steering_mode().await, QueueMode::All);
+    assert_eq!(agent.follow_up_mode().await, QueueMode::All);
 
     registration.unregister();
 }

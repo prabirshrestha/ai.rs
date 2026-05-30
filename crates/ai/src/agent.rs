@@ -228,6 +228,22 @@ impl Agent {
         self.follow_up_queue.lock().await.enqueue(message);
     }
 
+    pub async fn set_steering_mode(&self, mode: QueueMode) {
+        self.steering_queue.lock().await.mode = mode;
+    }
+
+    pub async fn steering_mode(&self) -> QueueMode {
+        self.steering_queue.lock().await.mode
+    }
+
+    pub async fn set_follow_up_mode(&self, mode: QueueMode) {
+        self.follow_up_queue.lock().await.mode = mode;
+    }
+
+    pub async fn follow_up_mode(&self) -> QueueMode {
+        self.follow_up_queue.lock().await.mode
+    }
+
     pub async fn clear_all_queues(&self) {
         self.steering_queue.lock().await.clear();
         self.follow_up_queue.lock().await.clear();
