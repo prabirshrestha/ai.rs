@@ -597,7 +597,11 @@ async fn run_stream(
                         apply_service_tier_pricing(&mut output.usage, service_tier, &model);
                     }
                 }
-                output.stop_reason = map_status(response.get("status").and_then(Value::as_str));
+                output.stop_reason =
+                    match map_status(response.get("status").and_then(Value::as_str)) {
+                        Ok(stop_reason) => stop_reason,
+                        Err(message) => return Err(StreamFailure::new(output, message)),
+                    };
                 if output
                     .content
                     .iter()
@@ -1048,13 +1052,13 @@ fn parse_response_usage(raw: &Value, model: &Model) -> Usage {
     usage
 }
 
-fn map_status(status: Option<&str>) -> StopReason {
+fn map_status(status: Option<&str>) -> std::result::Result<StopReason, String> {
     match status {
-        Some("completed") | None => StopReason::Stop,
-        Some("incomplete") => StopReason::Length,
-        Some("failed") | Some("cancelled") => StopReason::Error,
-        Some("in_progress") | Some("queued") => StopReason::Stop,
-        Some(_) => StopReason::Error,
+        Some("completed") | None => Ok(StopReason::Stop),
+        Some("incomplete") => Ok(StopReason::Length),
+        Some("failed") | Some("cancelled") => Ok(StopReason::Error),
+        Some("in_progress") | Some("queued") => Ok(StopReason::Stop),
+        Some(status) => Err(format!("Unhandled stop reason: {status}")),
     }
 }
 
@@ -2103,6 +2107,50 @@ mod tests {
                 "{event_type}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_terminal_status_reports_provider_status() {
+        let body = sse_body(&[json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_unknown",
+                "status": "stalled",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "input_tokens_details": { "cached_tokens": 0 }
+                }
+            }
+        })]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Unhandled stop reason: stalled")
+        );
     }
 
     #[tokio::test]
