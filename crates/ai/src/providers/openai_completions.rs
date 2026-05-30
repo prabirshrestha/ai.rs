@@ -1785,6 +1785,42 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_uses_conservative_fields_for_cloudflare_compat_models() {
+        let mut model = crate::get_model(
+            "cloudflare-ai-gateway",
+            "workers-ai/@cf/moonshotai/kimi-k2.6",
+        )
+        .expect("cloudflare workers kimi");
+        model.base_url = "https://gateway.ai.cloudflare.com/v1/account/gateway/compat".to_string();
+        let context = Context {
+            system_prompt: Some("You are helpful.".to_string()),
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                max_tokens: Some(1234),
+                ..Default::default()
+            },
+            reasoning_effort: Some(ModelThinkingLevel::High),
+            ..Default::default()
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["messages"][0]["role"], json!("system"));
+        assert_eq!(payload["max_tokens"], json!(1234));
+        assert!(payload.get("max_completion_tokens").is_none());
+        assert!(payload.get("reasoning_effort").is_none());
+        assert!(payload.get("store").is_none());
+    }
+
+    #[test]
     fn chat_payload_uses_openrouter_reasoning_object() {
         let mut model = model();
         model.provider = "openrouter".to_string();
@@ -2044,6 +2080,91 @@ mod tests {
                 .get("cf-aig-authorization")
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer test-key")
+        );
+    }
+
+    #[test]
+    fn chat_headers_preserve_cloudflare_byok_authorization() {
+        let mut model = model();
+        model.provider = "cloudflare-ai-gateway".to_string();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let mut options = StreamOptions::default();
+        options.headers.insert(
+            "Authorization".to_string(),
+            "Bearer upstream-token".to_string(),
+        );
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "cf-token",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer upstream-token")
+        );
+        assert_eq!(
+            request_headers
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cf-token")
+        );
+    }
+
+    #[test]
+    fn chat_headers_send_cloudflare_workers_session_affinity() {
+        let mut model = crate::get_model(
+            "cloudflare-ai-gateway",
+            "workers-ai/@cf/moonshotai/kimi-k2.6",
+        )
+        .expect("cloudflare workers kimi");
+        model.base_url = "https://gateway.ai.cloudflare.com/v1/account/gateway/compat".to_string();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            session_id: Some("session-1".to_string()),
+            ..Default::default()
+        };
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-1")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-1")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-1")
         );
     }
 
