@@ -1407,6 +1407,83 @@ mod tests {
     }
 
     #[test]
+    fn custom_model_ids_use_legacy_thinking_payload_by_default() {
+        let mut model = anthropic_model("vendor--claude-opus-latest");
+        model.provider = "vendor-proxy".to_string();
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(true),
+                effort: Some(AnthropicEffort::Medium),
+                thinking_budget_tokens: Some(2048),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(
+            payload["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 2048, "display": "summarized" })
+        );
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn force_adaptive_thinking_enables_adaptive_payload_for_custom_model_ids() {
+        let mut model = anthropic_model("vendor--claude-opus-latest");
+        model.provider = "vendor-proxy".to_string();
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(true),
+                effort: Some(AnthropicEffort::Medium),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(
+            payload["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(payload["output_config"], json!({ "effort": "medium" }));
+    }
+
+    #[test]
+    fn force_adaptive_thinking_preserves_disabled_thinking_when_reasoning_is_off() {
+        let mut model = anthropic_model("vendor--claude-opus-latest");
+        model.provider = "vendor-proxy".to_string();
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
     fn adaptive_thinking_can_be_disabled_by_compat_override() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(false);
