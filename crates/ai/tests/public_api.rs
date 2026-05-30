@@ -1,13 +1,15 @@
 use ai::{
-    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, CacheRetention, Context,
-    OpenAICompletionsOptions, OpenAIResponsesAuthHeader, OpenAIResponsesOptions,
-    SimpleStreamOptions, build_anthropic_payload, build_chat_completions_payload,
+    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, AssistantContent,
+    AssistantMessage, AssistantMessageEvent, CacheRetention, Context, OpenAICompletionsOptions,
+    OpenAIResponsesAuthHeader, OpenAIResponsesOptions, SimpleStreamOptions, StopReason,
+    TextContent, Usage, build_anthropic_payload, build_chat_completions_payload,
     build_copilot_dynamic_headers, build_responses_payload, convert_anthropic_messages,
-    convert_openai_completions_messages, get_openai_completions_compat,
-    get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
-    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
-    stream_simple_openai_completions, stream_simple_openai_responses,
+    convert_openai_completions_messages, create_assistant_message_event_stream,
+    get_openai_completions_compat, get_openai_responses_compat, has_copilot_vision_input,
+    infer_copilot_initiator, stream_anthropic, stream_openai_completions, stream_openai_responses,
+    stream_simple_anthropic, stream_simple_openai_completions, stream_simple_openai_responses,
 };
+use futures::StreamExt;
 
 #[test]
 fn focused_provider_symbols_are_exported_from_ai_crate() {
@@ -95,4 +97,40 @@ fn focused_provider_symbols_are_exported_from_ai_crate() {
     ) -> ai::AssistantMessageEventStream = stream_simple_anthropic;
     let _anthropic: fn(ai::Model, Context, AnthropicOptions) -> ai::AssistantMessageEventStream =
         stream_anthropic;
+}
+
+#[tokio::test]
+async fn assistant_event_stream_factory_is_exported_and_terminal() {
+    let (mut sender, mut stream) = create_assistant_message_event_stream();
+    let message = AssistantMessage {
+        content: vec![AssistantContent::Text(TextContent {
+            text: "done".to_string(),
+            text_signature: None,
+        })],
+        api: "openai-completions".to_string(),
+        provider: "openai".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        response_model: None,
+        response_id: None,
+        diagnostics: Vec::new(),
+        usage: Usage::default(),
+        stop_reason: StopReason::Stop,
+        error_message: None,
+        timestamp: 0,
+    };
+
+    sender.push(AssistantMessageEvent::Done {
+        reason: StopReason::Stop,
+        message: message.clone(),
+    });
+    sender.push(AssistantMessageEvent::Start {
+        partial: message.clone(),
+    });
+
+    assert!(matches!(
+        stream.next().await,
+        Some(AssistantMessageEvent::Done { .. })
+    ));
+    assert!(stream.next().await.is_none());
+    assert_eq!(stream.result().await.unwrap(), message);
 }

@@ -13,7 +13,7 @@ pub struct AssistantMessageEventStream {
 }
 
 pub struct AssistantMessageEventStreamSender {
-    sender: mpsc::UnboundedSender<AssistantMessageEvent>,
+    sender: Option<mpsc::UnboundedSender<AssistantMessageEvent>>,
     result_sender: Option<oneshot::Sender<AssistantMessage>>,
 }
 
@@ -23,7 +23,7 @@ impl AssistantMessageEventStream {
         let (result_sender, result_receiver) = oneshot::channel();
         (
             AssistantMessageEventStreamSender {
-                sender,
+                sender: Some(sender),
                 result_sender: Some(result_sender),
             },
             Self {
@@ -49,11 +49,16 @@ impl Stream for AssistantMessageEventStream {
 
 impl AssistantMessageEventStreamSender {
     pub fn push(&mut self, event: AssistantMessageEvent) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+
         let final_message = match &event {
             AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
             AssistantMessageEvent::Error { error, .. } => Some(error.clone()),
             _ => None,
         };
+        let is_terminal = final_message.is_some();
 
         if let Some(message) = final_message {
             if let Some(sender) = self.result_sender.take() {
@@ -61,7 +66,10 @@ impl AssistantMessageEventStreamSender {
             }
         }
 
-        let _ = self.sender.send(event);
+        let _ = sender.send(event);
+        if is_terminal {
+            self.sender.take();
+        }
     }
 
     pub fn end(&mut self, message: Option<AssistantMessage>) {
@@ -69,6 +77,16 @@ impl AssistantMessageEventStreamSender {
             if let Some(sender) = self.result_sender.take() {
                 let _ = sender.send(message);
             }
+        } else {
+            self.result_sender.take();
         }
+        self.sender.take();
     }
+}
+
+pub fn create_assistant_message_event_stream() -> (
+    AssistantMessageEventStreamSender,
+    AssistantMessageEventStream,
+) {
+    AssistantMessageEventStream::channel()
 }

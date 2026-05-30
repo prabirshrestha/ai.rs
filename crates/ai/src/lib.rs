@@ -28,7 +28,10 @@ pub use agent_loop::{
 pub use agent_types::*;
 pub use env_api_keys::{api_key_env_vars, find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
-pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamSender};
+pub use event_stream::{
+    AssistantMessageEventStream, AssistantMessageEventStreamSender,
+    create_assistant_message_event_stream,
+};
 pub use image_models::{
     get_image_model, get_image_models, get_image_providers, register_image_model,
 };
