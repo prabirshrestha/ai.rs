@@ -1545,6 +1545,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_headers_add_copilot_dynamic_headers_and_allow_overrides() {
+        let mut model = model();
+        model.provider = "github-copilot".to_string();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "screenshot".to_string(),
+                content: vec![ToolResultContent::Image(ImageContent {
+                    data: "abc".to_string(),
+                    mime_type: "image/png".to_string(),
+                })],
+                details: None,
+                is_error: false,
+                timestamp: 1,
+            })],
+            tools: Vec::new(),
+        };
+        let mut options = StreamOptions::default();
+        options
+            .headers
+            .insert("Openai-Intent".to_string(), "override-intent".to_string());
+
+        let headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers
+                .get("x-initiator")
+                .and_then(|value| value.to_str().ok()),
+            Some("agent")
+        );
+        assert_eq!(
+            headers
+                .get("openai-intent")
+                .and_then(|value| value.to_str().ok()),
+            Some("override-intent")
+        );
+        assert_eq!(
+            headers
+                .get("copilot-vision-request")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+    }
+
     fn lookup_tool() -> Tool {
         Tool {
             name: "lookup".to_string(),

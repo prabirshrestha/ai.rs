@@ -1290,6 +1290,86 @@ mod tests {
     }
 
     #[test]
+    fn response_headers_add_copilot_dynamic_headers() {
+        let mut model = model();
+        model.provider = "github-copilot".to_string();
+        model.headers.insert(
+            "Copilot-Integration-Id".to_string(),
+            "vscode-chat".to_string(),
+        );
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::types::UserMessage {
+                content: crate::types::UserMessageContent::Parts(vec![
+                    crate::types::UserContent::text("describe this"),
+                    crate::types::UserContent::Image(ImageContent {
+                        data: "abc".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }),
+                ]),
+                timestamp: 1,
+            })],
+            tools: Vec::new(),
+        };
+        let headers = headers(
+            &model,
+            &context,
+            &StreamOptions::default(),
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers
+                .get("x-initiator")
+                .and_then(|value| value.to_str().ok()),
+            Some("user")
+        );
+        assert_eq!(
+            headers
+                .get("openai-intent")
+                .and_then(|value| value.to_str().ok()),
+            Some("conversation-edits")
+        );
+        assert_eq!(
+            headers
+                .get("copilot-vision-request")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            headers
+                .get("copilot-integration-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("vscode-chat")
+        );
+    }
+
+    #[test]
+    fn response_payload_omits_default_reasoning_for_copilot() {
+        let mut model = model();
+        model.provider = "github-copilot".to_string();
+        let context = Context {
+            system_prompt: Some("sys".to_string()),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("reasoning").is_none());
+        assert!(payload.get("include").is_none());
+    }
+
+    #[test]
     fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
         let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
         let assistant = AssistantMessage {

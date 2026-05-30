@@ -1498,6 +1498,74 @@ mod tests {
     }
 
     #[test]
+    fn copilot_anthropic_headers_use_bearer_auth_and_dynamic_headers() {
+        let mut model = anthropic_model("claude-sonnet-4.6");
+        model.provider = "github-copilot".to_string();
+        model.headers.insert(
+            "Copilot-Integration-Id".to_string(),
+            "vscode-chat".to_string(),
+        );
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let context = Context {
+            messages: vec![crate::types::Message::User(crate::types::UserMessage {
+                content: UserMessageContent::Parts(vec![
+                    UserContent::text("describe this"),
+                    UserContent::Image(crate::types::ImageContent {
+                        data: "abc".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }),
+                ]),
+                timestamp: 1,
+            })],
+            tools: vec![lookup_tool()],
+            ..Default::default()
+        };
+        let request_headers = headers(
+            &model,
+            &context,
+            &AnthropicOptions::default(),
+            "tid_copilot_session_test_token",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer tid_copilot_session_test_token")
+        );
+        assert!(request_headers.get("x-api-key").is_none());
+        assert_eq!(
+            request_headers
+                .get("x-initiator")
+                .and_then(|value| value.to_str().ok()),
+            Some("user")
+        );
+        assert_eq!(
+            request_headers
+                .get("openai-intent")
+                .and_then(|value| value.to_str().ok()),
+            Some("conversation-edits")
+        );
+        assert_eq!(
+            request_headers
+                .get("copilot-vision-request")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            request_headers
+                .get("copilot-integration-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("vscode-chat")
+        );
+        assert!(request_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
     fn oauth_tool_names_round_trip_by_case_insensitive_lookup_only() {
         let model = anthropic_model("claude-sonnet-4-6");
         let tools = vec![

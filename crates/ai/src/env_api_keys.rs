@@ -172,6 +172,38 @@ mod tests {
     }
 
     #[test]
+    fn github_copilot_only_uses_copilot_token_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let copilot = SavedEnv::capture("COPILOT_GITHUB_TOKEN");
+        let gh = SavedEnv::capture("GH_TOKEN");
+        let github = SavedEnv::capture("GITHUB_TOKEN");
+
+        unsafe {
+            std::env::remove_var("COPILOT_GITHUB_TOKEN");
+            std::env::set_var("GH_TOKEN", "gh-token");
+            std::env::set_var("GITHUB_TOKEN", "github-token");
+        }
+        assert_eq!(find_env_keys("github-copilot"), None);
+        assert_eq!(get_env_api_key("github-copilot"), None);
+
+        unsafe {
+            std::env::set_var("COPILOT_GITHUB_TOKEN", "copilot-token");
+        }
+        assert_eq!(
+            find_env_keys("github-copilot"),
+            Some(vec!["COPILOT_GITHUB_TOKEN".to_string()])
+        );
+        assert_eq!(
+            get_env_api_key("github-copilot").as_deref(),
+            Some("copilot-token")
+        );
+
+        copilot.restore();
+        gh.restore();
+        github.restore();
+    }
+
+    #[test]
     fn google_vertex_uses_default_adc_file_when_project_and_location_exist() {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         let home = SavedEnv::capture("HOME");
