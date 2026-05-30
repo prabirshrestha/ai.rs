@@ -928,7 +928,7 @@ fn try_convert_responses_messages(
                             text_block_index += 1;
                             let msg_id = parsed_signature
                                 .as_ref()
-                                .map(|sig| sig.0.clone())
+                                .and_then(|sig| (!sig.0.is_empty()).then(|| sig.0.clone()))
                                 .unwrap_or(fallback_id);
                             let msg_id = if msg_id.len() > 64 {
                                 format!("msg_{}", short_hash(&msg_id))
@@ -1096,6 +1096,9 @@ fn normalize_responses_tool_call_id(
 
 fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextPhase>)> {
     let signature = signature?;
+    if signature.is_empty() {
+        return None;
+    }
     if signature.starts_with('{') {
         if let Ok(parsed) = serde_json::from_str::<Value>(signature) {
             if parsed.get("v").and_then(Value::as_u64) == Some(1) {
@@ -3033,6 +3036,42 @@ mod tests {
 
         assert_eq!(messages[0]["id"], json!("msg_valid"));
         assert!(messages[0].get("phase").is_none());
+    }
+
+    #[test]
+    fn empty_text_signature_ids_use_fallback_message_ids() {
+        let model = model();
+        let mut assistant = AssistantMessage::empty_for(&model);
+        assistant.content.push(AssistantContent::Text(TextContent {
+            text: "empty signature".to_string(),
+            text_signature: Some(String::new()),
+        }));
+        assistant.content.push(AssistantContent::Text(TextContent {
+            text: "empty parsed id".to_string(),
+            text_signature: Some(
+                json!({
+                    "v": 1,
+                    "id": "",
+                    "phase": "commentary"
+                })
+                .to_string(),
+            ),
+        }));
+
+        let messages = convert_responses_messages(
+            &model,
+            &Context {
+                messages: vec![Message::Assistant(assistant)],
+                ..Default::default()
+            },
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+
+        assert_eq!(messages[0]["id"], json!("msg_pi_0"));
+        assert!(messages[0].get("phase").is_none());
+        assert_eq!(messages[1]["id"], json!("msg_pi_0_1"));
+        assert_eq!(messages[1]["phase"], json!("commentary"));
     }
 
     #[test]
