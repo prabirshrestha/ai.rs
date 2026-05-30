@@ -756,6 +756,42 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
 }
 
 #[tokio::test]
+async fn tool_preflight_errors_include_empty_details() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        tool_use_response(vec![faux_tool_call(
+            "missing",
+            json!({ "value": "hello" }),
+            Some("tool-1".to_string()),
+        )]),
+        faux_assistant_message("done", None),
+    ]);
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("run missing")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let Message::ToolResult(result) = &messages[2] else {
+        panic!("expected tool result");
+    };
+    assert!(result.is_error);
+    assert_eq!(result.details, Some(json!({})));
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn sequential_tool_execution_mode_forces_batch_sequential() {
     let registration = register_faux_provider(None);
     registration.set_responses([

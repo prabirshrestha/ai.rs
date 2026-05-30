@@ -4,7 +4,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use crate::{AssistantMessageEvent, StopReason, ToolResultMessage};
 use futures::{Stream, StreamExt};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -797,7 +797,7 @@ async fn execute_prepared_tool_call(
         .await
     {
         Ok(result) => (false, result),
-        Err(error) => (true, AgentToolResult::text(error.to_string())),
+        Err(error) => (true, error_tool_result(error.to_string())),
     };
 
     if let Some(after_tool_call) = &config.after_tool_call {
@@ -830,7 +830,7 @@ async fn execute_prepared_tool_call(
             }
             Ok(None) => {}
             Err(error) => {
-                result = AgentToolResult::text(error.to_string());
+                result = error_tool_result(error.to_string());
                 is_error = true;
             }
         }
@@ -847,7 +847,13 @@ async fn execute_prepared_tool_call(
 }
 
 fn finalized_error(tool_call: crate::ToolCall, message: impl Into<String>) -> FinalizedToolCall {
-    (tool_call, true, AgentToolResult::text(message))
+    (tool_call, true, error_tool_result(message))
+}
+
+fn error_tool_result(message: impl Into<String>) -> AgentToolResult {
+    let mut result = AgentToolResult::text(message);
+    result.details = Some(json!({}));
+    result
 }
 
 async fn emit_tool_execution_end(
