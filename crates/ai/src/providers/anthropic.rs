@@ -287,6 +287,14 @@ async fn run_stream(
         Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(StreamFailure::new(
+            output,
+            Error::ApiStatus { status, body },
+        ));
+    }
     if let Some(on_response) = &options.base.on_response {
         let provider_response = crate::types::ProviderResponse {
             status: response.status().as_u16(),
@@ -295,14 +303,6 @@ async fn run_stream(
         if let Err(error) = on_response(provider_response, &model).await {
             return Err(StreamFailure::new(output, error));
         }
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(StreamFailure::new(
-            output,
-            Error::ApiStatus { status, body },
-        ));
     }
 
     sender.push(AssistantMessageEvent::Start {
@@ -1239,7 +1239,10 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use futures::StreamExt;
     use serde_json::json;
@@ -1247,7 +1250,9 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::types::{AssistantContent, CacheRetention, ModelCost, ModelInput, Usage};
+    use crate::types::{
+        AssistantContent, CacheRetention, ModelCost, ModelInput, ResponseHook, Usage,
+    };
 
     fn anthropic_model(id: &str) -> Model {
         Model {
@@ -1263,6 +1268,16 @@ mod tests {
             max_tokens: 1024,
             ..Default::default()
         }
+    }
+
+    fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {
+        Arc::new(move |_response, _model| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
     }
 
     fn assistant_with_thinking(signature: &str) -> crate::types::Message {
@@ -2199,6 +2214,24 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_status_server(status: u16, reason: &str, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_hanging_sse_server(body: String) -> (String, Arc<tokio::sync::Notify>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2483,6 +2516,42 @@ mod tests {
             result.error_message.as_deref(),
             Some("Unhandled stop reason: model_overheated")
         );
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_skips_on_response_for_api_errors() {
+        let response_calls = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_status_server(
+            500,
+            "Internal Server Error",
+            json!({ "error": { "message": "upstream unavailable" } }).to_string(),
+        )
+        .await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    on_response: Some(counting_on_response(Arc::clone(&response_calls))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(response_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

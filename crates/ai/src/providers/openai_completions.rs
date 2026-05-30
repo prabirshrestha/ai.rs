@@ -206,6 +206,14 @@ async fn run_stream(
         Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(StreamFailure::new(
+            output,
+            Error::ApiStatus { status, body },
+        ));
+    }
     if let Some(on_response) = &options.base.on_response {
         let provider_response = crate::types::ProviderResponse {
             status: response.status().as_u16(),
@@ -214,14 +222,6 @@ async fn run_stream(
         if let Err(error) = on_response(provider_response, &model).await {
             return Err(StreamFailure::new(output, error));
         }
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(StreamFailure::new(
-            output,
-            Error::ApiStatus { status, body },
-        ));
     }
 
     sender.push(AssistantMessageEvent::Start {
@@ -1444,7 +1444,8 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 mod tests {
     use super::*;
     use crate::types::{
-        Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ToolResultMessage,
+        Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ResponseHook,
+        ToolResultMessage,
     };
     use futures::StreamExt;
     use std::sync::{
@@ -1468,6 +1469,16 @@ mod tests {
             max_tokens: 4096,
             ..Default::default()
         }
+    }
+
+    fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {
+        Arc::new(move |_response, _model| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
     }
 
     #[test]
@@ -2649,6 +2660,39 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("500"))
         );
+    }
+
+    #[tokio::test]
+    async fn chat_provider_skips_on_response_for_api_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let response_calls = Arc::new(AtomicUsize::new(0));
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url =
+            spawn_retrying_sse_server(chat_sse_body(&[]), Arc::clone(&attempts)).await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    on_response: Some(counting_on_response(Arc::clone(&response_calls))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(response_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

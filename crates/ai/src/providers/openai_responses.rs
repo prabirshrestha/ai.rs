@@ -224,6 +224,11 @@ async fn run_stream(
         Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(StreamFailure::api_status(output, status, body));
+    }
     if let Some(on_response) = &options.base.on_response {
         let provider_response = crate::types::ProviderResponse {
             status: response.status().as_u16(),
@@ -232,11 +237,6 @@ async fn run_stream(
         if let Err(error) = on_response(provider_response, &model).await {
             return Err(StreamFailure::new(output, error));
         }
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(StreamFailure::api_status(output, status, body));
     }
 
     sender.push(AssistantMessageEvent::Start {
@@ -1300,10 +1300,13 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
-    use crate::types::{Message, ModelCost, ToolResultMessage};
+    use crate::types::{Message, ModelCost, ResponseHook, ToolResultMessage};
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1324,6 +1327,16 @@ mod tests {
             max_tokens: 4096,
             ..Default::default()
         }
+    }
+
+    fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {
+        Arc::new(move |_response, _model| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
     }
 
     #[test]
@@ -2776,6 +2789,41 @@ mod tests {
             result.error_message.as_deref(),
             Some("OpenAI API error (400): Your input exceeds the context window of this model")
         );
+    }
+
+    #[tokio::test]
+    async fn responses_provider_skips_on_response_for_api_errors() {
+        let response_calls = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_status_server(
+            500,
+            "Internal Server Error",
+            json!({ "error": { "message": "upstream unavailable" } }).to_string(),
+        )
+        .await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    on_response: Some(counting_on_response(Arc::clone(&response_calls))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(response_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
