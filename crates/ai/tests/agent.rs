@@ -718,12 +718,17 @@ async fn agent_queue_modes_can_be_changed_after_construction() {
 
     assert_eq!(agent.steering_mode().await, QueueMode::OneAtATime);
     assert_eq!(agent.follow_up_mode().await, QueueMode::OneAtATime);
+    assert_eq!(agent.tool_execution().await, ToolExecutionMode::Parallel);
 
     agent.set_steering_mode(QueueMode::All).await;
     agent.set_follow_up_mode(QueueMode::All).await;
+    agent
+        .set_tool_execution(ToolExecutionMode::Sequential)
+        .await;
 
     assert_eq!(agent.steering_mode().await, QueueMode::All);
     assert_eq!(agent.follow_up_mode().await, QueueMode::All);
+    assert_eq!(agent.tool_execution().await, ToolExecutionMode::Sequential);
 
     registration.unregister();
 }

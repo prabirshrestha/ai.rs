@@ -167,7 +167,7 @@ pub struct Agent {
     base_options: Arc<Mutex<SimpleStreamOptions>>,
     active_token: Arc<Mutex<Option<CancellationToken>>>,
     idle_notify: Arc<Notify>,
-    tool_execution: ToolExecutionMode,
+    tool_execution: Arc<Mutex<ToolExecutionMode>>,
 }
 
 impl Agent {
@@ -190,7 +190,7 @@ impl Agent {
             base_options: Arc::new(Mutex::new(options.options)),
             active_token: Arc::new(Mutex::new(None)),
             idle_notify: Arc::new(Notify::new()),
-            tool_execution: options.tool_execution,
+            tool_execution: Arc::new(Mutex::new(options.tool_execution)),
         }
     }
 
@@ -256,6 +256,14 @@ impl Agent {
 
     pub async fn set_max_retry_delay_ms(&self, max_retry_delay_ms: Option<u64>) {
         self.base_options.lock().await.stream.max_retry_delay_ms = max_retry_delay_ms;
+    }
+
+    pub async fn set_tool_execution(&self, tool_execution: ToolExecutionMode) {
+        *self.tool_execution.lock().await = tool_execution;
+    }
+
+    pub async fn tool_execution(&self) -> ToolExecutionMode {
+        *self.tool_execution.lock().await
     }
 
     pub async fn subscribe(&self, listener: AgentEventListener) -> AgentListenerId {
@@ -533,7 +541,7 @@ impl Agent {
             })),
             before_tool_call: self.before_tool_call.clone(),
             after_tool_call: self.after_tool_call.clone(),
-            tool_execution: self.tool_execution,
+            tool_execution: *self.tool_execution.lock().await,
         }
     }
 
