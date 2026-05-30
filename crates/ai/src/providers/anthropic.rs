@@ -1433,6 +1433,38 @@ mod tests {
         assert!(payload.get("output_config").is_none());
     }
 
+    #[test]
+    fn built_in_adaptive_thinking_model_uses_xhigh_effort() {
+        let model = crate::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
+        assert_eq!(
+            model.compat.anthropic_messages.force_adaptive_thinking,
+            Some(true)
+        );
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(true),
+                effort: Some(map_thinking_level_to_effort(
+                    &model,
+                    ModelThinkingLevel::Xhigh,
+                )),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(
+            payload["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(payload["output_config"], json!({ "effort": "xhigh" }));
+    }
+
     fn lookup_tool() -> Tool {
         Tool {
             name: "lookup".to_string(),
@@ -1600,6 +1632,38 @@ mod tests {
             Some("vscode-chat")
         );
         assert!(request_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn copilot_anthropic_omits_interleaved_thinking_beta_for_adaptive_models() {
+        let mut model = anthropic_model("claude-sonnet-4.6");
+        model.provider = "github-copilot".to_string();
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("Hello")],
+            ..Default::default()
+        };
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &AnthropicOptions {
+                interleaved_thinking: true,
+                ..Default::default()
+            },
+            "tid_copilot_session_test_token",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert!(
+            request_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok())
+                .is_none_or(|value| !value.contains(INTERLEAVED_THINKING_BETA))
+        );
     }
 
     #[test]

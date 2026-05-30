@@ -1530,6 +1530,158 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_sets_openai_prompt_cache_fields() {
+        let mut model = model();
+        model.base_url = "https://api.openai.com/v1".to_string();
+        let compat = get_compat(&model);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                session_id: Some(format!("{}tail", "x".repeat(64))),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &compat,
+            CacheRetention::Long,
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("x".repeat(64)));
+        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
+    }
+
+    #[test]
+    fn chat_payload_omits_prompt_cache_fields_when_retention_is_none() {
+        let mut model = model();
+        model.base_url = "https://api.openai.com/v1".to_string();
+        let compat = get_compat(&model);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                session_id: Some("session-123".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &compat,
+            CacheRetention::None,
+        );
+
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn chat_payload_omits_proxy_prompt_cache_without_long_retention_support() {
+        let mut model = model();
+        model.base_url = "https://proxy.example.com/v1".to_string();
+        model
+            .compat
+            .openai_completions
+            .supports_long_cache_retention = Some(false);
+        let compat = get_compat(&model);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                session_id: Some("session-123".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &compat,
+            CacheRetention::Long,
+        );
+
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn chat_headers_set_and_omit_session_affinity_by_cache_retention() {
+        let mut model = model();
+        model.base_url = "https://proxy.example.com/v1".to_string();
+        model
+            .compat
+            .openai_completions
+            .send_session_affinity_headers = Some(true);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let options = StreamOptions {
+            session_id: Some("session-affinity".to_string()),
+            ..Default::default()
+        };
+        let compat = get_compat(&model);
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &compat,
+            CacheRetention::Short,
+        )
+        .unwrap();
+        assert_eq!(
+            request_headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-affinity")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-affinity")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-affinity")
+        );
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &compat,
+            CacheRetention::None,
+        )
+        .unwrap();
+        assert!(request_headers.get("session_id").is_none());
+        assert!(request_headers.get("x-client-request-id").is_none());
+        assert!(request_headers.get("x-session-affinity").is_none());
+    }
+
+    #[test]
     fn chat_headers_use_cloudflare_ai_gateway_authorization() {
         let mut model = model();
         model.provider = "cloudflare-ai-gateway".to_string();

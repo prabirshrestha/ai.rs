@@ -1305,6 +1305,144 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_sets_openai_prompt_cache_fields() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                session_id: Some(format!("{}tail", "x".repeat(64))),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Long,
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("x".repeat(64)));
+        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
+    }
+
+    #[test]
+    fn response_payload_omits_prompt_cache_fields_when_retention_is_none() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                session_id: Some("session-123".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::None,
+        );
+
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn response_headers_set_and_omit_cache_affinity_by_cache_retention() {
+        let model = model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let options = StreamOptions {
+            session_id: Some("session-123".to_string()),
+            ..Default::default()
+        };
+        let compat = get_compat(&model);
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &compat,
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+        assert_eq!(
+            request_headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &compat,
+            CacheRetention::None,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+        assert!(request_headers.get("session_id").is_none());
+        assert!(request_headers.get("x-client-request-id").is_none());
+    }
+
+    #[test]
+    fn response_headers_can_omit_session_id_header_only() {
+        let mut model = model();
+        model.compat.openai_responses.send_session_id_header = Some(false);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let options = StreamOptions {
+            session_id: Some("session-123".to_string()),
+            ..Default::default()
+        };
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+
+        assert!(request_headers.get("session_id").is_none());
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+    }
+
+    #[test]
     fn response_headers_use_cloudflare_ai_gateway_authorization() {
         let mut model = model();
         model.provider = "cloudflare-ai-gateway".to_string();
