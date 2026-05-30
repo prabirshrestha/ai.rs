@@ -130,6 +130,14 @@ impl StreamFailure {
         }
     }
 
+    fn api_status(output: AssistantMessage, status: reqwest::StatusCode, body: String) -> Self {
+        Self {
+            output,
+            message: format_openai_responses_api_error(status, &body),
+            cancelled: false,
+        }
+    }
+
     fn cancelled(output: AssistantMessage) -> Self {
         Self {
             output,
@@ -228,10 +236,7 @@ async fn run_stream(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(StreamFailure::new(
-            output,
-            Error::ApiStatus { status, body },
-        ));
+        return Err(StreamFailure::api_status(output, status, body));
     }
 
     sender.push(AssistantMessageEvent::Start {
@@ -1197,6 +1202,30 @@ fn request_base_url(model: &Model) -> Result<String> {
     }
 }
 
+fn format_openai_responses_api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let message = openai_error_message(body).unwrap_or_else(|| {
+        let body = body.trim();
+        if body.is_empty() {
+            format!("{} status code (no body)", status.as_u16())
+        } else {
+            body.to_string()
+        }
+    });
+    format!("OpenAI API error ({}): {}", status.as_u16(), message)
+}
+
+fn openai_error_message(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .or_else(|| value.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+}
+
 fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
     let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
     let mut output = AssistantMessage::empty_for(&model);
@@ -1810,6 +1839,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn formats_http_status_errors_like_openai_responses() {
+        let base_url = spawn_status_server(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Your input exceeds the context window of this model"
+                }
+            })
+            .to_string(),
+        )
+        .await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("too much")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("OpenAI API error (400): Your input exceeds the context window of this model")
+        );
+    }
+
     #[test]
     fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
         let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
@@ -2033,6 +2103,24 @@ mod tests {
             let _ = socket.read(&mut buffer).await.unwrap();
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_status_server(status: u16, reason: &str, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
