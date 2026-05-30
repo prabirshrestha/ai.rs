@@ -90,4 +90,6 @@ pub use utils::diagnostics::{
     create_assistant_message_diagnostic, diagnostic_error_from_message, extract_diagnostic_error,
     format_thrown_value,
 };
+pub use utils::json::{parse_json_with_repair, parse_streaming_json, repair_json};
 pub use utils::overflow::{get_overflow_patterns, is_context_overflow};
+pub use utils::validation::{validate_tool_arguments, validate_tool_call};

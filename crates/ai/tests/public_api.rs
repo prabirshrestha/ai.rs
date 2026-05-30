@@ -7,9 +7,10 @@ use ai::{
     convert_anthropic_messages, convert_openai_completions_messages,
     create_assistant_message_event_stream, get_api_provider, get_api_providers,
     get_openai_completions_compat, get_openai_responses_compat, has_copilot_vision_input,
-    infer_copilot_initiator, register_builtin_api_providers, reset_api_providers, stream_anthropic,
-    stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
-    stream_simple_openai_completions, stream_simple_openai_responses,
+    infer_copilot_initiator, register_builtin_api_providers, repair_json, reset_api_providers,
+    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
+    stream_simple_openai_completions, stream_simple_openai_responses, validate_tool_arguments,
+    validate_tool_call,
 };
 use futures::StreamExt;
 
@@ -157,4 +158,23 @@ fn api_registry_and_builtin_provider_helpers_are_exported() {
     assert!(get_api_provider("openai-responses").is_some());
 
     reset_api_providers();
+}
+
+#[test]
+fn json_and_validation_helpers_are_exported() {
+    let repaired = repair_json("{\"text\":\"hello\nworld\"}");
+    assert_eq!(repaired, "{\"text\":\"hello\\nworld\"}");
+
+    let parsed: serde_json::Value =
+        ai::parse_json_with_repair("{\"text\":\"hello\nworld\"}").unwrap();
+    assert_eq!(parsed["text"], "hello\nworld");
+    assert_eq!(
+        ai::parse_streaming_json(Some("{\"answer\": 42")),
+        serde_json::json!({ "answer": 42 })
+    );
+
+    let _validate_tool_call: fn(&[ai::Tool], &ai::ToolCall) -> ai::Result<serde_json::Value> =
+        validate_tool_call;
+    let _validate_tool_arguments: fn(&ai::Tool, &ai::ToolCall) -> ai::Result<serde_json::Value> =
+        validate_tool_arguments;
 }
