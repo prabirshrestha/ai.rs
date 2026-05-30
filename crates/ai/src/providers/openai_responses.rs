@@ -240,6 +240,7 @@ async fn run_stream(
 
     let mut current_item: Option<Value> = None;
     let mut current_block: Option<usize> = None;
+    let mut current_text_part: Option<String> = None;
     let mut partial_json: HashMap<usize, String> = HashMap::new();
     let events = sse::events(response, options.base.cancellation_token.clone());
     pin_mut!(events);
@@ -296,6 +297,11 @@ async fn run_stream(
                         });
                     }
                     Some("message") => {
+                        current_text_part = item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .and_then(|parts| parts.last())
+                            .and_then(response_text_part_type);
                         output.content.push(AssistantContent::Text(TextContent {
                             text: String::new(),
                             text_signature: None,
@@ -336,6 +342,18 @@ async fn run_stream(
                         });
                     }
                     _ => {}
+                }
+            }
+            "response.content_part.added" => {
+                if current_item
+                    .as_ref()
+                    .and_then(|item| item.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("message")
+                {
+                    if let Some(part_type) = parsed.get("part").and_then(response_text_part_type) {
+                        current_text_part = Some(part_type);
+                    }
                 }
             }
             "response.reasoning_summary_part.added" => {
@@ -380,6 +398,14 @@ async fn run_stream(
                 }
             }
             "response.output_text.delta" | "response.refusal.delta" => {
+                let expected_part = if event_type == "response.output_text.delta" {
+                    "output_text"
+                } else {
+                    "refusal"
+                };
+                if current_text_part.as_deref() != Some(expected_part) {
+                    continue;
+                }
                 let delta = parsed
                     .get("delta")
                     .and_then(Value::as_str)
@@ -547,6 +573,7 @@ async fn run_stream(
                 }
                 current_block = None;
                 current_item = None;
+                current_text_part = None;
             }
             "response.completed" | "response.done" | "response.incomplete" => {
                 let response = parsed.get("response").unwrap_or(&parsed);
@@ -976,6 +1003,13 @@ fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextP
     Some((signature.to_string(), None))
 }
 
+fn response_text_part_type(part: &Value) -> Option<String> {
+    part.get("type")
+        .and_then(Value::as_str)
+        .filter(|part_type| matches!(*part_type, "output_text" | "refusal"))
+        .map(ToString::to_string)
+}
+
 fn parse_response_usage(raw: &Value, model: &Model) -> Usage {
     let input_tokens = raw.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32;
     let output_tokens = raw
@@ -1174,6 +1208,9 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 mod tests {
     use super::*;
     use crate::types::{Message, ModelCost, ToolResultMessage};
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     const COPILOT_RAW_TOOL_CALL_ID: &str = "call_4VnzVawQXPB9MgYib7CiQFEY|I9b95oN1wD/cHXKTw3PpRkL6KkCtzTJhUxMouMWYwHeTo2j3htzfSk7YPx2vifiIM4g3A8XXyOj8q4Bt6SLUG7gqY1E3ELkrkVQNHglRfUmWj84lqxJY+Puieb3VKyX0FB+83TUzn91cDMF/4gzt990IzqVrc+nIb9RRscRD070Du16q1glydVjWR0SBJsE6TbY/esOjFpqplogQqrajm1eI++f3eLi73R6q7hVusY0QbeFySVxABCjhN0lXB04caBe1rzHjYzul6MAXj7uq+0r17VLq+yrtyYhN12wkmFqHeqTyEei6EFPbMy24Nc+IbJlkP0OCg02W+gOnyBFcbi2ctvJFSOhSjt1CqBdqCnnhwUqXjbWiT0wh3DmLScRgTHmGkaI+oAcQQjfic65nxj+TnEkReA==";
 
@@ -1372,6 +1409,100 @@ mod tests {
         assert!(payload.get("include").is_none());
     }
 
+    #[tokio::test]
+    async fn response_text_delta_ignores_unsupported_content_parts() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "part": { "type": "reasoning_text", "text": "" }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "hidden"
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "part": { "type": "output_text", "text": "" }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "visible"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "visible" }]
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AssistantMessageEvent::TextDelta { delta, .. } = event {
+                deltas.push(delta);
+            }
+        }
+        let result = stream.result().await.unwrap();
+        assert_eq!(deltas, vec!["visible"]);
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "visible".to_string(),
+                text_signature: Some(
+                    serde_json::to_string(&TextSignatureV1 {
+                        v: 1,
+                        id: "msg_test".to_string(),
+                        phase: None,
+                    })
+                    .unwrap()
+                ),
+            })]
+        );
+    }
+
     #[test]
     fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
         let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
@@ -1540,5 +1671,29 @@ mod tests {
                     .and_then(Value::as_str)
                     .is_some_and(|url| url.starts_with("data:image/png;base64,"))
         }));
+    }
+
+    fn sse_body(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>()
+    }
+
+    async fn spawn_sse_server(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 }
