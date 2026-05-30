@@ -261,7 +261,11 @@ async fn run_stream(
             Err(error) => return Err(StreamFailure::new(output, error)),
         };
 
-        if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+        if let Some(id) = chunk
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
             output.response_id.get_or_insert_with(|| id.to_string());
         }
         if let Some(response_model) = chunk
@@ -2629,6 +2633,49 @@ mod tests {
         let message = stream.result().await.unwrap();
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn ignores_empty_chunk_id_for_response_id() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "",
+                "choices": [{ "index": 0, "delta": { "content": "hi" } }]
+            }),
+            json!({
+                "id": "chatcmpl-final",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.response_id.as_deref(), Some("chatcmpl-final"));
         assert_eq!(message.stop_reason, StopReason::Stop);
     }
 
