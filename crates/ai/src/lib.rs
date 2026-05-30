@@ -66,7 +66,8 @@ pub use providers::openai_completions::{
 pub use providers::openai_responses::{
     OpenAIResponsesAuthHeader, OpenAIResponsesOptions, ResolvedOpenAIResponsesCompat,
     build_responses_payload, convert_responses_messages, convert_responses_tools,
-    stream_openai_responses, stream_simple_openai_responses,
+    get_compat as get_openai_responses_compat, stream_openai_responses,
+    stream_simple_openai_responses,
 };
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,

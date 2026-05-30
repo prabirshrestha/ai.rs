@@ -1,9 +1,9 @@
 use ai::{
     AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, CacheRetention, Context,
     OpenAICompletionsOptions, OpenAIResponsesAuthHeader, OpenAIResponsesOptions,
-    ResolvedOpenAIResponsesCompat, SimpleStreamOptions, build_anthropic_payload,
-    build_chat_completions_payload, build_copilot_dynamic_headers, build_responses_payload,
-    get_openai_completions_compat, has_copilot_vision_input, infer_copilot_initiator,
+    SimpleStreamOptions, build_anthropic_payload, build_chat_completions_payload,
+    build_copilot_dynamic_headers, build_responses_payload, get_openai_completions_compat,
+    get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
     stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
     stream_simple_openai_completions, stream_simple_openai_responses,
 };
@@ -24,17 +24,16 @@ fn focused_provider_symbols_are_exported_from_ai_crate() {
         OpenAIResponsesAuthHeader::default(),
         OpenAIResponsesAuthHeader::Bearer
     );
+    let responses_model = ai::Model {
+        api: "openai-responses".to_string(),
+        ..model.clone()
+    };
+    let resolved_responses_compat = get_openai_responses_compat(&responses_model);
     let _responses_payload = build_responses_payload(
-        &ai::Model {
-            api: "openai-responses".to_string(),
-            ..model.clone()
-        },
+        &responses_model,
         &context,
         &responses_options,
-        &ResolvedOpenAIResponsesCompat {
-            send_session_id_header: true,
-            supports_long_cache_retention: true,
-        },
+        &resolved_responses_compat,
         CacheRetention::Short,
     );
 

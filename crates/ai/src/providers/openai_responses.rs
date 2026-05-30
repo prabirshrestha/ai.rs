@@ -1143,7 +1143,7 @@ fn map_status(status: Option<&str>) -> std::result::Result<StopReason, String> {
     }
 }
 
-pub(crate) fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
+pub fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
     ResolvedOpenAIResponsesCompat {
         send_session_id_header: model
             .compat
