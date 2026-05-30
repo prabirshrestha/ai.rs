@@ -1307,6 +1307,74 @@ async fn parallel_tool_execution_end_events_follow_completion_order() {
 }
 
 #[tokio::test]
+async fn tool_update_events_flush_even_when_callback_future_is_not_awaited() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        tool_use_response(vec![faux_tool_call(
+            "echo",
+            json!({ "value": "first" }),
+            Some("tool-1".to_string()),
+        )]),
+        faux_assistant_message("done", None),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emit: AgentEventSink = Arc::new({
+        let events = Arc::clone(&events);
+        move |event| {
+            let events = Arc::clone(&events);
+            Box::pin(async move {
+                events.lock().await.push(event);
+                Ok(())
+            })
+        }
+    });
+
+    run_agent_loop(
+        vec![Message::user_text("run tool")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                emit_update_without_await: true,
+                ..Default::default()
+            })],
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        emit,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = events.lock().await;
+    let tool_events = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionStart { .. } => Some("start"),
+            AgentEvent::ToolExecutionUpdate { .. } => Some("update"),
+            AgentEvent::ToolExecutionEnd { .. } => Some("end"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_events, vec!["start", "update", "end"]);
+
+    let update = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => Some(partial_result),
+            _ => None,
+        })
+        .expect("tool update");
+    assert_eq!(
+        update.content,
+        vec![ai::ToolResultContent::text("partial: first")]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn prepare_next_turn_updates_context_before_tool_continuation() {
     let registration = register_faux_provider(None);
     let second_turn_system_prompt = Arc::new(Mutex::new(None));
@@ -2137,6 +2205,7 @@ struct EchoTool {
     first_done: Option<Arc<AtomicBool>>,
     parallel_observed: Option<Arc<AtomicBool>>,
     release_first: Option<Arc<Notify>>,
+    emit_update_without_await: bool,
 }
 
 #[async_trait]
@@ -2168,7 +2237,7 @@ impl AgentTool for EchoTool {
         _tool_call_id: &str,
         args: Value,
         _cancellation_token: Option<CancellationToken>,
-        _on_update: Option<ai::AgentToolUpdateCallback>,
+        on_update: Option<ai::AgentToolUpdateCallback>,
     ) -> AgentResult<AgentToolResult> {
         let value = args
             .get("value")
@@ -2177,6 +2246,11 @@ impl AgentTool for EchoTool {
             .to_string();
         if let Some(executions) = &self.executions {
             executions.lock().await.push(value.clone());
+        }
+        if self.emit_update_without_await {
+            if let Some(on_update) = &on_update {
+                let _ = on_update(AgentToolResult::text(format!("partial: {value}")));
+            }
         }
         if value == "first" {
             if let Some(release_first) = &self.release_first {

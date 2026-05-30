@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context as TaskContext, Poll};
 
 use crate::{AssistantMessageEvent, StopReason, ToolResultMessage};
@@ -784,10 +784,12 @@ async fn execute_prepared_tool_call(
     let prepared_args = prepared.args;
     let emit_for_update = emit.clone();
     let update_tool_call = tool_call.clone();
+    let update_tasks = Arc::new(StdMutex::new(Vec::new()));
+    let update_tasks_for_callback = update_tasks.clone();
     let on_update = Arc::new(move |partial_result: AgentToolResult| {
         let emit = emit_for_update.clone();
         let tool_call = update_tool_call.clone();
-        Box::pin(async move {
+        let handle = tokio::spawn(async move {
             let _ = emit(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: tool_call.id,
                 tool_name: tool_call.name,
@@ -795,7 +797,11 @@ async fn execute_prepared_tool_call(
                 partial_result,
             })
             .await;
-        }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        });
+        if let Ok(mut tasks) = update_tasks_for_callback.lock() {
+            tasks.push(handle);
+        }
+        Box::pin(async {}) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     });
 
     let (mut is_error, mut result) = match tool
@@ -810,6 +816,8 @@ async fn execute_prepared_tool_call(
         Ok(result) => (false, result),
         Err(error) => (true, error_tool_result(error.to_string())),
     };
+
+    await_tool_update_tasks(&update_tasks).await;
 
     if let Some(after_tool_call) = &config.after_tool_call {
         match after_tool_call(
@@ -855,6 +863,16 @@ async fn execute_prepared_tool_call(
     })
     .await?;
     Ok((tool_call, is_error, result))
+}
+
+async fn await_tool_update_tasks(tasks: &Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>) {
+    let handles = match tasks.lock() {
+        Ok(mut tasks) => tasks.drain(..).collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    for handle in handles {
+        let _ = handle.await;
+    }
 }
 
 fn finalized_error(tool_call: crate::ToolCall, message: impl Into<String>) -> FinalizedToolCall {
