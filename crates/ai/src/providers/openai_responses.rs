@@ -1361,6 +1361,33 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_sets_openai_prompt_cache_key_for_short_retention() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                session_id: Some("session-short".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("session-short"));
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
     fn response_payload_uses_pi_cache_retention_for_openai_requests() {
         let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
         let model = model();
