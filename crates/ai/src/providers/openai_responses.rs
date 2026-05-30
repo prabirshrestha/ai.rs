@@ -2187,6 +2187,14 @@ mod tests {
             messages: vec![
                 Message::user_text("Double 21."),
                 Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_abc|fc_paired".to_string(),
+                    tool_name: "double_number".to_string(),
+                    content: vec![ToolResultContent::text("42")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 3,
+                }),
             ],
             tools: Vec::new(),
         };
@@ -2204,6 +2212,11 @@ mod tests {
 
         assert_eq!(function_call["call_id"], json!("call_abc"));
         assert!(function_call.get("id").is_none_or(Value::is_null));
+        let function_call_output = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .expect("function_call_output");
+        assert_eq!(function_call_output["call_id"], json!("call_abc"));
     }
 
     #[test]
