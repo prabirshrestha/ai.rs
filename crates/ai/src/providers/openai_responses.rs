@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use futures::{StreamExt, pin_mut};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -20,6 +19,7 @@ use crate::types::{
     ToolResultContent, Usage, UserContent, UserMessageContent,
 };
 use crate::utils::hash::short_hash;
+use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
@@ -214,15 +214,12 @@ async fn run_stream(
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let client = reqwest::Client::new();
-    let response = match crate::utils::http::send_with_retries(&options.base, || {
-        let mut request = client
+    let response = match send_with_retries(&options.base, || {
+        client
             .post(request_url.as_str())
             .headers(request_headers.clone())
-            .json(&payload);
-        if let Some(timeout_ms) = options.base.timeout_ms {
-            request = request.timeout(Duration::from_millis(timeout_ms));
-        }
-        request
+            .json(&payload)
+            .timeout(request_timeout(options.base.timeout_ms))
     })
     .await
     {
@@ -782,13 +779,15 @@ fn try_build_responses_payload(
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
     }
     if model.reasoning {
+        let reasoning_effort = options
+            .reasoning_effort
+            .filter(|effort| *effort != ModelThinkingLevel::Off);
         let has_reasoning_summary = options
             .reasoning_summary
             .as_ref()
             .is_some_and(Option::is_some);
-        if options.reasoning_effort.is_some() || has_reasoning_summary {
-            let effort = options
-                .reasoning_effort
+        if reasoning_effort.is_some() || has_reasoning_summary {
+            let effort = reasoning_effort
                 .and_then(|effort| {
                     model
                         .thinking_level_map
@@ -796,11 +795,7 @@ fn try_build_responses_payload(
                         .cloned()
                         .flatten()
                 })
-                .or_else(|| {
-                    options
-                        .reasoning_effort
-                        .map(|effort| effort.as_str().to_string())
-                })
+                .or_else(|| reasoning_effort.map(|effort| effort.as_str().to_string()))
                 .unwrap_or_else(|| "medium".to_string());
             let summary = options
                 .reasoning_summary
@@ -857,7 +852,10 @@ fn try_convert_responses_messages(
             normalize_responses_tool_call_id(id, target_model, source, allowed_tool_call_providers)
         },
     );
-    if include_system_prompt && let Some(system_prompt) = &context.system_prompt {
+    if include_system_prompt
+        && let Some(system_prompt) = &context.system_prompt
+        && !system_prompt.is_empty()
+    {
         messages.push(json!({
             "role": if model.reasoning { "developer" } else { "system" },
             "content": sanitize_surrogates(system_prompt),
@@ -1448,6 +1446,53 @@ mod tests {
         assert_eq!(payload["input"][0]["role"], "developer");
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn responses_payload_treats_off_reasoning_effort_as_unspecified() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            reasoning_effort: Some(ModelThinkingLevel::Off),
+            reasoning_summary: Some(Some("concise".to_string())),
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["reasoning"],
+            json!({ "effort": "medium", "summary": "concise" })
+        );
+    }
+
+    #[test]
+    fn responses_payload_skips_empty_system_prompt() {
+        let model = model();
+        let context = Context {
+            system_prompt: Some(String::new()),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["input"][0]["role"], "user");
     }
 
     #[test]

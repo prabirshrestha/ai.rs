@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use futures::{StreamExt, pin_mut};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -19,6 +18,7 @@ use crate::types::{
     OpenAIThinkingFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
     ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
 };
+use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
@@ -191,15 +191,12 @@ async fn run_stream(
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let client = reqwest::Client::new();
-    let response = match crate::utils::http::send_with_retries(&options.base, || {
-        let mut request = client
+    let response = match send_with_retries(&options.base, || {
+        client
             .post(request_url.as_str())
             .headers(request_headers.clone())
-            .json(&payload);
-        if let Some(timeout_ms) = options.base.timeout_ms {
-            request = request.timeout(Duration::from_millis(timeout_ms));
-        }
-        request
+            .json(&payload)
+            .timeout(request_timeout(options.base.timeout_ms))
     })
     .await
     {
@@ -703,7 +700,9 @@ fn apply_reasoning_options(
     if !model.reasoning {
         return;
     }
-    let effort = options.reasoning_effort;
+    let effort = options
+        .reasoning_effort
+        .filter(|effort| *effort != ModelThinkingLevel::Off);
     let mapped_effort = effort
         .and_then(|effort| {
             model
@@ -793,7 +792,9 @@ pub fn convert_messages(
         normalize_chat_tool_call_id(id, target_model)
     });
 
-    if let Some(system_prompt) = &context.system_prompt {
+    if let Some(system_prompt) = &context.system_prompt
+        && !system_prompt.is_empty()
+    {
         let role = if model.reasoning && compat.supports_developer_role {
             "developer"
         } else {
@@ -1526,6 +1527,47 @@ mod tests {
         assert_eq!(payload["messages"][0]["role"], "developer");
         assert_eq!(payload["reasoning_effort"], "low");
         assert_eq!(payload["stream"], true);
+    }
+
+    #[test]
+    fn chat_payload_treats_off_reasoning_effort_as_unspecified() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hello")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(ModelThinkingLevel::Off),
+            ..Default::default()
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn chat_payload_skips_empty_system_prompt() {
+        let model = model();
+        let context = Context {
+            system_prompt: Some(String::new()),
+            messages: vec![Message::user_text("hello")],
+            tools: Vec::new(),
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["messages"][0]["role"], "user");
     }
 
     #[test]

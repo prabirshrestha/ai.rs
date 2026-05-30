@@ -80,6 +80,18 @@ impl ModelThinkingLevel {
             Self::Xhigh => "xhigh",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            _ => None,
+        }
+    }
 }
 
 impl From<ThinkingLevel> for ModelThinkingLevel {
@@ -170,6 +182,7 @@ pub struct StreamOptions {
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
     pub metadata: Option<Value>,
+    pub provider_options: HashMap<String, Value>,
 }
 
 #[derive(Clone, Default)]

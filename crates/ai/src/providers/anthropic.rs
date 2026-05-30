@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use futures::{StreamExt, pin_mut};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -19,6 +18,7 @@ use crate::types::{
     ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
     ThinkingContent, Tool, ToolCall, ToolResultContent, UserContent, UserMessageContent,
 };
+use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
 use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
@@ -272,15 +272,12 @@ async fn run_stream(
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let client = reqwest::Client::new();
-    let response = match crate::utils::http::send_with_retries(&options.base, || {
-        let mut request = client
+    let response = match send_with_retries(&options.base, || {
+        client
             .post(request_url.as_str())
             .headers(request_headers.clone())
-            .json(&payload);
-        if let Some(timeout_ms) = options.base.timeout_ms {
-            request = request.timeout(Duration::from_millis(timeout_ms));
-        }
-        request
+            .json(&payload)
+            .timeout(request_timeout(options.base.timeout_ms))
     })
     .await
     {
@@ -634,7 +631,9 @@ pub fn build_anthropic_payload(
         if let Some(cache_control) = &cache_control {
             system[0]["cache_control"] = cache_control.clone();
         }
-        if let Some(system_prompt) = &context.system_prompt {
+        if let Some(system_prompt) = &context.system_prompt
+            && !system_prompt.is_empty()
+        {
             let mut item = json!({ "type": "text", "text": sanitize_surrogates(system_prompt) });
             if let Some(cache_control) = &cache_control {
                 item["cache_control"] = cache_control.clone();
@@ -642,7 +641,9 @@ pub fn build_anthropic_payload(
             system.push(item);
         }
         object.insert("system".to_string(), Value::Array(system));
-    } else if let Some(system_prompt) = &context.system_prompt {
+    } else if let Some(system_prompt) = &context.system_prompt
+        && !system_prompt.is_empty()
+    {
         let mut item = json!({ "type": "text", "text": sanitize_surrogates(system_prompt) });
         if let Some(cache_control) = &cache_control {
             item["cache_control"] = cache_control.clone();
@@ -1841,6 +1842,24 @@ mod tests {
                 "cache_control": { "type": "ephemeral" }
             })
         );
+    }
+
+    #[test]
+    fn payload_skips_empty_system_prompt() {
+        let model = anthropic_model("claude-haiku-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                system_prompt: Some(String::new()),
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions::default(),
+            false,
+            Some(json!({ "type": "ephemeral" })),
+        );
+
+        assert!(payload.get("system").is_none());
     }
 
     #[test]

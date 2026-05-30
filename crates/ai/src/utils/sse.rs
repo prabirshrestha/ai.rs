@@ -25,7 +25,7 @@ pub fn events(
     try_stream! {
         let mut byte_stream = response.bytes_stream();
         let mut state = SseDecoderState::default();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         loop {
             let chunk = if let Some(cancellation_token) = cancellation_token.as_ref() {
@@ -41,7 +41,7 @@ pub fn events(
                 break;
             };
             let chunk = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(&chunk);
             while let Some((line, rest)) = consume_line(&buffer) {
                 buffer = rest;
                 if let Some(event) = decode_line(&line, &mut state) {
@@ -51,7 +51,7 @@ pub fn events(
         }
 
         if !buffer.is_empty()
-            && let Some(event) = decode_line(&buffer, &mut state) {
+            && let Some(event) = decode_line(&String::from_utf8_lossy(&buffer), &mut state) {
                 yield event;
             }
 
@@ -95,13 +95,18 @@ fn decode_line(line: &str, state: &mut SseDecoderState) -> Option<SseEvent> {
     None
 }
 
-fn consume_line(text: &str) -> Option<(String, String)> {
-    let index = text.find(['\r', '\n'])?;
+fn consume_line(buffer: &[u8]) -> Option<(String, Vec<u8>)> {
+    let index = buffer
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))?;
     let mut next = index + 1;
-    if text.as_bytes().get(index) == Some(&b'\r') && text.as_bytes().get(next) == Some(&b'\n') {
+    if buffer.get(index) == Some(&b'\r') && buffer.get(next) == Some(&b'\n') {
         next += 1;
     }
-    Some((text[..index].to_string(), text[next..].to_string()))
+    Some((
+        String::from_utf8_lossy(&buffer[..index]).into_owned(),
+        buffer[next..].to_vec(),
+    ))
 }
 
 #[cfg(test)]
@@ -134,6 +139,27 @@ mod tests {
         assert!(matches!(item, Some(Err(Error::Cancelled))));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserves_utf8_split_across_body_chunks() {
+        let url = spawn_chunked_sse_server(vec![
+            b"data: {\"text\":\"".to_vec(),
+            vec![0xF0, 0x9F],
+            vec![0x98, 0x80],
+            b"\"}\n\n".to_vec(),
+        ])
+        .await;
+        let response = reqwest::Client::new().get(url).send().await.unwrap();
+
+        let mut events = Box::pin(events(response, None));
+        let event = events
+            .next()
+            .await
+            .expect("event")
+            .expect("valid sse event");
+
+        assert_eq!(event.data, "{\"text\":\"😀\"}");
+    }
+
     async fn spawn_stalled_sse_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -148,6 +174,28 @@ mod tests {
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_chunked_sse_server(chunks: Vec<Vec<u8>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            for chunk in chunks {
+                socket.write_all(&chunk).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         });
         format!("http://{addr}")
     }

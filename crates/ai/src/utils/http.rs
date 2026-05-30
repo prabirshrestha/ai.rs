@@ -5,7 +5,12 @@ use reqwest::{RequestBuilder, Response, StatusCode, header::HeaderMap};
 use crate::types::StreamOptions;
 use crate::{Error, Result};
 
+pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_MAX_RETRY_DELAY_MS: u64 = 60_000;
+
+pub fn request_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS))
+}
 
 pub async fn send_with_retries<F>(options: &StreamOptions, mut build: F) -> Result<Response>
 where
