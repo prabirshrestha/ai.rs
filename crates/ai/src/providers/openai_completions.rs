@@ -713,7 +713,7 @@ fn apply_reasoning_options(
                 "thinking".to_string(),
                 json!({ "type": if mapped_effort.is_some() { "enabled" } else { "disabled" } }),
             );
-            if let Some(effort) = mapped_effort {
+            if let Some(effort) = mapped_effort.filter(|_| compat.supports_reasoning_effort) {
                 object.insert("reasoning_effort".to_string(), json!(effort));
             }
         }
@@ -3341,6 +3341,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn opencode_go_reasoning_deltas_use_reasoning_content_signature() {
+        let mut chat_model = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
+            "id": "chatcmpl-opencode-go-reasoning",
+            "choices": [{
+                "delta": { "reasoning": "think" },
+                "finish_reason": "stop"
+            }]
+        })]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Use reasoning.")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "think".to_string(),
+                thinking_signature: Some("reasoning_content".to_string()),
+                redacted: None,
+            })]
+        );
+    }
+
     #[test]
     fn omits_strict_when_compat_disables_strict_mode() {
         let mut model = model();
@@ -3407,6 +3447,59 @@ mod tests {
         assert!(payload.get("tool_stream").is_none());
     }
 
+    #[test]
+    fn deepseek_thinking_payload_respects_reasoning_effort_compat() {
+        let opencode_go = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        let opencode_compat = get_compat(&opencode_go);
+        let opencode_disabled = build_chat_completions_payload(
+            &opencode_go,
+            &Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions::default(),
+            &opencode_compat,
+            CacheRetention::Short,
+        );
+        let opencode_enabled = build_chat_completions_payload(
+            &opencode_go,
+            &Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &opencode_compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(opencode_disabled["thinking"], json!({ "type": "disabled" }));
+        assert!(opencode_disabled.get("reasoning_effort").is_none());
+        assert_eq!(opencode_enabled["thinking"], json!({ "type": "enabled" }));
+        assert!(opencode_enabled.get("reasoning_effort").is_none());
+
+        let xiaomi = crate::get_model("xiaomi", "mimo-v2.5-pro").expect("mimo-v2.5-pro");
+        let xiaomi_compat = get_compat(&xiaomi);
+        let xiaomi_payload = build_chat_completions_payload(
+            &xiaomi,
+            &Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &xiaomi_compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(xiaomi_payload["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(xiaomi_payload["reasoning_effort"], json!("high"));
+    }
+
     fn assistant_message(content: Vec<AssistantContent>, model: &Model) -> AssistantMessage {
         AssistantMessage {
             content,
@@ -3421,6 +3514,99 @@ mod tests {
             error_message: None,
             timestamp: 2,
         }
+    }
+
+    #[test]
+    fn xiaomi_mimo_metadata_requires_reasoning_content_replay() {
+        for provider in [
+            "xiaomi",
+            "xiaomi-token-plan-cn",
+            "xiaomi-token-plan-ams",
+            "xiaomi-token-plan-sgp",
+        ] {
+            let model = crate::get_model(provider, "mimo-v2.5-pro").expect("mimo-v2.5-pro");
+            let compat = get_compat(&model);
+
+            assert!(compat.requires_reasoning_content_on_assistant_messages);
+            assert_eq!(compat.thinking_format, OpenAIThinkingFormat::Deepseek);
+            assert!(model.compat.openai_completions.max_tokens_field.is_none());
+            assert!(
+                model
+                    .compat
+                    .openai_completions
+                    .supports_developer_role
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn xiaomi_mimo_tool_call_replay_includes_empty_reasoning_content() {
+        let model = crate::get_model("xiaomi", "mimo-v2.5-pro").expect("mimo-v2.5-pro");
+        let compat = get_compat(&model);
+        let assistant = assistant_message(
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_1".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            })],
+            &model,
+        );
+        let context = Context {
+            messages: vec![
+                Message::user_text("Read README.md"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("contents")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 3,
+                }),
+            ],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+        let replayed_assistant = messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message");
+
+        assert_eq!(replayed_assistant["reasoning_content"], json!(""));
+    }
+
+    #[test]
+    fn opencode_go_replays_reasoning_as_reasoning_content() {
+        let model = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        let compat = get_compat(&model);
+        let assistant = assistant_message(
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "think".to_string(),
+                    thinking_signature: Some("reasoning".to_string()),
+                    redacted: None,
+                }),
+                AssistantContent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                    thought_signature: None,
+                }),
+            ],
+            &model,
+        );
+        let context = Context {
+            messages: vec![Message::Assistant(assistant)],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+
+        assert_eq!(messages[0]["reasoning_content"], json!("think"));
+        assert!(messages[0].get("reasoning").is_none());
     }
 
     fn tool_result(tool_call_id: &str, timestamp: u64) -> ToolResultMessage {
