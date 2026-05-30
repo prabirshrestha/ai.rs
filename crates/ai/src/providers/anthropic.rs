@@ -1574,6 +1574,38 @@ mod tests {
     }
 
     #[test]
+    fn payload_uses_pi_cache_retention_for_long_cache_control() {
+        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
+        let model = anthropic_model("claude-haiku-4-5");
+        let options = AnthropicOptions::default();
+        let cache_control = cache_control(
+            &model,
+            resolve_cache_retention(options.base.cache_retention),
+            get_anthropic_compat(&model),
+        );
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                system_prompt: Some("You are helpful.".to_string()),
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &options,
+            false,
+            cache_control,
+        );
+
+        assert_eq!(
+            payload["system"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
+    #[test]
     fn payload_applies_cache_control_to_system_and_last_user_text() {
         let model = anthropic_model("claude-haiku-4-5");
         let payload = build_anthropic_payload(
