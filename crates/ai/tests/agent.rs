@@ -241,6 +241,62 @@ async fn agent_exposes_active_cancellation_token() {
 }
 
 #[tokio::test]
+async fn agent_abort_cancels_active_prompt() {
+    let registration = register_faux_provider(Some(ai::RegisterFauxProviderOptions {
+        tokens_per_second: Some(100.0),
+        token_size: Some(ai::FauxTokenSize {
+            min: Some(3),
+            max: Some(3),
+        }),
+        ..Default::default()
+    }));
+    registration.set_responses([faux_assistant_message("abcdefghijklmnopqrstuvwxyz", None)]);
+    let agent = Arc::new(Agent::new(AgentOptions::new(registration.get_model())));
+    let abort_requested = Arc::new(AtomicBool::new(false));
+
+    agent
+        .subscribe(Arc::new({
+            let agent = Arc::clone(&agent);
+            let abort_requested = Arc::clone(&abort_requested);
+            move |event| {
+                let agent = Arc::clone(&agent);
+                let abort_requested = Arc::clone(&abort_requested);
+                Box::pin(async move {
+                    if matches!(
+                        event,
+                        AgentEvent::MessageUpdate {
+                            assistant_message_event: ai::AssistantMessageEvent::TextDelta { .. },
+                            ..
+                        }
+                    ) && !abort_requested.swap(true, Ordering::SeqCst)
+                    {
+                        agent.abort().await;
+                    }
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    agent.prompt_text("hi", Vec::new()).await.unwrap();
+
+    let state = agent.state().await;
+    assert!(!state.is_streaming);
+    assert!(agent.cancellation_token().await.is_none());
+    assert_eq!(state.error_message.as_deref(), Some("Request was aborted"));
+    let Message::Assistant(assistant) = state.messages.last().expect("assistant message") else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(assistant.stop_reason, StopReason::Aborted);
+    assert_eq!(
+        assistant.error_message.as_deref(),
+        Some("Request was aborted")
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_continue_run_rejects_while_processing_before_context_validation() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("hello", None)]);
