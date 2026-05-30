@@ -2028,6 +2028,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn response_immediate_cancellation_returns_aborted_message() {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        cancellation_token.cancel();
+        let mut stream = stream_openai_responses(
+            model(),
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    cancellation_token: Some(cancellation_token),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert!(result.content.is_empty());
+    }
+
     #[test]
     fn response_service_tier_pricing_multipliers_match_openai_models() {
         for (model_id, service_tier, multiplier) in [

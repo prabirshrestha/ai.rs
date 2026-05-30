@@ -2121,6 +2121,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_immediate_cancellation_returns_aborted_message() {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        cancellation_token.cancel();
+        let mut stream = stream_anthropic(
+            anthropic_model("claude-haiku-4-5"),
+            Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    cancellation_token: Some(cancellation_token),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
     async fn ignores_unknown_sse_events_after_message_stop() {
         let body = sse_body(&[
             (

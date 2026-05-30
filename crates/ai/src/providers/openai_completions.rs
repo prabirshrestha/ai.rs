@@ -2397,6 +2397,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_immediate_cancellation_returns_aborted_message() {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        cancellation_token.cancel();
+        let mut stream = stream_openai_completions(
+            model(),
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    cancellation_token: Some(cancellation_token),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
     async fn choice_usage_fallback_updates_from_later_chunks() {
         let mut chat_model = model();
         chat_model.reasoning = false;
