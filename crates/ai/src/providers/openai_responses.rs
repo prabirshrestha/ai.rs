@@ -1754,6 +1754,45 @@ mod tests {
     }
 
     #[test]
+    fn response_headers_preserve_cloudflare_byok_authorization() {
+        let mut model = model();
+        model.provider = "cloudflare-ai-gateway".to_string();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let mut options = StreamOptions::default();
+        options.headers.insert(
+            "Authorization".to_string(),
+            "Bearer upstream-token".to_string(),
+        );
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "cf-token",
+            &get_compat(&model),
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer upstream-token")
+        );
+        assert_eq!(
+            request_headers
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cf-token")
+        );
+    }
+
+    #[test]
     fn response_headers_add_copilot_dynamic_headers() {
         let mut model = model();
         model.provider = "github-copilot".to_string();
