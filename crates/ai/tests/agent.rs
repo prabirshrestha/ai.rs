@@ -1462,6 +1462,48 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
 }
 
 #[tokio::test]
+async fn prepare_tool_arguments_runs_before_validation() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        tool_use_response(vec![faux_tool_call(
+            "edit",
+            json!({ "oldText": "before", "newText": "after" }),
+            Some("tool-1".to_string()),
+        )]),
+        faux_assistant_message("done", None),
+    ]);
+
+    let received_edits = Arc::new(Mutex::new(Vec::new()));
+    let messages = run_agent_loop(
+        vec![Message::user_text("edit something")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(PreparingEditTool {
+                received_edits: Arc::clone(&received_edits),
+            })],
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        *received_edits.lock().await,
+        vec![json!([{ "oldText": "before", "newText": "after" }])]
+    );
+    let Message::ToolResult(result) = &messages[2] else {
+        panic!("expected tool result");
+    };
+    assert!(!result.is_error);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn tool_preflight_errors_include_empty_details() {
     let registration = register_faux_provider(None);
     registration.set_responses([
@@ -1830,5 +1872,64 @@ impl AgentTool for RecordingArgsTool {
     ) -> AgentResult<AgentToolResult> {
         self.received_args.lock().await.push(args);
         Ok(AgentToolResult::text("recorded"))
+    }
+}
+
+struct PreparingEditTool {
+    received_edits: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl AgentTool for PreparingEditTool {
+    fn definition(&self) -> Tool {
+        Tool {
+            name: "edit".to_string(),
+            description: "Edit tool".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": { "type": "string" },
+                                "newText": { "type": "string" }
+                            },
+                            "required": ["oldText", "newText"]
+                        }
+                    }
+                },
+                "required": ["edits"]
+            }),
+        }
+    }
+
+    fn label(&self) -> &str {
+        "Edit"
+    }
+
+    fn prepare_arguments(&self, args: Value) -> AgentResult<Value> {
+        let Some(old_text) = args.get("oldText").and_then(Value::as_str) else {
+            return Ok(args);
+        };
+        let Some(new_text) = args.get("newText").and_then(Value::as_str) else {
+            return Ok(args);
+        };
+
+        Ok(json!({
+            "edits": [{ "oldText": old_text, "newText": new_text }]
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        args: Value,
+        _cancellation_token: Option<CancellationToken>,
+        _on_update: Option<ai::AgentToolUpdateCallback>,
+    ) -> AgentResult<AgentToolResult> {
+        self.received_edits.lock().await.push(args["edits"].clone());
+        Ok(AgentToolResult::text("edited"))
     }
 }
