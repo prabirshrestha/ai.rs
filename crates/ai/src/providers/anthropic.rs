@@ -733,23 +733,28 @@ pub fn convert_messages(
         match &transformed[index] {
             crate::types::Message::User(user) => match &user.content {
                 UserMessageContent::Text(text) => {
-                    params.push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
+                    if !text.trim().is_empty() {
+                        params
+                            .push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
+                    }
                 }
                 UserMessageContent::Parts(parts) => {
                     let blocks: Vec<Value> = parts
                         .iter()
-                        .map(|item| match item {
+                        .filter_map(|item| match item {
                             UserContent::Text(text) => {
-                                json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
+                                (!text.text.trim().is_empty()).then(|| {
+                                    json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
+                                })
                             }
-                            UserContent::Image(image) => json!({
+                            UserContent::Image(image) => Some(json!({
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
                                     "media_type": image.mime_type,
                                     "data": image.data
                                 }
-                            }),
+                            })),
                         })
                         .collect();
                     if !blocks.is_empty() {
@@ -1369,13 +1374,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_user_text_is_preserved_for_anthropic_messages() {
-        let model = anthropic_model("claude-sonnet-4-5");
+    fn empty_user_text_is_filtered_for_anthropic_messages() {
+        let mut model = anthropic_model("claude-sonnet-4-5");
+        model.input.push(ModelInput::Image);
         let messages = vec![
             crate::types::Message::user_text(""),
             crate::types::Message::User(crate::types::UserMessage {
                 content: crate::types::UserMessageContent::Parts(vec![
                     crate::types::UserContent::text(""),
+                    crate::types::UserContent::Image(crate::types::ImageContent {
+                        data: "abc".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }),
                 ]),
                 timestamp: crate::utils::time::now_millis(),
             }),
@@ -1383,10 +1393,19 @@ mod tests {
 
         let converted = convert_messages(&messages, &model, false, None, false);
 
-        assert_eq!(converted[0], json!({ "role": "user", "content": "" }));
         assert_eq!(
-            converted[1],
-            json!({ "role": "user", "content": [{ "type": "text", "text": "" }] })
+            converted,
+            vec![json!({
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "abc"
+                    }
+                }]
+            })]
         );
     }
 
