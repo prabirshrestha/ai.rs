@@ -3445,6 +3445,24 @@ mod tests {
     #[test]
     fn tool_result_images_stay_inside_function_call_output() {
         let model = model();
+        let assistant = AssistantMessage {
+            content: vec![AssistantContent::ToolCall(ToolCall {
+                id: "call-1".to_string(),
+                name: "get_image".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            })],
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 1,
+        };
         let tool_result = ToolResultMessage {
             tool_call_id: "call-1".to_string(),
             tool_name: "get_image".to_string(),
@@ -3461,7 +3479,11 @@ mod tests {
         };
         let context = Context {
             system_prompt: None,
-            messages: vec![Message::ToolResult(tool_result)],
+            messages: vec![
+                Message::user_text("Describe the tool image."),
+                Message::Assistant(assistant),
+                Message::ToolResult(tool_result),
+            ],
             tools: Vec::new(),
         };
 
@@ -3471,10 +3493,23 @@ mod tests {
             &["openai", "openai-codex", "opencode"].into_iter().collect(),
             true,
         );
-        let function_output = input
+        let function_call_index = input
             .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .position(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .expect("function_call item");
+        let function_output_index = input
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+            })
             .expect("function_call_output item");
+        assert!(
+            function_output_index > function_call_index,
+            "tool result output should follow its function call"
+        );
+        let function_output = input
+            .get(function_output_index)
+            .expect("function_call_output index");
         let output = function_output
             .get("output")
             .and_then(Value::as_array)
@@ -3494,6 +3529,13 @@ mod tests {
                     .and_then(Value::as_str)
                     .is_some_and(|url| url.starts_with("data:image/png;base64,"))
         }));
+        assert!(
+            input
+                .iter()
+                .skip(function_output_index + 1)
+                .all(|item| item.get("role").and_then(Value::as_str) != Some("user")),
+            "tool result images must not be split into a later user message"
+        );
     }
 
     fn sse_body(events: &[Value]) -> String {
