@@ -271,9 +271,13 @@ async fn run_stream(
                 output.response_model = Some(response_model.to_string());
             }
         }
-        if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
-            output.usage = parse_chunk_usage(usage, &model);
-        }
+        let chunk_has_usage =
+            if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
+                output.usage = parse_chunk_usage(usage, &model);
+                true
+            } else {
+                false
+            };
 
         let choice = chunk
             .get("choices")
@@ -282,7 +286,7 @@ async fn run_stream(
         let Some(choice) = choice else {
             continue;
         };
-        if output.usage.total_tokens == 0 {
+        if !chunk_has_usage {
             if let Some(usage) = choice.get("usage").filter(|value| !value.is_null()) {
                 output.usage = parse_chunk_usage(usage, &model);
             }
@@ -1749,6 +1753,64 @@ mod tests {
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
         assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn choice_usage_fallback_updates_from_later_chunks() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-choice-usage",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": "OK" },
+                    "finish_reason": null,
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "prompt_tokens_details": { "cached_tokens": 0 },
+                        "completion_tokens_details": { "reasoning_tokens": 0 }
+                    }
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-choice-usage",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "prompt_tokens_details": { "cached_tokens": 0 },
+                        "completion_tokens_details": { "reasoning_tokens": 0 }
+                    }
+                }]
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.usage.input, 10);
+        assert_eq!(message.usage.output, 5);
+        assert_eq!(message.usage.total_tokens, 15);
     }
 
     #[tokio::test]
