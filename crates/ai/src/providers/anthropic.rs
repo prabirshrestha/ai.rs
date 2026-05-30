@@ -352,8 +352,8 @@ async fn run_stream(
                 return Err(StreamFailure::new(
                     output,
                     format!(
-                        "Could not parse Anthropic SSE event {:?}: {}; data={}; raw={}",
-                        event.event,
+                        "Could not parse Anthropic SSE event {}: {}; data={}; raw={}",
+                        event.event.as_deref().unwrap_or_default(),
                         error,
                         event.data,
                         event.raw.join("\\n")
