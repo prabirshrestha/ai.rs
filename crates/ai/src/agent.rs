@@ -507,7 +507,8 @@ impl Agent {
             (state.model.clone(), state.reasoning_level)
         };
         let mut options = self.base_options.lock().await.clone();
-        options.reasoning = reasoning_level;
+        options.reasoning =
+            reasoning_level.filter(|level| *level != crate::ModelThinkingLevel::Off);
         options.stream.session_id = self.session_id.lock().await.clone();
 
         let steering_queue = self.steering_queue.clone();

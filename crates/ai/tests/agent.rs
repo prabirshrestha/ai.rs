@@ -562,6 +562,49 @@ async fn agent_runtime_options_are_forwarded_to_stream_fn() {
 }
 
 #[tokio::test]
+async fn agent_reasoning_off_is_not_forwarded_to_stream_options() {
+    let registration = register_faux_provider(None);
+    let observed_reasoning = Arc::new(Mutex::new(Vec::new()));
+    let mut options = AgentOptions::new(registration.get_model());
+    options.stream_fn = Some(Arc::new({
+        let observed_reasoning = Arc::clone(&observed_reasoning);
+        move |model, _context, options| {
+            let observed_reasoning = Arc::clone(&observed_reasoning);
+            Box::pin(async move {
+                observed_reasoning.lock().await.push(options.reasoning);
+                let mut message = faux_assistant_message("ok", None);
+                message.api = model.api;
+                message.provider = model.provider;
+                message.model = model.id;
+                let (mut sender, stream) = ai::AssistantMessageEventStream::channel();
+                sender.push(ai::AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+
+    agent
+        .set_reasoning_level(Some(ai::ModelThinkingLevel::High))
+        .await;
+    agent.prompt_text("think", Vec::new()).await.unwrap();
+    agent
+        .set_reasoning_level(Some(ai::ModelThinkingLevel::Off))
+        .await;
+    agent.prompt_text("off", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        *observed_reasoning.lock().await,
+        vec![Some(ai::ModelThinkingLevel::High), None]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_get_api_key_falls_back_to_static_api_key() {
     let registration = register_faux_provider(None);
     let observed_api_keys = Arc::new(Mutex::new(Vec::new()));
