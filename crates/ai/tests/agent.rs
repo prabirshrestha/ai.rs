@@ -241,6 +241,48 @@ async fn agent_continue_run_rejects_while_processing_before_context_validation()
 }
 
 #[tokio::test]
+async fn agent_prompt_rejects_while_processing() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+    let listener_entered = Arc::new(Notify::new());
+    let release_listener = Arc::new(Notify::new());
+
+    agent
+        .subscribe(Arc::new({
+            let listener_entered = Arc::clone(&listener_entered);
+            let release_listener = Arc::clone(&release_listener);
+            move |event| {
+                let listener_entered = Arc::clone(&listener_entered);
+                let release_listener = Arc::clone(&release_listener);
+                Box::pin(async move {
+                    if matches!(event, AgentEvent::AgentStart) {
+                        listener_entered.notify_waiters();
+                        release_listener.notified().await;
+                    }
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    let first_prompt = agent.prompt_text("first", Vec::new());
+    tokio::pin!(first_prompt);
+    tokio::select! {
+        _ = listener_entered.notified() => {}
+        result = &mut first_prompt => panic!("prompt completed before agent_start listener blocked: {result:?}"),
+    }
+
+    let error = agent.prompt_text("second", Vec::new()).await.unwrap_err();
+    assert!(matches!(error, AgentError::AlreadyProcessing));
+
+    release_listener.notify_waiters();
+    first_prompt.await.unwrap();
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_state_mutators_update_runtime_configuration() {
     let registration = register_faux_provider(None);
     let agent = Agent::new(AgentOptions::new(registration.get_model()));
