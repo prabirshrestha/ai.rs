@@ -1979,6 +1979,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_id_is_exposed_from_message_start() {
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_response_id",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "Hello" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" },
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 5,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("Say hello.")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.response_id.as_deref(), Some("msg_response_id"));
+    }
+
+    #[tokio::test]
     async fn ignores_unknown_sse_events_after_message_stop() {
         let body = sse_body(&[
             (

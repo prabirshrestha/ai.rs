@@ -1832,6 +1832,53 @@ mod tests {
         assert_eq!(result.usage.cost.total, 3.0);
     }
 
+    #[tokio::test]
+    async fn response_id_is_exposed_from_responses_stream_events() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.created",
+                "response": { "id": "resp_created" }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_completed",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.response_id.as_deref(), Some("resp_completed"));
+    }
+
     #[test]
     fn response_service_tier_pricing_multipliers_match_openai_models() {
         for (model_id, service_tier, multiplier) in [
