@@ -485,6 +485,70 @@ async fn agent_loop_event_stream_is_exported_from_ai_crate() {
 }
 
 #[tokio::test]
+async fn transform_context_runs_before_convert_to_llm() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+
+    let transformed_messages = Arc::new(Mutex::new(Vec::new()));
+    let converted_messages = Arc::new(Mutex::new(Vec::new()));
+    let mut config = AgentLoopConfig::new(registration.get_model());
+    config.transform_context = Some(Arc::new({
+        let transformed_messages = Arc::clone(&transformed_messages);
+        move |messages, _token| {
+            let transformed_messages = Arc::clone(&transformed_messages);
+            Box::pin(async move {
+                let pruned = messages
+                    .into_iter()
+                    .rev()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>();
+                *transformed_messages.lock().await = pruned.clone();
+                pruned
+            })
+        }
+    }));
+    config.convert_to_llm = Some(Arc::new({
+        let converted_messages = Arc::clone(&converted_messages);
+        move |messages| {
+            let converted_messages = Arc::clone(&converted_messages);
+            Box::pin(async move {
+                *converted_messages.lock().await = messages.clone();
+                messages
+            })
+        }
+    }));
+
+    run_agent_loop(
+        vec![Message::user_text("new")],
+        AgentContext {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("old 1"),
+                Message::Assistant(faux_assistant_message("old response 1", None)),
+                Message::user_text("old 2"),
+            ],
+            tools: Vec::new(),
+        },
+        config,
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let transformed = transformed_messages.lock().await.clone();
+    let converted = converted_messages.lock().await.clone();
+    assert_eq!(message_roles(&transformed), vec!["user", "user"]);
+    assert_eq!(converted, transformed);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_loop_continue_rejects_invalid_contexts() {
     let registration = register_faux_provider(None);
     let config = AgentLoopConfig::new(registration.get_model());
