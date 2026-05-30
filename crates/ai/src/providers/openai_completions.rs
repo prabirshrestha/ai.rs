@@ -1730,6 +1730,91 @@ mod tests {
     }
 
     #[test]
+    fn chat_prefilled_context_normalizes_responses_pipe_tool_call_ids() {
+        let mut source_model = model();
+        source_model.provider = "github-copilot".to_string();
+        source_model.api = "openai-responses".to_string();
+        source_model.id = "gpt-5.2-codex".to_string();
+
+        let mut target_model = model();
+        target_model.provider = "openrouter".to_string();
+        target_model.id = "openai/gpt-5.2-codex".to_string();
+
+        let raw_tool_call_id = concat!(
+            "call_pAYbIr76hXIjncD9UE4eGfnS|",
+            "t5nnb2qYMFWGSsr13fhCd1CaCu3t3qONEPuOudu4HSVEtA8YJSL6FAZUxvoOoD792VIJWl91g87EdqsCWp9krVsd",
+            "BysQoDaf9lMCLb8BS4EYi4gQd5kBQBYLlgD71PYwvf+TbMD9J9/5OMD42oxSRj8H+vRf78/l2Xla33LWz4nOgsd",
+            "dBlbvabICRs8GHt5C9PK5keFtzyi3lsyVKNlfduK3iphsZqs4MLv4zyGJnvZo/+QzShyk5xnMSQX/f98+aEoNfl",
+            "EApCdEOXipipgeiNWnpFSHbcwmMkZoJhURNu+JEz3xCh1mrXeYoN5o+trLL3IXJacSsLYXDrYTipZZbJFRPAucg",
+            "bnjYBC+/ZzJOfkwCs+Gkw7EoZR7ZQgJ8ma+9586n4tT4cI8DEhBSZsWMjrCt8dxKg=="
+        );
+        let assistant = AssistantMessage {
+            content: vec![AssistantContent::ToolCall(ToolCall {
+                id: raw_tool_call_id.to_string(),
+                name: "echo".to_string(),
+                arguments: json!({ "message": "hello" }),
+                thought_signature: Some(json!({ "provider": "copilot" }).to_string()),
+            })],
+            api: source_model.api,
+            provider: source_model.provider,
+            model: source_model.id,
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 2,
+        };
+        let context = Context {
+            messages: vec![
+                Message::user_text("Use echo."),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: raw_tool_call_id.to_string(),
+                    tool_name: "echo".to_string(),
+                    content: vec![ToolResultContent::text("hello")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 3,
+                }),
+                Message::user_text("Say hi."),
+            ],
+            tools: vec![Tool {
+                name: "echo".to_string(),
+                description: "Echo a message".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"]
+                }),
+            }],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&target_model, &context, &get_compat(&target_model));
+        let assistant_message = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant message");
+        let tool_call_id = assistant_message["tool_calls"][0]["id"]
+            .as_str()
+            .expect("tool call id");
+        let tool_result_message = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("tool result message");
+
+        assert_eq!(tool_call_id, "call_pAYbIr76hXIjncD9UE4eGfnS");
+        assert_eq!(tool_result_message["tool_call_id"], json!(tool_call_id));
+        assert!(tool_call_id.len() <= 40);
+        assert!(!tool_call_id.contains('|'));
+        assert!(assistant_message.get("reasoning_details").is_none());
+    }
+
+    #[test]
     fn chat_headers_set_and_omit_session_affinity_by_cache_retention() {
         let mut model = model();
         model.base_url = "https://proxy.example.com/v1".to_string();
