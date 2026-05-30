@@ -20,6 +20,9 @@ pub enum Error {
     #[error("unsupported api: {0}")]
     UnsupportedApi(String),
 
+    #[error("No API provider registered for api: {0}")]
+    NoApiProvider(String),
+
     #[error("provider returned HTTP {status}: {body}")]
     ApiStatus { status: StatusCode, body: String },
 

@@ -1377,7 +1377,7 @@ mod tests {
         )
         .await
         .expect_err("provider should be unregistered");
-        assert!(matches!(error, Error::UnsupportedApi(_)));
+        assert!(matches!(error, Error::NoApiProvider(_)));
     }
 
     #[test]

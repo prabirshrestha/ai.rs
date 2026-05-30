@@ -32,7 +32,7 @@ pub fn stream(
 ) -> Result<AssistantMessageEventStream> {
     ensure_builtins_registered();
     let provider =
-        get_api_provider(&model.api).ok_or_else(|| Error::UnsupportedApi(model.api.clone()))?;
+        get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
     let options = with_env_api_key(&model, options.unwrap_or_default());
     (provider.stream)(model, context, options)
 }
@@ -54,7 +54,7 @@ pub fn stream_simple(
 ) -> Result<AssistantMessageEventStream> {
     ensure_builtins_registered();
     let provider =
-        get_api_provider(&model.api).ok_or_else(|| Error::UnsupportedApi(model.api.clone()))?;
+        get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
     let options = with_env_api_key_simple(&model, options.unwrap_or_default());
     (provider.stream_simple)(model, context, options)
 }
@@ -251,5 +251,20 @@ mod tests {
 
         unregister_api_providers(source_id);
         openai.restore();
+    }
+
+    #[test]
+    fn stream_reports_unregistered_provider_like_upstream() {
+        let model = test_model("missing-api-provider-test");
+        let error = match stream(model, Context::default(), None) {
+            Ok(_) => panic!("expected missing provider error"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(&error, Error::NoApiProvider(api) if api == "missing-api-provider-test"));
+        assert_eq!(
+            error.to_string(),
+            "No API provider registered for api: missing-api-provider-test"
+        );
     }
 }

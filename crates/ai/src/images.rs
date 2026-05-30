@@ -26,7 +26,7 @@ pub async fn generate_images(
 ) -> Result<AssistantImages> {
     ensure_builtins_registered();
     let provider = get_images_api_provider(&model.api)
-        .ok_or_else(|| Error::UnsupportedApi(model.api.clone()))?;
+        .ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
     let options = with_env_api_key(&model, options.unwrap_or_default());
     (provider.generate_images)(model, context, options).await
 }
