@@ -1930,6 +1930,74 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_anthropic_headers_use_gateway_auth_without_direct_anthropic_auth() {
+        let mut model = anthropic_model("claude-sonnet-4-5");
+        model.provider = "cloudflare-ai-gateway".to_string();
+        model.base_url =
+            "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic".to_string();
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            ..Default::default()
+        };
+        let mut options = AnthropicOptions::default();
+        options.base.session_id = Some("session-123".to_string());
+
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            "cf-token",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cf-token")
+        );
+        assert!(request_headers.get("x-api-key").is_none());
+        assert!(request_headers.get("authorization").is_none());
+        assert_eq!(
+            request_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+
+        options.base.headers.insert(
+            "authorization".to_string(),
+            "Bearer upstream-key".to_string(),
+        );
+        let override_headers = headers(
+            &model,
+            &context,
+            &options,
+            "cf-token",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            override_headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer upstream-key")
+        );
+        assert_eq!(
+            override_headers
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cf-token")
+        );
+    }
+
+    #[test]
     fn tool_cache_control_respects_tool_support_compat() {
         let model = anthropic_model("claude-haiku-4-5");
         let mut second_tool = lookup_tool();
