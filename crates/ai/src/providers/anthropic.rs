@@ -1384,6 +1384,112 @@ mod tests {
     }
 
     #[test]
+    fn object_tool_choice_passes_through_for_anthropic_payload() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("Use lookup")],
+                tools: vec![Tool {
+                    name: "lookup".to_string(),
+                    description: "Look up a value".to_string(),
+                    parameters: json!({ "type": "object" }),
+                }],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                tool_choice: Some(json!({ "type": "tool", "name": "lookup" })),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(
+            payload["tool_choice"],
+            json!({ "type": "tool", "name": "lookup" })
+        );
+    }
+
+    #[test]
+    fn metadata_includes_string_user_id_only_for_anthropic_payload() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            ..Default::default()
+        };
+        let payload = build_anthropic_payload(
+            &model,
+            &context,
+            &AnthropicOptions {
+                base: StreamOptions {
+                    metadata: Some(json!({ "user_id": "user-123", "other": "ignored" })),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+        let invalid_payload = build_anthropic_payload(
+            &model,
+            &context,
+            &AnthropicOptions {
+                base: StreamOptions {
+                    metadata: Some(json!({ "user_id": 123 })),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["metadata"], json!({ "user_id": "user-123" }));
+        assert!(invalid_payload.get("metadata").is_none());
+    }
+
+    #[test]
+    fn temperature_is_omitted_when_anthropic_thinking_is_enabled() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            ..Default::default()
+        };
+        let with_thinking = build_anthropic_payload(
+            &model,
+            &context,
+            &AnthropicOptions {
+                base: StreamOptions {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                },
+                thinking_enabled: Some(true),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+        let without_thinking = build_anthropic_payload(
+            &model,
+            &context,
+            &AnthropicOptions {
+                base: StreamOptions {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                },
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert!(with_thinking.get("temperature").is_none());
+        assert_eq!(without_thinking["temperature"], json!(0.2));
+    }
+
+    #[test]
     fn adaptive_thinking_payload_uses_effort() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
