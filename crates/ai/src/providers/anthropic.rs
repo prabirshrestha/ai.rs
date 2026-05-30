@@ -1370,6 +1370,134 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_thinking_can_be_disabled_by_compat_override() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(false);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(true),
+                effort: Some(AnthropicEffort::Medium),
+                thinking_budget_tokens: Some(2048),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(
+            payload["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 2048, "display": "summarized" })
+        );
+        assert!(payload.get("output_config").is_none());
+    }
+
+    fn lookup_tool() -> Tool {
+        Tool {
+            name: "lookup".to_string(),
+            description: "Look up a value".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"]
+            }),
+        }
+    }
+
+    #[test]
+    fn eager_tool_input_streaming_is_enabled_by_default() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("Use the tool")],
+            tools: vec![lookup_tool()],
+            ..Default::default()
+        };
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), false, None);
+        let request_headers = headers(
+            &model,
+            &context,
+            &AnthropicOptions::default(),
+            "test-key",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert_eq!(payload["tools"][0]["eager_input_streaming"], json!(true));
+        assert!(request_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn fine_grained_tool_streaming_beta_is_used_when_eager_input_is_disabled() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        model
+            .compat
+            .anthropic_messages
+            .supports_eager_tool_input_streaming = Some(false);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("Use the tool")],
+            tools: vec![lookup_tool()],
+            ..Default::default()
+        };
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), false, None);
+        let request_headers = headers(
+            &model,
+            &context,
+            &AnthropicOptions::default(),
+            "test-key",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert!(payload["tools"][0].get("eager_input_streaming").is_none());
+        assert_eq!(
+            request_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some(FINE_GRAINED_TOOL_STREAMING_BETA)
+        );
+    }
+
+    #[test]
+    fn fine_grained_tool_streaming_beta_is_omitted_without_tools() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        model
+            .compat
+            .anthropic_messages
+            .supports_eager_tool_input_streaming = Some(false);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("No tools")],
+            ..Default::default()
+        };
+        let request_headers = headers(
+            &model,
+            &context,
+            &AnthropicOptions::default(),
+            "test-key",
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert!(request_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
     fn oauth_tool_names_round_trip_by_case_insensitive_lookup_only() {
         let model = anthropic_model("claude-sonnet-4-6");
         let tools = vec![
