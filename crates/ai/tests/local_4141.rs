@@ -4,6 +4,7 @@ use ai::{
 };
 
 const LOCAL_BASE_URL: &str = "http://localhost:4141/v1";
+const DEFAULT_CHAT_COMPLETIONS_MODEL: &str = "gpt-5.2";
 
 fn local_model(api: &str, model_id: &str, reasoning: bool) -> Model {
     Model {
@@ -55,6 +56,10 @@ async fn skip_unless_available(test_name: &str) -> bool {
     true
 }
 
+fn require_local_4141() -> bool {
+    std::env::var("PI_REQUIRE_LOCAL_4141").ok().as_deref() == Some("1")
+}
+
 #[tokio::test]
 async fn local_openai_responses_gpt55_low_effort() -> ai::Result<()> {
     if skip_unless_available("local_openai_responses_gpt55_low_effort").await {
@@ -87,7 +92,7 @@ async fn local_openai_chat_completions_streaming() -> ai::Result<()> {
     }
 
     let chat_model = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL")
-        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        .unwrap_or_else(|_| DEFAULT_CHAT_COMPLETIONS_MODEL.to_string());
     let chat_model_overridden = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL").is_ok();
 
     let message = complete_simple(
@@ -111,6 +116,7 @@ async fn local_openai_chat_completions_streaming() -> ai::Result<()> {
 
     if message.stop_reason == StopReason::Error
         && !chat_model_overridden
+        && !require_local_4141()
         && message
             .error_message
             .as_deref()
@@ -167,7 +173,7 @@ async fn local_agent_openai_chat_completions_streaming() -> ai::AgentResult<()> 
     }
 
     let chat_model = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL")
-        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        .unwrap_or_else(|_| DEFAULT_CHAT_COMPLETIONS_MODEL.to_string());
     let chat_model_overridden = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL").is_ok();
 
     let mut options = AgentOptions::new(local_model(
@@ -196,6 +202,7 @@ async fn local_agent_openai_chat_completions_streaming() -> ai::AgentResult<()> 
     };
     if message.stop_reason == StopReason::Error
         && !chat_model_overridden
+        && !require_local_4141()
         && message
             .error_message
             .as_deref()
