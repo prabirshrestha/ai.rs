@@ -1965,6 +1965,97 @@ mod tests {
     }
 
     #[test]
+    fn skips_aborted_reasoning_only_history() {
+        let model = model();
+        let mut aborted_assistant = AssistantMessage::empty_for(&model);
+        aborted_assistant.stop_reason = StopReason::Aborted;
+        aborted_assistant
+            .content
+            .push(AssistantContent::Thinking(ThinkingContent {
+                thinking: String::new(),
+                thinking_signature: Some(
+                    json!({
+                        "type": "reasoning",
+                        "id": "rs_aborted",
+                        "summary": []
+                    })
+                    .to_string(),
+                ),
+                redacted: None,
+            }));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("Use the tool."),
+                Message::Assistant(aborted_assistant),
+                Message::user_text("Continue."),
+            ],
+            tools: Vec::new(),
+        };
+
+        let input = convert_responses_messages(
+            &model,
+            &context,
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+
+        assert_eq!(input.len(), 2);
+        assert!(input.iter().all(|item| {
+            item.get("type").and_then(Value::as_str) != Some("reasoning")
+                && item.get("id").and_then(Value::as_str) != Some("rs_aborted")
+        }));
+    }
+
+    #[test]
+    fn omits_paired_function_call_item_id_for_same_provider_model_handoff() {
+        let mut source_model = model();
+        source_model.id = "gpt-5-mini".to_string();
+        let mut target_model = model();
+        target_model.id = "gpt-5.2-codex".to_string();
+        let assistant = AssistantMessage {
+            content: vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_abc|fc_paired".to_string(),
+                name: "double_number".to_string(),
+                arguments: json!({ "value": 21 }),
+                thought_signature: None,
+            })],
+            api: source_model.api.clone(),
+            provider: source_model.provider.clone(),
+            model: source_model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 2,
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::user_text("Double 21."),
+                Message::Assistant(assistant),
+            ],
+            tools: Vec::new(),
+        };
+
+        let input = convert_responses_messages(
+            &target_model,
+            &context,
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+        let function_call = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .expect("function_call");
+
+        assert_eq!(function_call["call_id"], json!("call_abc"));
+        assert!(function_call.get("id").is_none_or(Value::is_null));
+    }
+
+    #[test]
     fn hashes_foreign_tool_item_ids_for_responses_models() {
         let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
         let assistant = AssistantMessage {
