@@ -557,6 +557,7 @@ async fn run_stream(
                             {
                                 let args = partial_json
                                     .get(&index)
+                                    .filter(|args| !args.is_empty())
                                     .map(String::as_str)
                                     .or_else(|| item.get("arguments").and_then(Value::as_str))
                                     .unwrap_or("{}");
@@ -1555,6 +1556,77 @@ mod tests {
         assert_eq!(result.usage.cost.input, 1.0);
         assert_eq!(result.usage.cost.output, 2.0);
         assert_eq!(result.usage.cost.total, 3.0);
+    }
+
+    #[tokio::test]
+    async fn response_function_call_done_uses_final_arguments_without_deltas() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("read")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_test|fc_test".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            })]
+        );
     }
 
     #[test]
