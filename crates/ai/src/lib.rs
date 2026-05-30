@@ -45,11 +45,27 @@ pub use oauth::{
     normalize_domain, poll_oauth_device_code_flow, refresh_anthropic_token,
     refresh_github_copilot_token,
 };
+pub use providers::anthropic::{
+    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, build_anthropic_payload,
+    stream_anthropic, stream_simple_anthropic,
+};
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
     FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,
     RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
     register_faux_provider,
+};
+pub use providers::github_copilot_headers::{
+    build_copilot_dynamic_headers, has_copilot_vision_input, infer_copilot_initiator,
+};
+pub use providers::openai_completions::{
+    OpenAICompletionsOptions, build_chat_completions_payload, stream_openai_completions,
+    stream_simple_openai_completions,
+};
+pub use providers::openai_responses::{
+    OpenAIResponsesAuthHeader, OpenAIResponsesOptions, build_responses_payload,
+    convert_responses_messages, convert_responses_tools, stream_openai_responses,
+    stream_simple_openai_responses,
 };
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
