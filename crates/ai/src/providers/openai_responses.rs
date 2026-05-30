@@ -176,9 +176,14 @@ async fn run_stream(
     };
     let compat = get_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
-    let mut payload = options.payload_override.clone().unwrap_or_else(|| {
-        build_responses_payload(&model, &context, &options, &compat, cache_retention)
-    });
+    let mut payload = if let Some(payload_override) = options.payload_override.clone() {
+        payload_override
+    } else {
+        match try_build_responses_payload(&model, &context, &options, &compat, cache_retention) {
+            Ok(payload) => payload,
+            Err(error) => return Err(StreamFailure::new(output, error)),
+        }
+    };
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -731,12 +736,23 @@ pub fn build_responses_payload(
     compat: &ResolvedOpenAIResponsesCompat,
     cache_retention: CacheRetention,
 ) -> Value {
-    let messages = convert_responses_messages(
+    try_build_responses_payload(model, context, options, compat, cache_retention)
+        .expect("valid OpenAI Responses payload")
+}
+
+fn try_build_responses_payload(
+    model: &Model,
+    context: &Context,
+    options: &OpenAIResponsesOptions,
+    compat: &ResolvedOpenAIResponsesCompat,
+    cache_retention: CacheRetention,
+) -> Result<Value> {
+    let messages = try_convert_responses_messages(
         model,
         context,
         &OPENAI_TOOL_CALL_PROVIDERS.iter().copied().collect(),
         true,
-    );
+    )?;
     let mut payload = json!({
         "model": options.request_model.as_deref().unwrap_or(&model.id),
         "input": messages,
@@ -815,7 +831,7 @@ pub fn build_responses_payload(
             );
         }
     }
-    payload
+    Ok(payload)
 }
 
 pub fn convert_responses_messages(
@@ -824,6 +840,21 @@ pub fn convert_responses_messages(
     allowed_tool_call_providers: &HashSet<&str>,
     include_system_prompt: bool,
 ) -> Vec<Value> {
+    try_convert_responses_messages(
+        model,
+        context,
+        allowed_tool_call_providers,
+        include_system_prompt,
+    )
+    .expect("valid OpenAI Responses message history")
+}
+
+fn try_convert_responses_messages(
+    model: &Model,
+    context: &Context,
+    allowed_tool_call_providers: &HashSet<&str>,
+    include_system_prompt: bool,
+) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     let transformed = transform_messages(
         context.messages.as_slice(),
@@ -879,9 +910,8 @@ pub fn convert_responses_messages(
                     match block {
                         AssistantContent::Thinking(thinking) => {
                             if let Some(signature) = thinking.thinking_signature {
-                                if let Ok(reasoning_item) =
-                                    serde_json::from_str::<Value>(&signature)
-                                {
+                                if !signature.is_empty() {
+                                    let reasoning_item = serde_json::from_str::<Value>(&signature)?;
                                     output.push(reasoning_item);
                                 }
                             }
@@ -1000,7 +1030,7 @@ pub fn convert_responses_messages(
         }
         msg_index += 1;
     }
-    messages
+    Ok(messages)
 }
 
 pub fn convert_responses_tools(tools: &[Tool], strict: Option<bool>) -> Vec<Value> {
@@ -1337,6 +1367,44 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[tokio::test]
+    async fn invalid_replayed_reasoning_signature_errors_before_request() {
+        let model = model();
+        let mut assistant = AssistantMessage::empty_for(&model);
+        assistant
+            .content
+            .push(AssistantContent::Thinking(ThinkingContent {
+                thinking: String::new(),
+                thinking_signature: Some("{".to_string()),
+                redacted: None,
+            }));
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::Assistant(assistant)],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("line 1 column"))
+        );
     }
 
     #[test]
