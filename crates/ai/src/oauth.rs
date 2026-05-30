@@ -833,6 +833,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn device_code_poll_cancels_in_flight_wait() {
+        let token = CancellationToken::new();
+        let attempts = Arc::new(Mutex::new(0_u32));
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let poll =
+            poll_oauth_device_code_flow::<(), _, _>(Some(5), Some(30), Some(token.clone()), {
+                let attempts = Arc::clone(&attempts);
+                let polled = Arc::clone(&polled);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    let polled = Arc::clone(&polled);
+                    async move {
+                        *attempts.lock().expect("attempt lock poisoned") += 1;
+                        polled.notify_one();
+                        Ok(OAuthDeviceCodePollResult::Pending)
+                    }
+                }
+            });
+        tokio::pin!(poll);
+
+        tokio::select! {
+            _ = polled.notified() => {}
+            result = &mut poll => panic!("poll completed before cancellation: {result:?}"),
+        }
+
+        token.cancel();
+        let error = poll.await.unwrap_err();
+
+        assert_eq!(*attempts.lock().expect("attempt lock poisoned"), 1);
+        assert_eq!(error.to_string(), "provider error: Login cancelled");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn login_callback_prompt_can_be_constructed() {
         let seen_prompt = Arc::new(Mutex::new(None));
         let callbacks = OAuthLoginCallbacks {
