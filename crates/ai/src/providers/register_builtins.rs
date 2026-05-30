@@ -25,6 +25,32 @@ pub fn reset_api_providers() {
 pub fn register_builtins() {
     api_registry::register_api_provider(
         ApiProvider {
+            api: "anthropic-messages".to_string(),
+            stream: api_registry::wrap_stream("anthropic-messages", |model, context, options| {
+                Ok(anthropic::stream_anthropic(
+                    model,
+                    context,
+                    anthropic::AnthropicOptions {
+                        base: options,
+                        ..Default::default()
+                    },
+                ))
+            }),
+            stream_simple: api_registry::wrap_stream_simple(
+                "anthropic-messages",
+                |model: Model,
+                 context: Context,
+                 options: SimpleStreamOptions|
+                 -> Result<AssistantMessageEventStream> {
+                    Ok(anthropic::stream_simple_anthropic(model, context, options))
+                },
+            ),
+        },
+        Some("builtin".to_string()),
+    );
+
+    api_registry::register_api_provider(
+        ApiProvider {
             api: "openai-completions".to_string(),
             stream: api_registry::wrap_stream("openai-completions", |model, context, options| {
                 Ok(openai_completions::stream_openai_completions(
@@ -46,6 +72,37 @@ pub fn register_builtins() {
                     Ok(openai_completions::stream_simple_openai_completions(
                         model, context, options,
                     ))
+                },
+            ),
+        },
+        Some("builtin".to_string()),
+    );
+
+    api_registry::register_api_provider(
+        ApiProvider {
+            api: "mistral-conversations".to_string(),
+            stream: api_registry::wrap_stream(
+                "mistral-conversations",
+                |model, context, options| {
+                    Ok(mistral::stream_mistral(
+                        model,
+                        context,
+                        mistral::MistralOptions {
+                            base: options,
+                            tool_choice: None,
+                            prompt_mode: None,
+                            reasoning_effort: None,
+                        },
+                    ))
+                },
+            ),
+            stream_simple: api_registry::wrap_stream_simple(
+                "mistral-conversations",
+                |model: Model,
+                 context: Context,
+                 options: SimpleStreamOptions|
+                 -> Result<AssistantMessageEventStream> {
+                    Ok(mistral::stream_simple_mistral(model, context, options))
                 },
             ),
         },
@@ -148,63 +205,6 @@ pub fn register_builtins() {
                             model, context, options,
                         ),
                     )
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "anthropic-messages".to_string(),
-            stream: api_registry::wrap_stream("anthropic-messages", |model, context, options| {
-                Ok(anthropic::stream_anthropic(
-                    model,
-                    context,
-                    anthropic::AnthropicOptions {
-                        base: options,
-                        ..Default::default()
-                    },
-                ))
-            }),
-            stream_simple: api_registry::wrap_stream_simple(
-                "anthropic-messages",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
-                    Ok(anthropic::stream_simple_anthropic(model, context, options))
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "mistral-conversations".to_string(),
-            stream: api_registry::wrap_stream(
-                "mistral-conversations",
-                |model, context, options| {
-                    Ok(mistral::stream_mistral(
-                        model,
-                        context,
-                        mistral::MistralOptions {
-                            base: options,
-                            tool_choice: None,
-                            prompt_mode: None,
-                            reasoning_effort: None,
-                        },
-                    ))
-                },
-            ),
-            stream_simple: api_registry::wrap_stream_simple(
-                "mistral-conversations",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
-                    Ok(mistral::stream_simple_mistral(model, context, options))
                 },
             ),
         },

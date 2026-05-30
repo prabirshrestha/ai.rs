@@ -6,13 +6,13 @@ use ai::{
     build_copilot_dynamic_headers, build_responses_payload, clear_api_providers,
     convert_anthropic_messages, convert_openai_completions_messages,
     create_assistant_message_event_stream, get_api_provider, get_api_providers, get_oauth_api_key,
-    get_oauth_provider, get_oauth_provider_info_list, get_openai_completions_compat,
-    get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
-    login_anthropic, register_builtin_api_providers, register_oauth_provider, repair_json,
-    reset_api_providers, reset_oauth_providers, stream_anthropic, stream_openai_completions,
-    stream_openai_responses, stream_simple_anthropic, stream_simple_openai_completions,
-    stream_simple_openai_responses, unregister_oauth_provider, validate_tool_arguments,
-    validate_tool_call,
+    get_oauth_provider, get_oauth_provider_info_list, get_oauth_providers,
+    get_openai_completions_compat, get_openai_responses_compat, has_copilot_vision_input,
+    infer_copilot_initiator, login_anthropic, register_builtin_api_providers,
+    register_oauth_provider, repair_json, reset_api_providers, reset_oauth_providers,
+    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
+    stream_simple_openai_completions, stream_simple_openai_responses, unregister_oauth_provider,
+    validate_tool_arguments, validate_tool_call,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -154,12 +154,33 @@ fn api_registry_and_builtin_provider_helpers_are_exported() {
             .iter()
             .any(|provider| provider.api == "openai-completions")
     );
+    let focused_order = get_api_providers()
+        .into_iter()
+        .map(|provider| provider.api)
+        .filter(|api| {
+            matches!(
+                api.as_str(),
+                "anthropic-messages" | "openai-completions" | "openai-responses"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        focused_order,
+        [
+            "anthropic-messages",
+            "openai-completions",
+            "openai-responses"
+        ]
+    );
 
     clear_api_providers();
     assert!(get_api_provider("openai-completions").is_none());
 
     register_builtin_api_providers();
     assert!(get_api_provider("openai-responses").is_some());
+    let provider_count = get_api_providers().len();
+    register_builtin_api_providers();
+    assert_eq!(get_api_providers().len(), provider_count);
 
     reset_api_providers();
 }
@@ -185,6 +206,8 @@ fn json_and_validation_helpers_are_exported() {
 
 #[tokio::test]
 async fn oauth_registry_helpers_are_exported() {
+    reset_oauth_providers();
+
     let _auth_info = ai::OAuthAuthInfo {
         url: "https://example.com/auth".to_string(),
         instructions: Some("Open in browser".to_string()),
@@ -208,6 +231,11 @@ async fn oauth_registry_helpers_are_exported() {
             .iter()
             .any(|info| info.id == "github-copilot")
     );
+    let oauth_ids = get_oauth_providers()
+        .into_iter()
+        .map(|provider| provider.id().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(oauth_ids, ["anthropic", "github-copilot"]);
 
     let mut credentials = HashMap::new();
     credentials.insert(
@@ -224,6 +252,8 @@ async fn oauth_registry_helpers_are_exported() {
     let _unregister: fn(&str) = unregister_oauth_provider;
     let _reset: fn() = reset_oauth_providers;
     let _login_anthropic = login_anthropic;
+
+    reset_oauth_providers();
 }
 
 fn oauth_credentials(access: &str) -> ai::OAuthCredentials {

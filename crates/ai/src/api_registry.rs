@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::event_stream::AssistantMessageEventStream;
@@ -26,26 +25,35 @@ struct RegisteredApiProvider {
     source_id: Option<String>,
 }
 
-fn registry() -> &'static RwLock<HashMap<String, RegisteredApiProvider>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<String, RegisteredApiProvider>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+fn registry() -> &'static RwLock<Vec<RegisteredApiProvider>> {
+    static REGISTRY: OnceLock<RwLock<Vec<RegisteredApiProvider>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
 pub fn register_api_provider(provider: ApiProvider, source_id: Option<String>) {
-    registry().write().expect("api registry poisoned").insert(
-        provider.api.clone(),
-        RegisteredApiProvider {
+    let mut registry = registry().write().expect("api registry poisoned");
+    if let Some(existing) = registry
+        .iter_mut()
+        .find(|entry| entry.provider.api == provider.api)
+    {
+        *existing = RegisteredApiProvider {
             provider,
             source_id,
-        },
-    );
+        };
+    } else {
+        registry.push(RegisteredApiProvider {
+            provider,
+            source_id,
+        });
+    }
 }
 
 pub fn get_api_provider(api: &str) -> Option<ApiProvider> {
     registry()
         .read()
         .expect("api registry poisoned")
-        .get(api)
+        .iter()
+        .find(|entry| entry.provider.api == api)
         .map(|entry| entry.provider.clone())
 }
 
@@ -53,7 +61,7 @@ pub fn get_api_providers() -> Vec<ApiProvider> {
     registry()
         .read()
         .expect("api registry poisoned")
-        .values()
+        .iter()
         .map(|entry| entry.provider.clone())
         .collect()
 }
@@ -62,7 +70,7 @@ pub fn unregister_api_providers(source_id: &str) {
     registry()
         .write()
         .expect("api registry poisoned")
-        .retain(|_, entry| entry.source_id.as_deref() != Some(source_id));
+        .retain(|entry| entry.source_id.as_deref() != Some(source_id));
 }
 
 pub fn clear_api_providers() {

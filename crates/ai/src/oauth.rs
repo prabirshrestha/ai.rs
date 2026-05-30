@@ -260,8 +260,8 @@ struct RegisteredOAuthProvider {
     provider: OAuthProvider,
 }
 
-fn oauth_registry() -> &'static RwLock<HashMap<String, RegisteredOAuthProvider>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<String, RegisteredOAuthProvider>>> = OnceLock::new();
+fn oauth_registry() -> &'static RwLock<Vec<RegisteredOAuthProvider>> {
+    static REGISTRY: OnceLock<RwLock<Vec<RegisteredOAuthProvider>>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(builtin_oauth_providers()))
 }
 
@@ -273,12 +273,11 @@ fn builtin_oauth_provider(id: &str) -> Option<OAuthProvider> {
     }
 }
 
-fn builtin_oauth_providers() -> HashMap<String, RegisteredOAuthProvider> {
+fn builtin_oauth_providers() -> Vec<RegisteredOAuthProvider> {
     ["anthropic", "github-copilot"]
         .into_iter()
         .filter_map(|id| {
-            builtin_oauth_provider(id)
-                .map(|provider| (id.to_string(), RegisteredOAuthProvider { provider }))
+            builtin_oauth_provider(id).map(|provider| RegisteredOAuthProvider { provider })
         })
         .collect()
 }
@@ -287,26 +286,31 @@ pub fn get_oauth_provider(id: &str) -> Option<OAuthProvider> {
     oauth_registry()
         .read()
         .expect("oauth registry poisoned")
-        .get(id)
+        .iter()
+        .find(|entry| entry.provider.id() == id)
         .map(|entry| entry.provider.clone())
 }
 
 pub fn register_oauth_provider(provider: OAuthProvider) {
-    oauth_registry()
-        .write()
-        .expect("oauth registry poisoned")
-        .insert(
-            provider.id().to_string(),
-            RegisteredOAuthProvider { provider },
-        );
+    let id = provider.id();
+    let mut registry = oauth_registry().write().expect("oauth registry poisoned");
+    if let Some(existing) = registry.iter_mut().find(|entry| entry.provider.id() == id) {
+        *existing = RegisteredOAuthProvider { provider };
+    } else {
+        registry.push(RegisteredOAuthProvider { provider });
+    }
 }
 
 pub fn unregister_oauth_provider(id: &str) {
     let mut registry = oauth_registry().write().expect("oauth registry poisoned");
     if let Some(provider) = builtin_oauth_provider(id) {
-        registry.insert(id.to_string(), RegisteredOAuthProvider { provider });
+        if let Some(existing) = registry.iter_mut().find(|entry| entry.provider.id() == id) {
+            *existing = RegisteredOAuthProvider { provider };
+        } else {
+            registry.push(RegisteredOAuthProvider { provider });
+        }
     } else {
-        registry.remove(id);
+        registry.retain(|entry| entry.provider.id() != id);
     }
 }
 
@@ -318,7 +322,7 @@ pub fn get_oauth_providers() -> Vec<OAuthProvider> {
     oauth_registry()
         .read()
         .expect("oauth registry poisoned")
-        .values()
+        .iter()
         .map(|entry| entry.provider.clone())
         .collect()
 }
