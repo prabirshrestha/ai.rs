@@ -1431,7 +1431,10 @@ mod tests {
         Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ToolResultMessage,
     };
     use futures::StreamExt;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1910,6 +1913,32 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_retrying_sse_server(body: String, attempts: Arc<AtomicUsize>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0u8; 4096];
+                let _ = socket.read(&mut buffer).await;
+                let response = if attempt == 0 {
+                    "HTTP/1.1 500 Internal Server Error\r\nretry-after-ms: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn surfaces_routed_chunk_model_as_response_model() {
         let mut routed_model = model();
@@ -2011,6 +2040,111 @@ mod tests {
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
         assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn chat_provider_does_not_retry_by_default() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_retrying_sse_server(
+            chat_sse_body(&[json!({
+                "id": "chatcmpl-retry",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            })]),
+            Arc::clone(&attempts),
+        )
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert!(
+            message
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("500"))
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_provider_honors_explicit_retry_settings() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_retrying_sse_server(
+            chat_sse_body(&[
+                json!({
+                    "id": "chatcmpl-retry",
+                    "choices": [{ "index": 0, "delta": { "content": "ok" }, "finish_reason": null }]
+                }),
+                json!({
+                    "id": "chatcmpl-retry",
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "prompt_tokens_details": { "cached_tokens": 0 },
+                        "completion_tokens_details": { "reasoning_tokens": 0 }
+                    }
+                }),
+            ]),
+            Arc::clone(&attempts),
+        )
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    max_retries: Some(1),
+                    max_retry_delay_ms: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "ok".to_string(),
+                text_signature: None,
+            })]
+        );
     }
 
     #[tokio::test]
