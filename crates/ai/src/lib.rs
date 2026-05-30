@@ -46,8 +46,8 @@ pub use oauth::{
     refresh_github_copilot_token,
 };
 pub use providers::anthropic::{
-    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, build_anthropic_payload,
-    stream_anthropic, stream_simple_anthropic,
+    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, ResolvedAnthropicCompat,
+    build_anthropic_payload, stream_anthropic, stream_simple_anthropic,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
@@ -59,13 +59,14 @@ pub use providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input, infer_copilot_initiator,
 };
 pub use providers::openai_completions::{
-    OpenAICompletionsOptions, build_chat_completions_payload, stream_openai_completions,
-    stream_simple_openai_completions,
+    OpenAICompletionsOptions, ResolvedOpenAICompletionsCompat, build_chat_completions_payload,
+    detect_compat as detect_openai_completions_compat, get_compat as get_openai_completions_compat,
+    stream_openai_completions, stream_simple_openai_completions,
 };
 pub use providers::openai_responses::{
-    OpenAIResponsesAuthHeader, OpenAIResponsesOptions, build_responses_payload,
-    convert_responses_messages, convert_responses_tools, stream_openai_responses,
-    stream_simple_openai_responses,
+    OpenAIResponsesAuthHeader, OpenAIResponsesOptions, ResolvedOpenAIResponsesCompat,
+    build_responses_payload, convert_responses_messages, convert_responses_tools,
+    stream_openai_responses, stream_simple_openai_responses,
 };
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
