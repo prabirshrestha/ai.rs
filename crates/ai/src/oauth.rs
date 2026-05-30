@@ -752,10 +752,13 @@ fn parse_authorization_input(input: &str) -> AuthorizationInput {
 }
 
 fn query_param(query: &str, name: &str) -> Option<String> {
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name && !value.is_empty()).then(|| value.to_string())
-    })
+    reqwest::Url::parse(&format!("http://localhost/?{query}"))
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+        })
+        .filter(|value| !value.is_empty())
 }
 
 struct AnthropicCallbackServer {
@@ -1474,6 +1477,13 @@ mod tests {
             AuthorizationInput {
                 code: Some("abc".to_string()),
                 state: Some("verifier".to_string())
+            }
+        );
+        assert_eq!(
+            parse_authorization_input("code=abc%2Bdef&state=verifier%2Bvalue"),
+            AuthorizationInput {
+                code: Some("abc+def".to_string()),
+                state: Some("verifier+value".to_string())
             }
         );
         assert_eq!(
