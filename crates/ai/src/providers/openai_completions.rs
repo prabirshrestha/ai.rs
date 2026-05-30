@@ -65,7 +65,8 @@ pub fn stream_simple_openai_completions(
         .filter(|key| !key.trim().is_empty());
 
     let Some(api_key) = api_key else {
-        return immediate_error(model, "No API key for provider");
+        let provider = model.provider.clone();
+        return immediate_error(model, &format!("No API key for provider: {provider}"));
     };
 
     let base = build_base_options(&model, &options, api_key);
@@ -1435,7 +1436,7 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
     let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
     let mut output = AssistantMessage::empty_for(&model);
     output.stop_reason = StopReason::Error;
-    output.error_message = Some(format!("{message}: {}", model.provider));
+    output.error_message = Some(message.to_string());
     sender.push(AssistantMessageEvent::Error {
         reason: StopReason::Error,
         error: output,
@@ -1482,6 +1483,23 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[tokio::test]
+    async fn stream_simple_missing_api_key_names_provider() {
+        let mut stream = stream_simple_openai_completions(
+            model(),
+            Context::default(),
+            SimpleStreamOptions::default(),
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("No API key for provider: openai")
+        );
     }
 
     #[test]
