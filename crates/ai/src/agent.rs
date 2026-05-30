@@ -335,6 +335,9 @@ impl Agent {
     }
 
     pub async fn continue_run(&self) -> AgentResult<()> {
+        if self.active_token.lock().await.is_some() {
+            return Err(AgentError::AlreadyProcessing);
+        }
         let last = self.state.lock().await.messages.last().cloned();
         match last {
             None => Err(AgentError::NoMessagesToContinue),
