@@ -3,17 +3,59 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ai::{
     AfterToolCallContext, Agent, AgentContext, AgentError, AgentEvent, AgentEventSink,
-    AgentLoopConfig, AgentLoopTurnUpdate, AgentOptions, AgentResult, AgentTool, AgentToolResult,
-    BeforeToolCallContext, BeforeToolCallResult, FauxAssistantMessageOptions, FauxResponseStep,
-    Message, QueueMode, StopReason, Tool, ToolExecutionMode, agent_loop, agent_loop_continue,
-    faux_assistant_message, faux_text, faux_tool_call, register_faux_provider, run_agent_loop,
-    run_agent_loop_continue,
+    AgentLoopConfig, AgentLoopTurnUpdate, AgentOptions, AgentResult, AgentState, AgentTool,
+    AgentToolResult, BeforeToolCallContext, BeforeToolCallResult, FauxAssistantMessageOptions,
+    FauxResponseStep, Message, QueueMode, StopReason, Tool, ToolExecutionMode, agent_loop,
+    agent_loop_continue, faux_assistant_message, faux_text, faux_tool_call, register_faux_provider,
+    run_agent_loop, run_agent_loop_continue,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+
+#[tokio::test]
+async fn agent_starts_with_default_state() {
+    let registration = register_faux_provider(None);
+    let model = registration.get_model();
+    let agent = Agent::new(AgentOptions::new(model.clone()));
+
+    let state = agent.state().await;
+    assert_eq!(state.system_prompt, None);
+    assert_eq!(state.model, model);
+    assert_eq!(state.reasoning_level, None);
+    assert!(state.tools.is_empty());
+    assert!(state.messages.is_empty());
+    assert!(!state.is_streaming);
+    assert!(state.streaming_message.is_none());
+    assert!(state.pending_tool_calls.is_empty());
+    assert!(state.error_message.is_none());
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_starts_with_custom_initial_state() {
+    let registration = register_faux_provider(None);
+    let model = registration.get_model();
+    let initial_user = Message::user_text("initial prompt");
+    let mut options = AgentOptions::new(model.clone());
+    options.initial_state = AgentState::new(model.clone());
+    options.initial_state.system_prompt = Some("You are helpful.".to_string());
+    options.initial_state.reasoning_level = Some(ai::ModelThinkingLevel::Low);
+    options.initial_state.messages = vec![initial_user.clone()];
+    let agent = Agent::new(options);
+
+    let state = agent.state().await;
+    assert_eq!(state.system_prompt.as_deref(), Some("You are helpful."));
+    assert_eq!(state.model, model);
+    assert_eq!(state.reasoning_level, Some(ai::ModelThinkingLevel::Low));
+    assert_eq!(state.messages, vec![initial_user]);
+    assert!(!state.is_streaming);
+
+    registration.unregister();
+}
 
 #[tokio::test]
 async fn agent_prompt_records_user_and_assistant_messages() {
