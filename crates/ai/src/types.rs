@@ -166,6 +166,7 @@ pub struct StreamOptions {
     pub on_response: Option<ResponseHook>,
     pub headers: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
+    pub websocket_connect_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
     pub metadata: Option<Value>,

@@ -234,3 +234,13 @@ fn agent_type_aliases_are_exported_from_ai_crate() {
         ai::ModelThinkingLevel::Low
     );
 }
+
+#[test]
+fn stream_options_include_websocket_connect_timeout() {
+    let options = ai::StreamOptions {
+        websocket_connect_timeout_ms: Some(5_000),
+        ..Default::default()
+    };
+
+    assert_eq!(options.websocket_connect_timeout_ms, Some(5_000));
+}
