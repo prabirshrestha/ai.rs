@@ -518,6 +518,7 @@ async fn agent_runtime_options_are_forwarded_to_stream_fn() {
             max_retry_delay_ms: Some(10),
             ..Default::default()
         },
+        reasoning: Some(ai::ModelThinkingLevel::Low),
         thinking_budgets: Some(ai::ThinkingBudgets {
             low: Some(123),
             ..Default::default()
@@ -548,6 +549,9 @@ async fn agent_runtime_options_are_forwarded_to_stream_fn() {
     agent.prompt_text("hello", Vec::new()).await.unwrap();
     agent.set_session_id(Some("session-def".to_string())).await;
     agent.set_transport(Some(ai::Transport::Websocket)).await;
+    agent
+        .set_reasoning_level(Some(ai::ModelThinkingLevel::High))
+        .await;
     agent.set_max_retry_delay_ms(Some(20)).await;
     agent
         .set_thinking_budgets(Some(ai::ThinkingBudgets {
@@ -564,6 +568,7 @@ async fn agent_runtime_options_are_forwarded_to_stream_fn() {
         Some("session-abc")
     );
     assert_eq!(observed[0].stream.transport, Some(ai::Transport::Sse));
+    assert_eq!(observed[0].reasoning, Some(ai::ModelThinkingLevel::Low));
     assert_eq!(observed[0].stream.max_retry_delay_ms, Some(10));
     assert_eq!(
         observed[0]
@@ -577,6 +582,7 @@ async fn agent_runtime_options_are_forwarded_to_stream_fn() {
         Some("session-def")
     );
     assert_eq!(observed[1].stream.transport, Some(ai::Transport::Websocket));
+    assert_eq!(observed[1].reasoning, Some(ai::ModelThinkingLevel::High));
     assert_eq!(observed[1].stream.max_retry_delay_ms, Some(20));
     assert_eq!(
         observed[1]
