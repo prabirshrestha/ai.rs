@@ -1097,8 +1097,17 @@ fn normalize_responses_tool_call_id(
 fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextPhase>)> {
     let signature = signature?;
     if signature.starts_with('{') {
-        if let Ok(parsed) = serde_json::from_str::<TextSignatureV1>(signature) {
-            return Some((parsed.id, parsed.phase));
+        if let Ok(parsed) = serde_json::from_str::<Value>(signature) {
+            if parsed.get("v").and_then(Value::as_u64) == Some(1) {
+                if let Some(id) = parsed.get("id").and_then(Value::as_str) {
+                    let phase = match parsed.get("phase").and_then(Value::as_str) {
+                        Some("commentary") => Some(TextPhase::Commentary),
+                        Some("final_answer") => Some(TextPhase::FinalAnswer),
+                        _ => None,
+                    };
+                    return Some((id.to_string(), phase));
+                }
+            }
         }
     }
     Some((signature.to_string(), None))
@@ -2994,6 +3003,36 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["id"], json!("msg_pi_0"));
         assert_eq!(messages[0]["content"][0]["text"], json!("visible"));
+    }
+
+    #[test]
+    fn text_signature_unknown_phase_preserves_message_id() {
+        let model = model();
+        let mut assistant = AssistantMessage::empty_for(&model);
+        assistant.content.push(AssistantContent::Text(TextContent {
+            text: "visible".to_string(),
+            text_signature: Some(
+                json!({
+                    "v": 1,
+                    "id": "msg_valid",
+                    "phase": "future_phase"
+                })
+                .to_string(),
+            ),
+        }));
+
+        let messages = convert_responses_messages(
+            &model,
+            &Context {
+                messages: vec![Message::Assistant(assistant)],
+                ..Default::default()
+            },
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+
+        assert_eq!(messages[0]["id"], json!("msg_valid"));
+        assert!(messages[0].get("phase").is_none());
     }
 
     #[test]
