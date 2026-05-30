@@ -297,6 +297,100 @@ mod tests {
     }
 
     #[test]
+    fn downgrades_user_images_for_non_vision_models() {
+        let mut model = copilot_claude_model();
+        model.input = vec![ModelInput::Text];
+        let user = Message::User(UserMessage {
+            content: UserMessageContent::Parts(vec![
+                UserContent::text("before"),
+                UserContent::Image(ImageContent {
+                    data: "one".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+                UserContent::Image(ImageContent {
+                    data: "two".to_string(),
+                    mime_type: "image/jpeg".to_string(),
+                }),
+                UserContent::text("after"),
+            ]),
+            timestamp: 1,
+        });
+
+        let transformed = transform_messages(&[user], &model, normalize_for_anthropic);
+
+        let Message::User(user) = &transformed[0] else {
+            panic!("expected user message");
+        };
+        assert_eq!(
+            user.content,
+            UserMessageContent::Parts(vec![
+                UserContent::text("before"),
+                UserContent::text("(image omitted: model does not support images)"),
+                UserContent::text("after"),
+            ])
+        );
+    }
+
+    #[test]
+    fn downgrades_tool_result_images_for_non_vision_models() {
+        let mut model = copilot_claude_model();
+        model.input = vec![ModelInput::Text];
+        let tool_result = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "screenshot".to_string(),
+            content: vec![
+                ToolResultContent::text("before"),
+                ToolResultContent::Image(ImageContent {
+                    data: "one".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+                ToolResultContent::Image(ImageContent {
+                    data: "two".to_string(),
+                    mime_type: "image/jpeg".to_string(),
+                }),
+                ToolResultContent::text("after"),
+            ],
+            details: None,
+            is_error: false,
+            timestamp: 1,
+        });
+
+        let transformed = transform_messages(&[tool_result], &model, normalize_for_anthropic);
+
+        let Message::ToolResult(result) = &transformed[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            result.content,
+            vec![
+                ToolResultContent::text("before"),
+                ToolResultContent::text("(tool image omitted: model does not support images)"),
+                ToolResultContent::text("after"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_images_for_vision_models() {
+        let model = copilot_claude_model();
+        let user = Message::User(UserMessage {
+            content: UserMessageContent::Parts(vec![
+                UserContent::text("before"),
+                UserContent::Image(ImageContent {
+                    data: "one".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+            ]),
+            timestamp: 1,
+        });
+
+        let transformed =
+            transform_messages(std::slice::from_ref(&user), &model, normalize_for_anthropic);
+
+        assert_eq!(transformed, vec![user]);
+    }
+
+    #[test]
     fn converts_cross_model_thinking_to_text_for_copilot_anthropic_handoff() {
         let model = copilot_claude_model();
         let source = AssistantMessage {
