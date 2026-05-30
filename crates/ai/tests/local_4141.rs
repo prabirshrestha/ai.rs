@@ -1,6 +1,6 @@
 use ai::{
-    Context, Message, Model, ModelCost, ModelInput, ModelThinkingLevel, SimpleStreamOptions,
-    StopReason, StreamOptions, complete_simple,
+    Agent, AgentOptions, Context, Message, Model, ModelCost, ModelInput, ModelThinkingLevel,
+    SimpleStreamOptions, StopReason, StreamOptions, complete_simple,
 };
 
 const LOCAL_BASE_URL: &str = "http://localhost:4141/v1";
@@ -118,6 +118,91 @@ async fn local_openai_chat_completions_streaming() -> ai::Result<()> {
     {
         eprintln!(
             "skipping local_openai_chat_completions_streaming: default chat model {chat_model:?} is not supported by {LOCAL_BASE_URL}; set PI_LOCAL_CHAT_COMPLETIONS_MODEL"
+        );
+        return Ok(());
+    }
+
+    assert_ne!(message.stop_reason, StopReason::Error, "{message:#?}");
+    assert!(
+        !message.content.is_empty(),
+        "expected at least one content block"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_agent_openai_responses_gpt55_low_effort() -> ai::AgentResult<()> {
+    if skip_unless_available("local_agent_openai_responses_gpt55_low_effort").await {
+        return Ok(());
+    }
+
+    let mut options = AgentOptions::new(local_model("openai-responses", "gpt-5.5", true));
+    options.initial_state.system_prompt = Some("Reply with a short plain sentence.".to_string());
+    options.options = local_options(Some(ModelThinkingLevel::Low));
+    let agent = Agent::new(options);
+
+    agent
+        .prompt_text("Say agent responses check ok.", Vec::new())
+        .await?;
+
+    let state = agent.state().await;
+    let Some(Message::Assistant(message)) = state.messages.last() else {
+        panic!(
+            "expected final assistant message, got {:#?}",
+            state.messages
+        );
+    };
+    assert_ne!(message.stop_reason, StopReason::Error, "{message:#?}");
+    assert!(
+        !message.content.is_empty(),
+        "expected at least one content block"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_agent_openai_chat_completions_streaming() -> ai::AgentResult<()> {
+    if skip_unless_available("local_agent_openai_chat_completions_streaming").await {
+        return Ok(());
+    }
+
+    let chat_model = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL")
+        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let chat_model_overridden = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL").is_ok();
+
+    let mut options = AgentOptions::new(local_model(
+        "openai-completions",
+        &chat_model,
+        chat_model.starts_with("gpt-5"),
+    ));
+    options.initial_state.system_prompt = Some("Reply with a short plain sentence.".to_string());
+    options.options = local_options(
+        chat_model
+            .starts_with("gpt-5")
+            .then_some(ModelThinkingLevel::Low),
+    );
+    let agent = Agent::new(options);
+
+    agent
+        .prompt_text("Say agent chat completion check ok.", Vec::new())
+        .await?;
+
+    let state = agent.state().await;
+    let Some(Message::Assistant(message)) = state.messages.last() else {
+        panic!(
+            "expected final assistant message, got {:#?}",
+            state.messages
+        );
+    };
+    if message.stop_reason == StopReason::Error
+        && !chat_model_overridden
+        && message
+            .error_message
+            .as_deref()
+            .is_some_and(|error| error.contains("unsupported_api_for_model"))
+    {
+        eprintln!(
+            "skipping local_agent_openai_chat_completions_streaming: default chat model {chat_model:?} is not supported by {LOCAL_BASE_URL}; set PI_LOCAL_CHAT_COMPLETIONS_MODEL"
         );
         return Ok(());
     }
