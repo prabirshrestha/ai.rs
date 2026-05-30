@@ -789,19 +789,24 @@ async fn execute_prepared_tool_call(
     let on_update = Arc::new(move |partial_result: AgentToolResult| {
         let emit = emit_for_update.clone();
         let tool_call = update_tool_call.clone();
+        let (done_sender, done_receiver) = oneshot::channel();
         let handle = tokio::spawn(async move {
-            emit(AgentEvent::ToolExecutionUpdate {
+            let result = emit(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: tool_call.id,
                 tool_name: tool_call.name,
                 args: tool_call.arguments,
                 partial_result,
             })
-            .await
+            .await;
+            let _ = done_sender.send(());
+            result
         });
         if let Ok(mut tasks) = update_tasks_for_callback.lock() {
             tasks.push(handle);
         }
-        Box::pin(async {}) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        Box::pin(async move {
+            let _ = done_receiver.await;
+        }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     });
 
     let (mut is_error, mut result) = match tool

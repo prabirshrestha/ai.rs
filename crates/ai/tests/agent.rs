@@ -1415,6 +1415,59 @@ async fn tool_update_event_errors_propagate_from_agent_loop() {
 }
 
 #[tokio::test]
+async fn awaited_tool_update_callback_waits_for_event_sink() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([tool_use_response(vec![faux_tool_call(
+        "await_update",
+        json!({}),
+        Some("tool-1".to_string()),
+    )])]);
+    let update_entered = Arc::new(Notify::new());
+    let release_update = Arc::new(Notify::new());
+    let after_update = Arc::new(AtomicBool::new(false));
+    let emit: AgentEventSink = Arc::new({
+        let update_entered = Arc::clone(&update_entered);
+        let release_update = Arc::clone(&release_update);
+        move |event| {
+            let update_entered = Arc::clone(&update_entered);
+            let release_update = Arc::clone(&release_update);
+            Box::pin(async move {
+                if matches!(event, AgentEvent::ToolExecutionUpdate { .. }) {
+                    update_entered.notify_waiters();
+                    release_update.notified().await;
+                }
+                Ok(())
+            })
+        }
+    });
+
+    let run = tokio::spawn(run_agent_loop(
+        vec![Message::user_text("run tool")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(AwaitingUpdateTool {
+                after_update: Arc::clone(&after_update),
+            })],
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        emit,
+        None,
+        None,
+    ));
+
+    update_entered.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(!after_update.load(Ordering::SeqCst));
+
+    release_update.notify_waiters();
+    run.await.unwrap().unwrap();
+    assert!(after_update.load(Ordering::SeqCst));
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn prepare_next_turn_updates_context_before_tool_continuation() {
     let registration = register_faux_provider(None);
     let second_turn_system_prompt = Arc::new(Mutex::new(None));
@@ -2324,6 +2377,41 @@ impl AgentTool for EchoTool {
 
 struct RecordingArgsTool {
     received_args: Arc<Mutex<Vec<Value>>>,
+}
+
+struct AwaitingUpdateTool {
+    after_update: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AgentTool for AwaitingUpdateTool {
+    fn definition(&self) -> Tool {
+        Tool {
+            name: "await_update".to_string(),
+            description: "Await update tool".to_string(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn label(&self) -> &str {
+        "Await update"
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        _args: Value,
+        _cancellation_token: Option<CancellationToken>,
+        on_update: Option<ai::AgentToolUpdateCallback>,
+    ) -> AgentResult<AgentToolResult> {
+        if let Some(on_update) = on_update {
+            on_update(AgentToolResult::text("partial")).await;
+        }
+        self.after_update.store(true, Ordering::SeqCst);
+        let mut result = AgentToolResult::text("done");
+        result.terminate = true;
+        Ok(result)
+    }
 }
 
 #[async_trait]
