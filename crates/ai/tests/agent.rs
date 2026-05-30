@@ -1553,6 +1553,53 @@ async fn after_tool_call_can_mark_batch_terminating() {
 }
 
 #[tokio::test]
+async fn after_tool_call_null_details_keeps_original_details() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([tool_use_response(vec![faux_tool_call(
+        "echo",
+        json!({ "value": "hello" }),
+        Some("tool-1".to_string()),
+    )])]);
+
+    let mut config = AgentLoopConfig::new(registration.get_model());
+    config.after_tool_call = Some(Arc::new(
+        |_context: AfterToolCallContext, _token: Option<CancellationToken>| {
+            Box::pin(async move {
+                Ok(Some(ai::AfterToolCallResult {
+                    details: Some(Value::Null),
+                    ..Default::default()
+                }))
+            })
+        },
+    ));
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("echo something")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                include_details: true,
+                ..Default::default()
+            })],
+        },
+        config,
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let Message::ToolResult(result) = &messages[2] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.details, Some(json!({ "value": "hello" })));
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn queued_steering_messages_wait_until_tool_batch_finishes() {
     let registration = register_faux_provider(None);
     let second_turn_roles = Arc::new(Mutex::new(Vec::new()));
@@ -1988,6 +2035,7 @@ fn quiet_sink() -> AgentEventSink {
 struct EchoTool {
     name: Option<&'static str>,
     delay_first: bool,
+    include_details: bool,
     terminate_values: Vec<String>,
     mode: Option<ToolExecutionMode>,
     executions: Option<Arc<Mutex<Vec<String>>>>,
@@ -2057,6 +2105,9 @@ impl AgentTool for EchoTool {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
         let mut result = AgentToolResult::text(format!("echoed: {value}"));
+        if self.include_details {
+            result.details = Some(json!({ "value": value }));
+        }
         result.terminate = self.terminate_values.iter().any(|item| item == &value);
         Ok(result)
     }
