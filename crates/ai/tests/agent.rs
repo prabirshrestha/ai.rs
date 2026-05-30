@@ -192,6 +192,89 @@ async fn agent_state_mutators_update_runtime_configuration() {
 }
 
 #[tokio::test]
+async fn agent_runtime_options_are_forwarded_to_stream_fn() {
+    let registration = register_faux_provider(None);
+    let observed_options = Arc::new(Mutex::new(Vec::new()));
+    let mut options = AgentOptions::new(registration.get_model());
+    options.session_id = Some("session-abc".to_string());
+    options.options = ai::SimpleStreamOptions {
+        stream: ai::StreamOptions {
+            transport: Some(ai::Transport::Sse),
+            max_retry_delay_ms: Some(10),
+            ..Default::default()
+        },
+        thinking_budgets: Some(ai::ThinkingBudgets {
+            low: Some(123),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    options.stream_fn = Some(Arc::new({
+        let observed_options = Arc::clone(&observed_options);
+        move |model, _context, options| {
+            let observed_options = Arc::clone(&observed_options);
+            Box::pin(async move {
+                observed_options.lock().await.push(options);
+                let mut message = faux_assistant_message("ok", None);
+                message.api = model.api;
+                message.provider = model.provider;
+                message.model = model.id;
+                let (mut sender, stream) = ai::AssistantMessageEventStream::channel();
+                sender.push(ai::AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+
+    agent.prompt_text("hello", Vec::new()).await.unwrap();
+    agent.set_session_id(Some("session-def".to_string())).await;
+    agent.set_transport(Some(ai::Transport::Websocket)).await;
+    agent.set_max_retry_delay_ms(Some(20)).await;
+    agent
+        .set_thinking_budgets(Some(ai::ThinkingBudgets {
+            high: Some(456),
+            ..Default::default()
+        }))
+        .await;
+    agent.prompt_text("again", Vec::new()).await.unwrap();
+
+    let observed = observed_options.lock().await;
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed[0].stream.session_id.as_deref(),
+        Some("session-abc")
+    );
+    assert_eq!(observed[0].stream.transport, Some(ai::Transport::Sse));
+    assert_eq!(observed[0].stream.max_retry_delay_ms, Some(10));
+    assert_eq!(
+        observed[0]
+            .thinking_budgets
+            .as_ref()
+            .and_then(|budgets| budgets.low),
+        Some(123)
+    );
+    assert_eq!(
+        observed[1].stream.session_id.as_deref(),
+        Some("session-def")
+    );
+    assert_eq!(observed[1].stream.transport, Some(ai::Transport::Websocket));
+    assert_eq!(observed[1].stream.max_retry_delay_ms, Some(20));
+    assert_eq!(
+        observed[1]
+            .thinking_budgets
+            .as_ref()
+            .and_then(|budgets| budgets.high),
+        Some(456)
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_queue_modes_can_be_changed_after_construction() {
     let registration = register_faux_provider(None);
     let agent = Agent::new(AgentOptions::new(registration.get_model()));

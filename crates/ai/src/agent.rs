@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     AssistantContent, AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions,
-    StopReason, TextContent, Usage,
+    StopReason, TextContent, ThinkingBudgets, Transport, Usage,
 };
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
@@ -140,8 +140,8 @@ pub struct Agent {
     prepare_next_turn: Option<PrepareNextTurnFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
-    session_id: Option<String>,
-    base_options: SimpleStreamOptions,
+    session_id: Arc<Mutex<Option<String>>>,
+    base_options: Arc<Mutex<SimpleStreamOptions>>,
     active_token: Arc<Mutex<Option<CancellationToken>>>,
     idle_notify: Arc<Notify>,
     tool_execution: ToolExecutionMode,
@@ -163,8 +163,8 @@ impl Agent {
             prepare_next_turn: options.prepare_next_turn,
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
-            session_id: options.session_id,
-            base_options: options.options,
+            session_id: Arc::new(Mutex::new(options.session_id)),
+            base_options: Arc::new(Mutex::new(options.options)),
             active_token: Arc::new(Mutex::new(None)),
             idle_notify: Arc::new(Notify::new()),
             tool_execution: options.tool_execution,
@@ -205,6 +205,34 @@ impl Agent {
 
     pub async fn clear_messages(&self) {
         self.state.lock().await.messages.clear();
+    }
+
+    pub async fn set_session_id(&self, session_id: Option<String>) {
+        *self.session_id.lock().await = session_id;
+    }
+
+    pub async fn session_id(&self) -> Option<String> {
+        self.session_id.lock().await.clone()
+    }
+
+    pub async fn set_options(&self, options: SimpleStreamOptions) {
+        *self.base_options.lock().await = options;
+    }
+
+    pub async fn options(&self) -> SimpleStreamOptions {
+        self.base_options.lock().await.clone()
+    }
+
+    pub async fn set_transport(&self, transport: Option<Transport>) {
+        self.base_options.lock().await.stream.transport = transport;
+    }
+
+    pub async fn set_thinking_budgets(&self, thinking_budgets: Option<ThinkingBudgets>) {
+        self.base_options.lock().await.thinking_budgets = thinking_budgets;
+    }
+
+    pub async fn set_max_retry_delay_ms(&self, max_retry_delay_ms: Option<u64>) {
+        self.base_options.lock().await.stream.max_retry_delay_ms = max_retry_delay_ms;
     }
 
     pub async fn subscribe(&self, listener: AgentEventSink) -> AgentListenerId {
@@ -432,16 +460,19 @@ impl Agent {
     }
 
     async fn create_loop_config(&self, skip_initial_steering_poll: bool) -> AgentLoopConfig {
-        let state = self.state.lock().await;
-        let mut options = self.base_options.clone();
-        options.reasoning = state.reasoning_level;
-        options.stream.session_id = self.session_id.clone();
+        let (model, reasoning_level) = {
+            let state = self.state.lock().await;
+            (state.model.clone(), state.reasoning_level)
+        };
+        let mut options = self.base_options.lock().await.clone();
+        options.reasoning = reasoning_level;
+        options.stream.session_id = self.session_id.lock().await.clone();
 
         let steering_queue = self.steering_queue.clone();
         let follow_up_queue = self.follow_up_queue.clone();
         let skip_initial_steering_poll = Arc::new(Mutex::new(skip_initial_steering_poll));
         AgentLoopConfig {
-            model: state.model.clone(),
+            model,
             options,
             convert_to_llm: self.convert_to_llm.clone(),
             transform_context: self.transform_context.clone(),
