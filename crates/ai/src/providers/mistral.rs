@@ -579,10 +579,11 @@ async fn consume_chat_stream(
         if let Some(id) = string_field(chunk, &["id"]) {
             output.response_id.get_or_insert_with(|| id.to_string());
         }
-        if let Some(response_model) = string_field(chunk, &["model"]) {
-            if response_model != model.id && output.response_model.is_none() {
-                output.response_model = Some(response_model.to_string());
-            }
+        if let Some(response_model) = string_field(chunk, &["model"])
+            && response_model != model.id
+            && output.response_model.is_none()
+        {
+            output.response_model = Some(response_model.to_string());
         }
         if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
             output.usage = parse_chunk_usage(usage, model);
@@ -654,10 +655,8 @@ fn consume_content_delta(
     active_block: &mut Option<ActiveBlock>,
 ) {
     match content {
-        Value::String(text) => {
-            if !text.is_empty() {
-                push_text_delta(text, output, sender, active_block);
-            }
+        Value::String(text) if !text.is_empty() => {
+            push_text_delta(text, output, sender, active_block);
         }
         Value::Array(items) => {
             for item in items {

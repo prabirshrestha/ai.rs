@@ -227,6 +227,7 @@ pub struct AfterToolCallResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     AgentStart,
     AgentEnd {

@@ -116,10 +116,8 @@ fn complete_partial_json(json: &str) -> String {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.last() == Some(&ch) {
-                    stack.pop();
-                }
+            '}' | ']' if stack.last() == Some(&ch) => {
+                stack.pop();
             }
             _ => {}
         }
@@ -308,10 +306,11 @@ impl<'a> PartialJsonParser<'a> {
 
         if let Some(exponent) = raw.rfind('e') {
             let candidate = raw[..exponent].trim_end();
-            if candidate != "-" && !candidate.is_empty() {
-                if let Ok(value) = serde_json::from_str(candidate) {
-                    return Ok(value);
-                }
+            if candidate != "-"
+                && !candidate.is_empty()
+                && let Ok(value) = serde_json::from_str(candidate)
+            {
+                return Ok(value);
             }
         }
 

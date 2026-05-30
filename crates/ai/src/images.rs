@@ -11,10 +11,10 @@ fn has_explicit_api_key(api_key: &Option<String>) -> bool {
 }
 
 fn with_env_api_key(model: &ImagesModel, mut options: ImagesOptions) -> ImagesOptions {
-    if !has_explicit_api_key(&options.api_key) {
-        if let Some(api_key) = get_env_api_key(&model.provider) {
-            options.api_key = Some(api_key);
-        }
+    if !has_explicit_api_key(&options.api_key)
+        && let Some(api_key) = get_env_api_key(&model.provider)
+    {
+        options.api_key = Some(api_key);
     }
     options
 }

@@ -50,10 +50,10 @@ async fn generate_images_openrouter_inner(
         .ok_or_else(|| Error::Validation(format!("No API key for provider: {}", model.provider)))?;
     let client = reqwest::Client::new();
     let mut payload = build_params(&model, &context);
-    if let Some(on_payload) = options.on_payload.clone() {
-        if let Some(next_payload) = on_payload(payload.clone(), &model).await? {
-            payload = next_payload;
-        }
+    if let Some(on_payload) = options.on_payload.clone()
+        && let Some(next_payload) = on_payload(payload.clone(), &model).await?
+    {
+        payload = next_payload;
     }
 
     let mut request = client

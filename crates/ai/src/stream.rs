@@ -12,10 +12,10 @@ fn has_explicit_api_key(api_key: &Option<String>) -> bool {
 }
 
 fn with_env_api_key(model: &Model, mut options: StreamOptions) -> StreamOptions {
-    if !has_explicit_api_key(&options.api_key) {
-        if let Some(api_key) = get_env_api_key(&model.provider) {
-            options.api_key = Some(api_key);
-        }
+    if !has_explicit_api_key(&options.api_key)
+        && let Some(api_key) = get_env_api_key(&model.provider)
+    {
+        options.api_key = Some(api_key);
     }
     options
 }
@@ -84,7 +84,7 @@ mod tests {
 
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct SavedEnv {
         key: &'static str,
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stream_simple_injects_env_api_key_before_provider_dispatch() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = ENV_LOCK.lock().await;
         let openai = SavedEnv::capture("OPENAI_API_KEY");
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "env-openai-key");
@@ -199,7 +199,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn explicit_api_key_takes_precedence_over_env_api_key() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = ENV_LOCK.lock().await;
         let openai = SavedEnv::capture("OPENAI_API_KEY");
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "env-openai-key");

@@ -50,11 +50,10 @@ pub fn events(
             }
         }
 
-        if !buffer.is_empty() {
-            if let Some(event) = decode_line(&buffer, &mut state) {
+        if !buffer.is_empty()
+            && let Some(event) = decode_line(&buffer, &mut state) {
                 yield event;
             }
-        }
 
         if let Some(event) = flush(&mut state) {
             yield event;

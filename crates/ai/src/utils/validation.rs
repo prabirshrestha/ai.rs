@@ -138,16 +138,16 @@ fn coerce_with_json_schema(value: Value, schema: &Value) -> Value {
         }
     }
 
-    if types.contains(&"object") {
-        if let Value::Object(object) = next {
-            next = Value::Object(coerce_object(object, schema));
-        }
+    if types.contains(&"object")
+        && let Value::Object(object) = next
+    {
+        next = Value::Object(coerce_object(object, schema));
     }
 
-    if types.contains(&"array") {
-        if let Value::Array(array) = next {
-            next = Value::Array(coerce_array(array, schema));
-        }
+    if types.contains(&"array")
+        && let Value::Array(array) = next
+    {
+        next = Value::Array(coerce_array(array, schema));
     }
 
     next
@@ -219,14 +219,14 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
         }
     }
 
-    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array) {
-        if any_of.iter().all(|nested| {
+    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array)
+        && any_of.iter().all(|nested| {
             let mut nested_errors = Vec::new();
             validate_value(value, nested, path, &mut nested_errors);
             !nested_errors.is_empty()
-        }) {
-            errors.push(format!("{path}: must match at least one schema"));
-        }
+        })
+    {
+        errors.push(format!("{path}: must match at least one schema"));
     }
 
     if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
@@ -277,20 +277,20 @@ fn validate_object(value: &Value, schema: &Value, path: &str, errors: &mut Vec<S
         return;
     };
 
-    if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64) {
-        if (object.len() as u64) < min_properties {
-            errors.push(format!(
-                "{path}: must have at least {min_properties} properties"
-            ));
-        }
+    if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64)
+        && (object.len() as u64) < min_properties
+    {
+        errors.push(format!(
+            "{path}: must have at least {min_properties} properties"
+        ));
     }
 
-    if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64) {
-        if (object.len() as u64) > max_properties {
-            errors.push(format!(
-                "{path}: must have at most {max_properties} properties"
-            ));
-        }
+    if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64)
+        && (object.len() as u64) > max_properties
+    {
+        errors.push(format!(
+            "{path}: must have at most {max_properties} properties"
+        ));
     }
 
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
@@ -353,16 +353,16 @@ fn validate_array(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
         return;
     };
 
-    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64) {
-        if (array.len() as u64) < min_items {
-            errors.push(format!("{path}: must have at least {min_items} items"));
-        }
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
+        && (array.len() as u64) < min_items
+    {
+        errors.push(format!("{path}: must have at least {min_items} items"));
     }
 
-    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64) {
-        if (array.len() as u64) > max_items {
-            errors.push(format!("{path}: must have at most {max_items} items"));
-        }
+    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64)
+        && (array.len() as u64) > max_items
+    {
+        errors.push(format!("{path}: must have at most {max_items} items"));
     }
 
     if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
@@ -396,19 +396,18 @@ fn validate_array(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
 }
 
 fn validate_const_and_enum(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
-    if let Some(expected) = schema.get("const") {
-        if !json_schema_equal(value, expected) {
-            errors.push(format!("{path}: must equal const value"));
-        }
+    if let Some(expected) = schema.get("const")
+        && !json_schema_equal(value, expected)
+    {
+        errors.push(format!("{path}: must equal const value"));
     }
 
-    if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
-        if !variants
+    if let Some(variants) = schema.get("enum").and_then(Value::as_array)
+        && !variants
             .iter()
             .any(|variant| json_schema_equal(value, variant))
-        {
-            errors.push(format!("{path}: must equal one of the allowed values"));
-        }
+    {
+        errors.push(format!("{path}: must equal one of the allowed values"));
     }
 }
 
@@ -417,36 +416,36 @@ fn validate_number(value: &Value, schema: &Value, path: &str, errors: &mut Vec<S
         return;
     };
 
-    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
-        if number < minimum {
-            errors.push(format!("{path}: must be >= {minimum}"));
-        }
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+        && number < minimum
+    {
+        errors.push(format!("{path}: must be >= {minimum}"));
     }
 
-    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
-        if number > maximum {
-            errors.push(format!("{path}: must be <= {maximum}"));
-        }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+        && number > maximum
+    {
+        errors.push(format!("{path}: must be <= {maximum}"));
     }
 
-    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
-        if number <= exclusive_minimum {
-            errors.push(format!("{path}: must be > {exclusive_minimum}"));
-        }
+    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64)
+        && number <= exclusive_minimum
+    {
+        errors.push(format!("{path}: must be > {exclusive_minimum}"));
     }
 
-    if let Some(exclusive_maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
-        if number >= exclusive_maximum {
-            errors.push(format!("{path}: must be < {exclusive_maximum}"));
-        }
+    if let Some(exclusive_maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64)
+        && number >= exclusive_maximum
+    {
+        errors.push(format!("{path}: must be < {exclusive_maximum}"));
     }
 
-    if let Some(multiple_of) = schema.get("multipleOf").and_then(Value::as_f64) {
-        if multiple_of > 0.0 {
-            let quotient = number / multiple_of;
-            if (quotient - quotient.round()).abs() > 1e-9 {
-                errors.push(format!("{path}: must be a multiple of {multiple_of}"));
-            }
+    if let Some(multiple_of) = schema.get("multipleOf").and_then(Value::as_f64)
+        && multiple_of > 0.0
+    {
+        let quotient = number / multiple_of;
+        if (quotient - quotient.round()).abs() > 1e-9 {
+            errors.push(format!("{path}: must be a multiple of {multiple_of}"));
         }
     }
 }
@@ -457,16 +456,16 @@ fn validate_string(value: &Value, schema: &Value, path: &str, errors: &mut Vec<S
     };
     let len = text.chars().count() as u64;
 
-    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64) {
-        if len < min_length {
-            errors.push(format!("{path}: must be at least {min_length} characters"));
-        }
+    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+        && len < min_length
+    {
+        errors.push(format!("{path}: must be at least {min_length} characters"));
     }
 
-    if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64) {
-        if len > max_length {
-            errors.push(format!("{path}: must be at most {max_length} characters"));
-        }
+    if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64)
+        && len > max_length
+    {
+        errors.push(format!("{path}: must be at most {max_length} characters"));
     }
 
     if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {

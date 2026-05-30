@@ -71,6 +71,7 @@ impl FauxProviderState {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum FauxResponseStep {
     Message(AssistantMessage),
     Factory(Arc<FauxResponseFactory>),
@@ -383,6 +384,7 @@ pub fn register_faux_provider(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_faux_response(
     mut sender: AssistantMessageEventStreamSender,
     step: Option<FauxResponseStep>,
@@ -802,19 +804,19 @@ fn with_usage_estimate(
     let mut cache_read = 0;
     let mut cache_write = 0;
 
-    if let Some(session_id) = &options.session_id {
-        if !matches!(options.cache_retention, Some(CacheRetention::None)) {
-            let mut cache = prompt_cache.lock().expect("faux prompt cache poisoned");
-            if let Some(previous_prompt) = cache.get(session_id) {
-                let cached_chars = common_prefix_length(previous_prompt, &prompt_text);
-                cache_read = estimate_tokens(&prefix_by_chars(previous_prompt, cached_chars));
-                cache_write = estimate_tokens(&suffix_from_chars(&prompt_text, cached_chars));
-                input = prompt_tokens.saturating_sub(cache_read);
-            } else {
-                cache_write = prompt_tokens;
-            }
-            cache.insert(session_id.clone(), prompt_text);
+    if let Some(session_id) = &options.session_id
+        && !matches!(options.cache_retention, Some(CacheRetention::None))
+    {
+        let mut cache = prompt_cache.lock().expect("faux prompt cache poisoned");
+        if let Some(previous_prompt) = cache.get(session_id) {
+            let cached_chars = common_prefix_length(previous_prompt, &prompt_text);
+            cache_read = estimate_tokens(&prefix_by_chars(previous_prompt, cached_chars));
+            cache_write = estimate_tokens(&suffix_from_chars(&prompt_text, cached_chars));
+            input = prompt_tokens.saturating_sub(cache_read);
+        } else {
+            cache_write = prompt_tokens;
         }
+        cache.insert(session_id.clone(), prompt_text);
     }
 
     message.usage = Usage {

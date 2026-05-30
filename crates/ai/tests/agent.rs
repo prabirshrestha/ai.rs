@@ -2404,10 +2404,12 @@ impl AgentTool for EchoTool {
         if let Some(executions) = &self.executions {
             executions.lock().await.push(value.clone());
         }
-        if self.emit_update_without_await {
-            if let Some(on_update) = &on_update {
-                let _ = on_update(AgentToolResult::text(format!("partial: {value}")));
-            }
+        if self.emit_update_without_await
+            && let Some(on_update) = &on_update
+        {
+            std::mem::drop(on_update(AgentToolResult::text(format!(
+                "partial: {value}"
+            ))));
         }
         if value == "first" {
             if let Some(release_first) = &self.release_first {
@@ -2422,10 +2424,9 @@ impl AgentTool for EchoTool {
                 .first_done
                 .as_ref()
                 .is_some_and(|first_done| !first_done.load(Ordering::SeqCst))
+            && let Some(parallel_observed) = &self.parallel_observed
         {
-            if let Some(parallel_observed) = &self.parallel_observed {
-                parallel_observed.store(true, Ordering::SeqCst);
-            }
+            parallel_observed.store(true, Ordering::SeqCst);
         }
         if self.delay_first && value == "first" {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;

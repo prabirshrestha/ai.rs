@@ -67,10 +67,10 @@ impl AssistantMessageEventStreamSender {
         };
         let is_terminal = final_message.is_some();
 
-        if let Some(message) = final_message {
-            if let Some(sender) = self.result_sender.take() {
-                let _ = sender.send(message);
-            }
+        if let Some(message) = final_message
+            && let Some(sender) = self.result_sender.take()
+        {
+            let _ = sender.send(message);
         }
 
         let _ = sender.send(event);

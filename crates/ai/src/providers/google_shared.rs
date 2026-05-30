@@ -278,16 +278,15 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<GoogleContent> 
                 };
 
                 let mut merged = false;
-                if let Some(last) = contents.last_mut() {
-                    if last.role == "user"
-                        && last
-                            .parts
-                            .iter()
-                            .any(|part| part.function_response.is_some())
-                    {
-                        last.parts.push(function_response_part.clone());
-                        merged = true;
-                    }
+                if let Some(last) = contents.last_mut()
+                    && last.role == "user"
+                    && last
+                        .parts
+                        .iter()
+                        .any(|part| part.function_response.is_some())
+                {
+                    last.parts.push(function_response_part.clone());
+                    merged = true;
                 }
                 if !merged {
                     contents.push(GoogleContent {

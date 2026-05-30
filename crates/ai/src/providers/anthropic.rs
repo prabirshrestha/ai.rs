@@ -650,10 +650,10 @@ pub fn build_anthropic_payload(
         object.insert("system".to_string(), json!([item]));
     }
 
-    if let Some(temperature) = options.base.temperature {
-        if options.thinking_enabled != Some(true) {
-            object.insert("temperature".to_string(), json!(temperature));
-        }
+    if let Some(temperature) = options.base.temperature
+        && options.thinking_enabled != Some(true)
+    {
+        object.insert("temperature".to_string(), json!(temperature));
     }
     if !context.tools.is_empty() {
         let compat = get_anthropic_compat(model);
@@ -702,10 +702,10 @@ pub fn build_anthropic_payload(
             object.insert("thinking".to_string(), json!({ "type": "disabled" }));
         }
     }
-    if let Some(metadata) = &options.base.metadata {
-        if let Some(user_id) = metadata.get("user_id").and_then(Value::as_str) {
-            object.insert("metadata".to_string(), json!({ "user_id": user_id }));
-        }
+    if let Some(metadata) = &options.base.metadata
+        && let Some(user_id) = metadata.get("user_id").and_then(Value::as_str)
+    {
+        object.insert("metadata".to_string(), json!({ "user_id": user_id }));
     }
     if let Some(tool_choice) = &options.tool_choice {
         let value = tool_choice
@@ -832,29 +832,28 @@ pub fn convert_messages(
         index += 1;
     }
 
-    if let Some(cache_control) = cache_control {
-        if let Some(last) = params
+    if let Some(cache_control) = cache_control
+        && let Some(last) = params
             .last_mut()
             .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        {
-            match last.get_mut("content") {
-                Some(Value::Array(blocks)) => {
-                    if let Some(block) = blocks.last_mut() {
-                        if matches!(
-                            block.get("type").and_then(Value::as_str),
-                            Some("text" | "image" | "tool_result")
-                        ) {
-                            block["cache_control"] = cache_control;
-                        }
-                    }
+    {
+        match last.get_mut("content") {
+            Some(Value::Array(blocks)) => {
+                if let Some(block) = blocks.last_mut()
+                    && matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("text" | "image" | "tool_result")
+                    )
+                {
+                    block["cache_control"] = cache_control;
                 }
-                Some(Value::String(text)) => {
-                    let text = std::mem::take(text);
-                    last["content"] =
-                        json!([{ "type": "text", "text": text, "cache_control": cache_control }]);
-                }
-                _ => {}
             }
+            Some(Value::String(text)) => {
+                let text = std::mem::take(text);
+                last["content"] =
+                    json!([{ "type": "text", "text": text, "cache_control": cache_control }]);
+            }
+            _ => {}
         }
     }
 
@@ -924,11 +923,10 @@ fn convert_tools(
             if supports_eager_tool_input_streaming {
                 value["eager_input_streaming"] = json!(true);
             }
-            if index == tools.len() - 1 {
-                if let Some(cache_control) = &cache_control {
+            if index == tools.len() - 1
+                && let Some(cache_control) = &cache_control {
                     value["cache_control"] = cache_control.clone();
                 }
-            }
             value
         })
         .collect()
@@ -1081,14 +1079,15 @@ fn headers(
                 .map_err(|e| Error::InvalidHeaderValue("anthropic-beta".to_string(), e))?,
         );
     }
-    if let Some(session_id) = &options.base.session_id {
-        if cache_retention != CacheRetention::None && compat.send_session_affinity_headers {
-            headers.insert(
-                HeaderName::from_static("x-session-affinity"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("x-session-affinity".to_string(), e))?,
-            );
-        }
+    if let Some(session_id) = &options.base.session_id
+        && cache_retention != CacheRetention::None
+        && compat.send_session_affinity_headers
+    {
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_str(session_id)
+                .map_err(|e| Error::InvalidHeaderValue("x-session-affinity".to_string(), e))?,
+        );
     }
     for (name, value) in &model.headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {

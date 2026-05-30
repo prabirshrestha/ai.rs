@@ -445,10 +445,10 @@ pub fn normalize_domain(input: &str) -> Option<String> {
 }
 
 pub fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
-    if let Some(token) = token {
-        if let Some(base_url) = get_base_url_from_token(token) {
-            return base_url;
-        }
+    if let Some(token) = token
+        && let Some(base_url) = get_base_url_from_token(token)
+    {
+        return base_url;
     }
     if let Some(domain) = enterprise_domain.and_then(normalize_domain) {
         return format!("https://copilot-api.{domain}");

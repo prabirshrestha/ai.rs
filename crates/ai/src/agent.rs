@@ -573,10 +573,10 @@ impl Agent {
                             state.pending_tool_calls.remove(tool_call_id);
                         }
                         AgentEvent::TurnEnd { message, .. } => {
-                            if let Message::Assistant(assistant) = message {
-                                if let Some(error) = &assistant.error_message {
-                                    state.error_message = Some(error.clone());
-                                }
+                            if let Message::Assistant(assistant) = message
+                                && let Some(error) = &assistant.error_message
+                            {
+                                state.error_message = Some(error.clone());
                             }
                         }
                         AgentEvent::AgentEnd { .. } => {

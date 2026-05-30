@@ -362,10 +362,9 @@ async fn run_stream(
                     .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
                     == Some("message")
+                    && let Some(part_type) = parsed.get("part").and_then(response_text_part_type)
                 {
-                    if let Some(part_type) = parsed.get("part").and_then(response_text_part_type) {
-                        current_text_part = Some(part_type);
-                    }
+                    current_text_part = Some(part_type);
                 }
             }
             "response.reasoning_summary_part.added" => {
@@ -374,14 +373,13 @@ async fn run_stream(
                     .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
                     == Some("reasoning")
+                    && let Some(item) = current_item.as_mut()
                 {
-                    if let Some(item) = current_item.as_mut() {
-                        let part = parsed.get("part").cloned().unwrap_or(Value::Null);
-                        if let Some(Value::Array(summary)) = item.get_mut("summary") {
-                            summary.push(part);
-                        } else {
-                            item["summary"] = json!([part]);
-                        }
+                    let part = parsed.get("part").cloned().unwrap_or(Value::Null);
+                    if let Some(Value::Array(summary)) = item.get_mut("summary") {
+                        summary.push(part);
+                    } else {
+                        item["summary"] = json!([part]);
                     }
                 }
             }
@@ -401,19 +399,16 @@ async fn run_stream(
                         }
                     })
                     .is_some();
-                if has_summary_part {
-                    if let Some(index) = current_block {
-                        if let Some(AssistantContent::Thinking(block)) =
-                            output.content.get_mut(index)
-                        {
-                            block.thinking.push_str(delta);
-                            sender.push(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index,
-                                delta: delta.to_string(),
-                                partial: output.clone(),
-                            });
-                        }
-                    }
+                if has_summary_part
+                    && let Some(index) = current_block
+                    && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
+                {
+                    block.thinking.push_str(delta);
+                    sender.push(AssistantMessageEvent::ThinkingDelta {
+                        content_index: index,
+                        delta: delta.to_string(),
+                        partial: output.clone(),
+                    });
                 }
             }
             "response.reasoning_text.delta" => {
@@ -421,15 +416,15 @@ async fn run_stream(
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block {
-                    if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
-                        block.thinking.push_str(delta);
-                        sender.push(AssistantMessageEvent::ThinkingDelta {
-                            content_index: index,
-                            delta: delta.to_string(),
-                            partial: output.clone(),
-                        });
-                    }
+                if let Some(index) = current_block
+                    && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
+                {
+                    block.thinking.push_str(delta);
+                    sender.push(AssistantMessageEvent::ThinkingDelta {
+                        content_index: index,
+                        delta: delta.to_string(),
+                        partial: output.clone(),
+                    });
                 }
             }
             "response.reasoning_summary_part.done" => {
@@ -444,19 +439,16 @@ async fn run_stream(
                         }
                     })
                     .is_some();
-                if has_summary_part {
-                    if let Some(index) = current_block {
-                        if let Some(AssistantContent::Thinking(block)) =
-                            output.content.get_mut(index)
-                        {
-                            block.thinking.push_str("\n\n");
-                            sender.push(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index,
-                                delta: "\n\n".to_string(),
-                                partial: output.clone(),
-                            });
-                        }
-                    }
+                if has_summary_part
+                    && let Some(index) = current_block
+                    && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
+                {
+                    block.thinking.push_str("\n\n");
+                    sender.push(AssistantMessageEvent::ThinkingDelta {
+                        content_index: index,
+                        delta: "\n\n".to_string(),
+                        partial: output.clone(),
+                    });
                 }
             }
             "response.output_text.delta" | "response.refusal.delta" => {
@@ -472,15 +464,15 @@ async fn run_stream(
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block {
-                    if let Some(AssistantContent::Text(block)) = output.content.get_mut(index) {
-                        block.text.push_str(delta);
-                        sender.push(AssistantMessageEvent::TextDelta {
-                            content_index: index,
-                            delta: delta.to_string(),
-                            partial: output.clone(),
-                        });
-                    }
+                if let Some(index) = current_block
+                    && let Some(AssistantContent::Text(block)) = output.content.get_mut(index)
+                {
+                    block.text.push_str(delta);
+                    sender.push(AssistantMessageEvent::TextDelta {
+                        content_index: index,
+                        delta: delta.to_string(),
+                        partial: output.clone(),
+                    });
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -778,13 +770,13 @@ fn try_build_responses_payload(
             Value::Array(convert_responses_tools(&context.tools, Some(false))),
         );
     }
-    if cache_retention != CacheRetention::None {
-        if let Some(session_id) = &options.base.session_id {
-            object.insert(
-                "prompt_cache_key".to_string(),
-                json!(clamp_openai_prompt_cache_key(Some(session_id))),
-            );
-        }
+    if cache_retention != CacheRetention::None
+        && let Some(session_id) = &options.base.session_id
+    {
+        object.insert(
+            "prompt_cache_key".to_string(),
+            json!(clamp_openai_prompt_cache_key(Some(session_id))),
+        );
     }
     if cache_retention == CacheRetention::Long && compat.supports_long_cache_retention {
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
@@ -865,13 +857,11 @@ fn try_convert_responses_messages(
             normalize_responses_tool_call_id(id, target_model, source, allowed_tool_call_providers)
         },
     );
-    if include_system_prompt {
-        if let Some(system_prompt) = &context.system_prompt {
-            messages.push(json!({
-                "role": if model.reasoning { "developer" } else { "system" },
-                "content": sanitize_surrogates(system_prompt),
-            }));
-        }
+    if include_system_prompt && let Some(system_prompt) = &context.system_prompt {
+        messages.push(json!({
+            "role": if model.reasoning { "developer" } else { "system" },
+            "content": sanitize_surrogates(system_prompt),
+        }));
     }
 
     let mut msg_index = 0usize;
@@ -911,11 +901,11 @@ fn try_convert_responses_messages(
                 for block in assistant.content {
                     match block {
                         AssistantContent::Thinking(thinking) => {
-                            if let Some(signature) = thinking.thinking_signature {
-                                if !signature.is_empty() {
-                                    let reasoning_item = serde_json::from_str::<Value>(&signature)?;
-                                    output.push(reasoning_item);
-                                }
+                            if let Some(signature) = thinking.thinking_signature
+                                && !signature.is_empty()
+                            {
+                                let reasoning_item = serde_json::from_str::<Value>(&signature)?;
+                                output.push(reasoning_item);
                             }
                         }
                         AssistantContent::Text(text) => {
@@ -1100,19 +1090,17 @@ fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextP
     if signature.is_empty() {
         return None;
     }
-    if signature.starts_with('{') {
-        if let Ok(parsed) = serde_json::from_str::<Value>(signature) {
-            if parsed.get("v").and_then(Value::as_u64) == Some(1) {
-                if let Some(id) = parsed.get("id").and_then(Value::as_str) {
-                    let phase = match parsed.get("phase").and_then(Value::as_str) {
-                        Some("commentary") => Some(TextPhase::Commentary),
-                        Some("final_answer") => Some(TextPhase::FinalAnswer),
-                        _ => None,
-                    };
-                    return Some((id.to_string(), phase));
-                }
-            }
-        }
+    if signature.starts_with('{')
+        && let Ok(parsed) = serde_json::from_str::<Value>(signature)
+        && parsed.get("v").and_then(Value::as_u64) == Some(1)
+        && let Some(id) = parsed.get("id").and_then(Value::as_str)
+    {
+        let phase = match parsed.get("phase").and_then(Value::as_str) {
+            Some("commentary") => Some(TextPhase::Commentary),
+            Some("final_answer") => Some(TextPhase::FinalAnswer),
+            _ => None,
+        };
+        return Some((id.to_string(), phase));
     }
     Some((signature.to_string(), None))
 }
@@ -1231,21 +1219,21 @@ fn headers(
             headers.insert(name, value);
         }
     }
-    if let Some(session_id) = &options.session_id {
-        if cache_retention != CacheRetention::None {
-            if compat.send_session_id_header {
-                headers.insert(
-                    HeaderName::from_static("session_id"),
-                    HeaderValue::from_str(session_id)
-                        .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
-                );
-            }
+    if let Some(session_id) = &options.session_id
+        && cache_retention != CacheRetention::None
+    {
+        if compat.send_session_id_header {
             headers.insert(
-                HeaderName::from_static("x-client-request-id"),
+                HeaderName::from_static("session_id"),
                 HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
+                    .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
             );
         }
+        headers.insert(
+            HeaderName::from_static("x-client-request-id"),
+            HeaderValue::from_str(session_id)
+                .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
+        );
     }
     for (name, value) in &options.headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {

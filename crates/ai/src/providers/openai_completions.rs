@@ -268,10 +268,10 @@ async fn run_stream(
             .get("model")
             .and_then(Value::as_str)
             .filter(|model| !model.is_empty())
+            && response_model != model.id
+            && output.response_model.is_none()
         {
-            if response_model != model.id && output.response_model.is_none() {
-                output.response_model = Some(response_model.to_string());
-            }
+            output.response_model = Some(response_model.to_string());
         }
         let chunk_has_usage =
             if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
@@ -288,10 +288,10 @@ async fn run_stream(
         let Some(choice) = choice else {
             continue;
         };
-        if !chunk_has_usage {
-            if let Some(usage) = choice.get("usage").filter(|value| !value.is_null()) {
-                output.usage = parse_chunk_usage(usage, &model);
-            }
+        if !chunk_has_usage
+            && let Some(usage) = choice.get("usage").filter(|value| !value.is_null())
+        {
+            output.usage = parse_chunk_usage(usage, &model);
         }
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
@@ -362,10 +362,10 @@ async fn run_stream(
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                 {
-                    if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index) {
-                        if block.id.is_empty() {
-                            block.id = id.to_string();
-                        }
+                    if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index)
+                        && block.id.is_empty()
+                    {
+                        block.id = id.to_string();
                     }
                     tool_blocks_by_id.insert(id.to_string(), index);
                 }
@@ -374,12 +374,10 @@ async fn run_stream(
                     .and_then(|function| function.get("name"))
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
+                    && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index)
+                    && block.name.is_empty()
                 {
-                    if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index) {
-                        if block.name.is_empty() {
-                            block.name = name.to_string();
-                        }
-                    }
+                    block.name = name.to_string();
                 }
 
                 let delta_args = tool_call_delta
@@ -417,10 +415,10 @@ async fn run_stream(
                     continue;
                 }
                 for block in output.content.iter_mut() {
-                    if let AssistantContent::ToolCall(tool_call) = block {
-                        if tool_call.id == id {
-                            tool_call.thought_signature = Some(detail.to_string());
-                        }
+                    if let AssistantContent::ToolCall(tool_call) = block
+                        && tool_call.id == id
+                    {
+                        tool_call.thought_signature = Some(detail.to_string());
                     }
                 }
             }
@@ -520,13 +518,13 @@ fn ensure_tool_call_block(
     if let Some(index) = stream_index.and_then(|index| by_index.get(&index).copied()) {
         return index;
     }
-    if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str) {
-        if let Some(index) = by_id.get(id).copied() {
-            if let Some(stream_index) = stream_index {
-                by_index.insert(stream_index, index);
-            }
-            return index;
+    if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str)
+        && let Some(index) = by_id.get(id).copied()
+    {
+        if let Some(stream_index) = stream_index {
+            by_index.insert(stream_index, index);
         }
+        return index;
     }
 
     let id = tool_call_delta
@@ -647,34 +645,32 @@ pub fn build_chat_completions_payload(
 
     apply_reasoning_options(object, model, options, compat);
 
-    if model.base_url.contains("api.openai.com") && cache_retention != CacheRetention::None
-        || (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention)
+    if (model.base_url.contains("api.openai.com") && cache_retention != CacheRetention::None
+        || (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention))
+        && let Some(session_id) = &options.base.session_id
     {
-        if let Some(session_id) = &options.base.session_id {
-            object.insert(
-                "prompt_cache_key".to_string(),
-                json!(clamp_openai_prompt_cache_key(Some(session_id))),
-            );
-        }
+        object.insert(
+            "prompt_cache_key".to_string(),
+            json!(clamp_openai_prompt_cache_key(Some(session_id))),
+        );
     }
     if cache_retention == CacheRetention::Long && compat.supports_long_cache_retention {
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
     }
 
-    if model.base_url.contains("openrouter.ai") {
-        if let Some(routing) = &compat.open_router_routing {
-            object.insert("provider".to_string(), routing.clone());
-        }
+    if model.base_url.contains("openrouter.ai")
+        && let Some(routing) = &compat.open_router_routing
+    {
+        object.insert("provider".to_string(), routing.clone());
     }
-    if model.base_url.contains("ai-gateway.vercel.sh") {
-        if let Some(routing) = &compat.vercel_gateway_routing {
-            if let Some(gateway_options) = vercel_gateway_options(routing) {
-                object.insert(
-                    "providerOptions".to_string(),
-                    json!({ "gateway": gateway_options }),
-                );
-            }
-        }
+    if model.base_url.contains("ai-gateway.vercel.sh")
+        && let Some(routing) = &compat.vercel_gateway_routing
+        && let Some(gateway_options) = vercel_gateway_options(routing)
+    {
+        object.insert(
+            "providerOptions".to_string(),
+            json!({ "gateway": gateway_options }),
+        );
     }
 
     if let Some(cache_control) = compat_cache_control(compat, cache_retention) {
@@ -774,10 +770,10 @@ fn apply_reasoning_options(
         OpenAIThinkingFormat::Openai => {
             if let Some(effort) = mapped_effort.filter(|_| compat.supports_reasoning_effort) {
                 object.insert("reasoning_effort".to_string(), json!(effort));
-            } else if compat.supports_reasoning_effort {
-                if let Some(Some(off)) = model.thinking_level_map.get("off") {
-                    object.insert("reasoning_effort".to_string(), json!(off));
-                }
+            } else if compat.supports_reasoning_effort
+                && let Some(Some(off)) = model.thinking_level_map.get("off")
+            {
+                object.insert("reasoning_effort".to_string(), json!(off));
             }
         }
     }
@@ -1309,10 +1305,10 @@ fn apply_anthropic_cache_control(payload: &mut Value, cache_control: Value) {
             break;
         }
     }
-    if let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) {
-        if let Some(last_tool) = tools.last_mut() {
-            last_tool["cache_control"] = cache_control;
-        }
+    if let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut)
+        && let Some(last_tool) = tools.last_mut()
+    {
+        last_tool["cache_control"] = cache_control;
     }
 }
 
@@ -1376,24 +1372,25 @@ fn headers(
             headers.insert(name, value);
         }
     }
-    if let Some(session_id) = &options.session_id {
-        if compat.send_session_affinity_headers && cache_retention != CacheRetention::None {
-            headers.insert(
-                HeaderName::from_static("session_id"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
-            );
-            headers.insert(
-                HeaderName::from_static("x-client-request-id"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
-            );
-            headers.insert(
-                HeaderName::from_static("x-session-affinity"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("x-session-affinity".to_string(), e))?,
-            );
-        }
+    if let Some(session_id) = &options.session_id
+        && compat.send_session_affinity_headers
+        && cache_retention != CacheRetention::None
+    {
+        headers.insert(
+            HeaderName::from_static("session_id"),
+            HeaderValue::from_str(session_id)
+                .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-client-request-id"),
+            HeaderValue::from_str(session_id)
+                .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_str(session_id)
+                .map_err(|e| Error::InvalidHeaderValue("x-session-affinity".to_string(), e))?,
+        );
     }
     for (name, value) in &options.headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {

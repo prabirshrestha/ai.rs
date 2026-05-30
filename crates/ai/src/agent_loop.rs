@@ -273,8 +273,8 @@ async fn run_loop(
             })
             .await?;
 
-            if let Some(prepare_next_turn) = config.prepare_next_turn.clone() {
-                if let Some(update) =
+            if let Some(prepare_next_turn) = config.prepare_next_turn.clone()
+                && let Some(update) =
                     prepare_next_turn(crate::agent_types::PrepareNextTurnContext {
                         message: assistant.clone(),
                         tool_results: tool_results.clone(),
@@ -282,35 +282,33 @@ async fn run_loop(
                         new_messages: new_messages.clone(),
                     })
                     .await
-                {
-                    if let Some(next_context) = update.context {
-                        *context = next_context;
-                    }
-                    if let Some(next_model) = update.model {
-                        config.model = next_model;
-                    }
-                    if let Some(reasoning_level) = update.reasoning_level {
-                        config.options.reasoning =
-                            if reasoning_level == crate::ModelThinkingLevel::Off {
-                                None
-                            } else {
-                                Some(reasoning_level)
-                            };
-                    }
+            {
+                if let Some(next_context) = update.context {
+                    *context = next_context;
+                }
+                if let Some(next_model) = update.model {
+                    config.model = next_model;
+                }
+                if let Some(reasoning_level) = update.reasoning_level {
+                    config.options.reasoning = if reasoning_level == crate::ModelThinkingLevel::Off
+                    {
+                        None
+                    } else {
+                        Some(reasoning_level)
+                    };
                 }
             }
 
-            if let Some(should_stop) = &config.should_stop_after_turn {
-                if should_stop(crate::agent_types::ShouldStopAfterTurnContext {
+            if let Some(should_stop) = &config.should_stop_after_turn
+                && should_stop(crate::agent_types::ShouldStopAfterTurnContext {
                     message: assistant,
                     tool_results,
                     context: context.clone(),
                     new_messages: new_messages.clone(),
                 })
                 .await
-                {
-                    return Ok(());
-                }
+            {
+                return Ok(());
             }
 
             pending_messages = if let Some(get) = &config.get_steering_messages {
@@ -356,10 +354,10 @@ async fn stream_assistant_response(
 
     let mut options = config.options.clone();
     options.stream.cancellation_token = cancellation_token.clone();
-    if let Some(get_api_key) = &config.get_api_key {
-        if let Some(api_key) = get_api_key(config.model.provider.clone()).await {
-            options.stream.api_key = Some(api_key);
-        }
+    if let Some(get_api_key) = &config.get_api_key
+        && let Some(api_key) = get_api_key(config.model.provider.clone()).await
+    {
+        options.stream.api_key = Some(api_key);
     }
 
     let mut response = if let Some(stream_fn) = stream_fn {
