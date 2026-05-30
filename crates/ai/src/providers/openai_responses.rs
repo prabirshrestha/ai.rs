@@ -814,6 +814,7 @@ fn try_build_responses_payload(
                 .reasoning_summary
                 .clone()
                 .flatten()
+                .filter(|summary| !summary.is_empty())
                 .unwrap_or_else(|| "auto".to_string());
             object.insert(
                 "reasoning".to_string(),
@@ -1548,6 +1549,30 @@ mod tests {
             json!({ "effort": "medium", "summary": "concise" })
         );
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn response_payload_empty_reasoning_summary_defaults_to_auto() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions {
+                reasoning_summary: Some(Some(String::new())),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["reasoning"],
+            json!({ "effort": "medium", "summary": "auto" })
+        );
     }
 
     #[test]
