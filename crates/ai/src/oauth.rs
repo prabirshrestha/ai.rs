@@ -808,6 +808,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn device_code_poll_reports_slow_down_timeout() {
+        let attempts = Arc::new(Mutex::new(0_u32));
+        let error = poll_oauth_device_code_flow::<(), _, _>(Some(1), Some(1), None, {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    *attempts.lock().expect("attempt lock poisoned") += 1;
+                    Ok(OAuthDeviceCodePollResult::SlowDown)
+                }
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(*attempts.lock().expect("attempt lock poisoned"), 1);
+        assert!(
+            error
+                .to_string()
+                .contains("Device flow timed out after one or more slow_down responses"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn login_callback_prompt_can_be_constructed() {
         let seen_prompt = Arc::new(Mutex::new(None));
         let callbacks = OAuthLoginCallbacks {
