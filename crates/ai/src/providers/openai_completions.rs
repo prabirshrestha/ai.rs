@@ -1430,6 +1430,7 @@ mod tests {
     use crate::types::{
         Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ToolResultMessage,
     };
+    use futures::StreamExt;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -2063,6 +2064,247 @@ mod tests {
             payload["tools"]
                 .as_array()
                 .is_some_and(|tools| !tools.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn ignores_null_stream_chunks_from_compatible_providers() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            Value::Null,
+            json!({
+                "id": "chatcmpl-null",
+                "choices": [{ "index": 0, "delta": { "content": "OK" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-null",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Reply OK")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(message.error_message, None);
+        assert_eq!(message.response_id.as_deref(), Some("chatcmpl-null"));
+        assert_eq!(message.usage.total_tokens, 4);
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "OK".to_string(),
+                text_signature: None,
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn errors_when_stream_ends_without_finish_reason() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-truncated",
+                "choices": [{ "index": 0, "delta": { "content": "partial" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-truncated",
+                "choices": [{ "index": 0, "delta": { "content": " answer" }, "finish_reason": null }]
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Reply longer")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Stream ended without finish_reason")
+        );
+    }
+
+    #[tokio::test]
+    async fn maps_provider_finish_reason_errors() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-network-error",
+                "choices": [{ "index": 0, "delta": { "content": "partial" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-network-error",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "network_error" }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Provider finish_reason: network_error")
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesces_tool_call_deltas_by_index_when_provider_mutates_ids() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-mutating-tools",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "functions.read:0",
+                            "type": "function",
+                            "function": { "name": "read", "arguments": "" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-mutating-tools",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "chatcmpl-tool-a",
+                            "type": "function",
+                            "function": { "name": null, "arguments": "{\"path\":\"README" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-mutating-tools",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "chatcmpl-tool-b",
+                            "type": "function",
+                            "function": { "name": null, "arguments": ".md\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Read README.md")],
+                tools: vec![lookup_tool()],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let mut tool_call_indexes = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                AssistantMessageEvent::ToolCallStart { content_index, .. }
+                | AssistantMessageEvent::ToolCallDelta { content_index, .. }
+                | AssistantMessageEvent::ToolCallEnd { content_index, .. } => {
+                    tool_call_indexes.push(content_index);
+                }
+                _ => {}
+            }
+        }
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(tool_call_indexes, vec![0, 0, 0, 0, 0]);
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "functions.read:0".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            })]
         );
     }
 
