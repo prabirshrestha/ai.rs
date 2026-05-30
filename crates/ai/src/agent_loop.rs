@@ -4,12 +4,13 @@ use std::task::{Context as TaskContext, Poll};
 
 use crate::{AssistantMessageEvent, StopReason, ToolResultMessage};
 use futures::{Stream, StreamExt};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage,
-    AgentToolResult, BeforeToolCallContext, ToolExecutionMode, assistant_tool_calls,
+    AgentToolResult, BeforeToolCallContext, DynAgentTool, ToolExecutionMode, assistant_tool_calls,
 };
 use crate::{AgentError, AgentResult};
 
@@ -524,32 +525,71 @@ async fn execute_tool_calls_parallel(
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
 ) -> AgentResult<ExecutedToolBatch> {
-    let futures = tool_calls
-        .into_iter()
-        .map(|tool_call| {
-            let context = context.clone();
-            let assistant = assistant.clone();
-            let config = config.clone();
-            let emit = emit.clone();
-            let cancellation_token = cancellation_token.clone();
-            async move {
-                execute_one_tool(
-                    &context,
-                    &assistant,
-                    tool_call,
-                    &config,
-                    emit,
-                    cancellation_token,
-                )
-                .await
+    let mut finalized_by_source = vec![None; tool_calls.len()];
+    let mut prepared_calls = Vec::new();
+    for (source_index, tool_call) in tool_calls.into_iter().enumerate() {
+        match prepare_tool_call(
+            context,
+            assistant,
+            source_index,
+            tool_call,
+            config,
+            emit.clone(),
+            cancellation_token.clone(),
+        )
+        .await?
+        {
+            PreparedToolCallOutcome::Immediate(finalized) => {
+                emit_tool_execution_end(&finalized, &emit).await?;
+                finalized_by_source[source_index] = Some(finalized);
+                if cancellation_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    break;
+                }
             }
-        })
-        .collect::<Vec<_>>();
-    let finalized = futures::future::join_all(futures).await;
+            PreparedToolCallOutcome::Prepared(prepared) => {
+                prepared_calls.push(prepared);
+                if cancellation_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut futures = futures::stream::FuturesUnordered::new();
+    for prepared in prepared_calls {
+        let context = context.clone();
+        let assistant = assistant.clone();
+        let config = config.clone();
+        let emit = emit.clone();
+        let cancellation_token = cancellation_token.clone();
+        futures.push(async move {
+            let source_index = prepared.source_index;
+            execute_prepared_tool_call(
+                &context,
+                &assistant,
+                prepared,
+                &config,
+                emit,
+                cancellation_token,
+            )
+            .await
+            .map(|finalized| (source_index, finalized))
+        });
+    }
+    while let Some(item) = futures.next().await {
+        let (source_index, finalized) = item?;
+        finalized_by_source[source_index] = Some(finalized);
+    }
+
     let mut messages = Vec::new();
     let mut terminate_flags = Vec::new();
-    for item in finalized {
-        let finalized = item?;
+    for finalized in finalized_by_source.into_iter().flatten() {
         terminate_flags.push(finalized.2.terminate);
         messages.push(create_tool_result_message(finalized));
     }
@@ -562,6 +602,20 @@ async fn execute_tool_calls_parallel(
     })
 }
 
+type FinalizedToolCall = (crate::ToolCall, bool, AgentToolResult);
+
+struct PreparedToolCall {
+    source_index: usize,
+    tool_call: crate::ToolCall,
+    tool: DynAgentTool,
+    args: Value,
+}
+
+enum PreparedToolCallOutcome {
+    Immediate(FinalizedToolCall),
+    Prepared(PreparedToolCall),
+}
+
 async fn execute_one_tool(
     context: &AgentContext,
     assistant: &crate::AssistantMessage,
@@ -569,7 +623,45 @@ async fn execute_one_tool(
     config: &AgentLoopConfig,
     emit: AgentEventSink,
     cancellation_token: Option<CancellationToken>,
-) -> AgentResult<(crate::ToolCall, bool, AgentToolResult)> {
+) -> AgentResult<FinalizedToolCall> {
+    match prepare_tool_call(
+        context,
+        assistant,
+        0,
+        tool_call,
+        config,
+        emit.clone(),
+        cancellation_token.clone(),
+    )
+    .await?
+    {
+        PreparedToolCallOutcome::Immediate(finalized) => {
+            emit_tool_execution_end(&finalized, &emit).await?;
+            Ok(finalized)
+        }
+        PreparedToolCallOutcome::Prepared(prepared) => {
+            execute_prepared_tool_call(
+                context,
+                assistant,
+                prepared,
+                config,
+                emit,
+                cancellation_token,
+            )
+            .await
+        }
+    }
+}
+
+async fn prepare_tool_call(
+    context: &AgentContext,
+    assistant: &crate::AssistantMessage,
+    source_index: usize,
+    tool_call: crate::ToolCall,
+    config: &AgentLoopConfig,
+    emit: AgentEventSink,
+    cancellation_token: Option<CancellationToken>,
+) -> AgentResult<PreparedToolCallOutcome> {
     emit(AgentEvent::ToolExecutionStart {
         tool_call_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),
@@ -583,29 +675,20 @@ async fn execute_one_tool(
         .find(|tool| tool.definition().name == tool_call.name)
         .cloned()
     else {
-        let result = AgentToolResult::text(format!("Tool {} not found", tool_call.name));
-        emit(AgentEvent::ToolExecutionEnd {
-            tool_call_id: tool_call.id.clone(),
-            tool_name: tool_call.name.clone(),
-            result: result.clone(),
-            is_error: true,
-        })
-        .await?;
-        return Ok((tool_call, true, result));
+        let tool_name = tool_call.name.clone();
+        return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+            tool_call,
+            format!("Tool {tool_name} not found"),
+        )));
     };
 
     let mut prepared_args = match tool.prepare_arguments(tool_call.arguments.clone()) {
         Ok(args) => args,
         Err(error) => {
-            let result = AgentToolResult::text(error.to_string());
-            emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: tool_call.id.clone(),
-                tool_name: tool_call.name.clone(),
-                result: result.clone(),
-                is_error: true,
-            })
-            .await?;
-            return Ok((tool_call, true, result));
+            return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                tool_call,
+                error.to_string(),
+            )));
         }
     };
 
@@ -617,15 +700,10 @@ async fn execute_one_tool(
     ) {
         Ok(args) => args,
         Err(error) => {
-            let result = AgentToolResult::text(error.to_string());
-            emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: tool_call.id.clone(),
-                tool_name: tool_call.name.clone(),
-                result: result.clone(),
-                is_error: true,
-            })
-            .await?;
-            return Ok((tool_call, true, result));
+            return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                tool_call,
+                error.to_string(),
+            )));
         }
     };
 
@@ -643,19 +721,12 @@ async fn execute_one_tool(
         {
             Ok(Some(before_result)) => {
                 if before_result.block {
-                    let result = AgentToolResult::text(
-                        before_result
-                            .reason
-                            .unwrap_or_else(|| "Tool execution was blocked".to_string()),
-                    );
-                    emit(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        result: result.clone(),
-                        is_error: true,
-                    })
-                    .await?;
-                    return Ok((tool_call, true, result));
+                    let reason = before_result
+                        .reason
+                        .unwrap_or_else(|| "Tool execution was blocked".to_string());
+                    return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                        tool_call, reason,
+                    )));
                 }
                 if let Some(args) = before_result.args {
                     prepared_args = args;
@@ -663,15 +734,10 @@ async fn execute_one_tool(
             }
             Ok(None) => {}
             Err(error) => {
-                let result = AgentToolResult::text(error.to_string());
-                emit(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tool_call.id.clone(),
-                    tool_name: tool_call.name.clone(),
-                    result: result.clone(),
-                    is_error: true,
-                })
-                .await?;
-                return Ok((tool_call, true, result));
+                return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                    tool_call,
+                    error.to_string(),
+                )));
             }
         }
     }
@@ -680,17 +746,31 @@ async fn execute_one_tool(
         .as_ref()
         .is_some_and(CancellationToken::is_cancelled)
     {
-        let result = AgentToolResult::text("Operation aborted");
-        emit(AgentEvent::ToolExecutionEnd {
-            tool_call_id: tool_call.id.clone(),
-            tool_name: tool_call.name.clone(),
-            result: result.clone(),
-            is_error: true,
-        })
-        .await?;
-        return Ok((tool_call, true, result));
+        return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+            tool_call,
+            "Operation aborted",
+        )));
     }
 
+    Ok(PreparedToolCallOutcome::Prepared(PreparedToolCall {
+        source_index,
+        tool_call,
+        tool,
+        args: prepared_args,
+    }))
+}
+
+async fn execute_prepared_tool_call(
+    context: &AgentContext,
+    assistant: &crate::AssistantMessage,
+    prepared: PreparedToolCall,
+    config: &AgentLoopConfig,
+    emit: AgentEventSink,
+    cancellation_token: Option<CancellationToken>,
+) -> AgentResult<FinalizedToolCall> {
+    let tool = prepared.tool;
+    let tool_call = prepared.tool_call;
+    let prepared_args = prepared.args;
     let emit_for_update = emit.clone();
     let update_tool_call = tool_call.clone();
     let on_update = Arc::new(move |partial_result: AgentToolResult| {
@@ -764,6 +844,24 @@ async fn execute_one_tool(
     })
     .await?;
     Ok((tool_call, is_error, result))
+}
+
+fn finalized_error(tool_call: crate::ToolCall, message: impl Into<String>) -> FinalizedToolCall {
+    (tool_call, true, AgentToolResult::text(message))
+}
+
+async fn emit_tool_execution_end(
+    finalized: &FinalizedToolCall,
+    emit: &AgentEventSink,
+) -> AgentResult<()> {
+    let (tool_call, is_error, result) = finalized;
+    emit(AgentEvent::ToolExecutionEnd {
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        result: result.clone(),
+        is_error: *is_error,
+    })
+    .await
 }
 
 fn create_tool_result_message(
