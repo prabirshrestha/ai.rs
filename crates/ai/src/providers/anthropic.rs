@@ -564,7 +564,10 @@ async fn run_stream(
             }
             Some("message_delta") => {
                 if let Some(reason) = parsed.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                    output.stop_reason = map_stop_reason(reason);
+                    output.stop_reason = match map_stop_reason(reason) {
+                        Ok(stop_reason) => stop_reason,
+                        Err(message) => return Err(StreamFailure::new(output, message)),
+                    };
                 }
                 if let Some(usage) = parsed.get("usage") {
                     update_anthropic_usage(&mut output, usage, &model);
@@ -1157,13 +1160,13 @@ fn normalize_tool_call_id(id: &str) -> String {
         .collect()
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+fn map_stop_reason(reason: &str) -> std::result::Result<StopReason, String> {
     match reason {
-        "end_turn" | "pause_turn" | "stop_sequence" => StopReason::Stop,
-        "max_tokens" => StopReason::Length,
-        "tool_use" => StopReason::ToolUse,
-        "refusal" | "sensitive" => StopReason::Error,
-        _ => StopReason::Error,
+        "end_turn" | "pause_turn" | "stop_sequence" => Ok(StopReason::Stop),
+        "max_tokens" => Ok(StopReason::Length),
+        "tool_use" => Ok(StopReason::ToolUse),
+        "refusal" | "sensitive" => Ok(StopReason::Error),
+        _ => Err(format!("Unhandled stop reason: {reason}")),
     }
 }
 
@@ -2250,6 +2253,70 @@ mod tests {
 
         assert_eq!(result.stop_reason, StopReason::Stop);
         assert_eq!(result.response_id.as_deref(), Some("msg_response_id"));
+    }
+
+    #[tokio::test]
+    async fn unknown_stop_reason_reports_provider_reason() {
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_unknown_stop",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "model_overheated" },
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                })
+                .to_string(),
+            ),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("Say hello.")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Unhandled stop reason: model_overheated")
+        );
     }
 
     #[tokio::test]
