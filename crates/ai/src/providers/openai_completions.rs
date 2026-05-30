@@ -2635,6 +2635,366 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn accumulates_mixed_text_reasoning_and_parallel_tool_deltas_independently() {
+        let mut chat_model = model();
+        chat_model.id = "gpt-4o-mini".to_string();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-mixed-deltas",
+                "choices": [{
+                    "delta": {
+                        "content": "answer 1",
+                        "reasoning_content": "think 1",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "tc_read_initial",
+                                "type": "function",
+                                "function": { "name": "read", "arguments": "{\"path\":\"README" }
+                            },
+                            {
+                                "index": 1,
+                                "id": "tc_grep_initial",
+                                "type": "function",
+                                "function": { "name": "grep", "arguments": "{\"pattern\":\"TODO" }
+                            },
+                            {
+                                "id": "tc_list_no_index",
+                                "type": "function",
+                                "function": { "name": "list", "arguments": "{\"path\":\"packages" }
+                            },
+                            {
+                                "id": "tc_write_no_index",
+                                "type": "function",
+                                "function": { "name": "write", "arguments": "{\"path\":\"out" }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-mixed-deltas",
+                "choices": [{
+                    "delta": {
+                        "content": " answer 2",
+                        "tool_calls": [
+                            {
+                                "index": 1,
+                                "id": "tc_grep_changed",
+                                "type": "function",
+                                "function": { "arguments": "\",\"path\":\"src" }
+                            },
+                            {
+                                "id": "tc_write_no_index",
+                                "type": "function",
+                                "function": { "arguments": ".txt\",\"content\":\"ok\"}" }
+                            },
+                            {
+                                "id": "tc_list_no_index",
+                                "type": "function",
+                                "function": { "arguments": "/ai\"}" }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-mixed-deltas",
+                "choices": [{
+                    "delta": {
+                        "content": "\n",
+                        "reasoning_content": " think 2",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "tc_read_changed",
+                                "type": "function",
+                                "function": { "arguments": ".md\"}" }
+                            },
+                            {
+                                "index": 1,
+                                "type": "function",
+                                "function": { "arguments": "\"}" }
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 2 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Think, answer, and use tools.")],
+                tools: vec![
+                    Tool {
+                        name: "read".to_string(),
+                        description: "Read a file".to_string(),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path"]
+                        }),
+                    },
+                    Tool {
+                        name: "grep".to_string(),
+                        description: "Search a file".to_string(),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {
+                                "pattern": { "type": "string" },
+                                "path": { "type": "string" }
+                            },
+                            "required": ["pattern", "path"]
+                        }),
+                    },
+                    Tool {
+                        name: "list".to_string(),
+                        description: "List a directory".to_string(),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path"]
+                        }),
+                    },
+                    Tool {
+                        name: "write".to_string(),
+                        description: "Write a file".to_string(),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "content"]
+                        }),
+                    },
+                ],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let mut event_names = Vec::new();
+        let mut tool_events_by_content_index: HashMap<usize, Vec<&'static str>> = HashMap::new();
+        while let Some(event) = stream.next().await {
+            let name = match &event {
+                AssistantMessageEvent::TextStart { .. } => "text_start",
+                AssistantMessageEvent::TextDelta { .. } => "text_delta",
+                AssistantMessageEvent::TextEnd { .. } => "text_end",
+                AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
+                AssistantMessageEvent::ThinkingDelta { .. } => "thinking_delta",
+                AssistantMessageEvent::ThinkingEnd { .. } => "thinking_end",
+                AssistantMessageEvent::ToolCallStart { content_index, .. } => {
+                    tool_events_by_content_index
+                        .entry(*content_index)
+                        .or_default()
+                        .push("toolcall_start");
+                    "toolcall_start"
+                }
+                AssistantMessageEvent::ToolCallDelta { content_index, .. } => {
+                    tool_events_by_content_index
+                        .entry(*content_index)
+                        .or_default()
+                        .push("toolcall_delta");
+                    "toolcall_delta"
+                }
+                AssistantMessageEvent::ToolCallEnd { content_index, .. } => {
+                    tool_events_by_content_index
+                        .entry(*content_index)
+                        .or_default()
+                        .push("toolcall_end");
+                    "toolcall_end"
+                }
+                _ => "other",
+            };
+            event_names.push(name);
+        }
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "text_start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "text_delta")
+                .count(),
+            3
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "text_end")
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "thinking_start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "thinking_delta")
+                .count(),
+            2
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "thinking_end")
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "toolcall_start")
+                .count(),
+            4
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "toolcall_delta")
+                .count(),
+            9
+        );
+        assert_eq!(
+            event_names
+                .iter()
+                .filter(|name| **name == "toolcall_end")
+                .count(),
+            4
+        );
+        assert_eq!(
+            tool_events_by_content_index.get(&2).map(Vec::as_slice),
+            Some(
+                &[
+                    "toolcall_start",
+                    "toolcall_delta",
+                    "toolcall_delta",
+                    "toolcall_end",
+                ][..]
+            )
+        );
+        assert_eq!(
+            tool_events_by_content_index.get(&3).map(Vec::as_slice),
+            Some(
+                &[
+                    "toolcall_start",
+                    "toolcall_delta",
+                    "toolcall_delta",
+                    "toolcall_delta",
+                    "toolcall_end",
+                ][..]
+            )
+        );
+        assert_eq!(
+            tool_events_by_content_index.get(&4).map(Vec::as_slice),
+            Some(
+                &[
+                    "toolcall_start",
+                    "toolcall_delta",
+                    "toolcall_delta",
+                    "toolcall_end",
+                ][..]
+            )
+        );
+        assert_eq!(
+            tool_events_by_content_index.get(&5).map(Vec::as_slice),
+            Some(
+                &[
+                    "toolcall_start",
+                    "toolcall_delta",
+                    "toolcall_delta",
+                    "toolcall_end",
+                ][..]
+            )
+        );
+
+        assert_eq!(message.content.len(), 6);
+        assert_eq!(
+            message.content[0],
+            AssistantContent::Text(TextContent {
+                text: "answer 1 answer 2\n".to_string(),
+                text_signature: None,
+            })
+        );
+        assert_eq!(
+            message.content[1],
+            AssistantContent::Thinking(ThinkingContent {
+                thinking: "think 1 think 2".to_string(),
+                thinking_signature: Some("reasoning_content".to_string()),
+                redacted: None,
+            })
+        );
+        assert_eq!(
+            message.content[2],
+            AssistantContent::ToolCall(ToolCall {
+                id: "tc_read_initial".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            })
+        );
+        assert_eq!(
+            message.content[3],
+            AssistantContent::ToolCall(ToolCall {
+                id: "tc_grep_initial".to_string(),
+                name: "grep".to_string(),
+                arguments: json!({ "pattern": "TODO", "path": "src" }),
+                thought_signature: None,
+            })
+        );
+        assert_eq!(
+            message.content[4],
+            AssistantContent::ToolCall(ToolCall {
+                id: "tc_list_no_index".to_string(),
+                name: "list".to_string(),
+                arguments: json!({ "path": "packages/ai" }),
+                thought_signature: None,
+            })
+        );
+        assert_eq!(
+            message.content[5],
+            AssistantContent::ToolCall(ToolCall {
+                id: "tc_write_no_index".to_string(),
+                name: "write".to_string(),
+                arguments: json!({ "path": "out.txt", "content": "ok" }),
+                thought_signature: None,
+            })
+        );
+    }
+
     #[test]
     fn omits_strict_when_compat_disables_strict_mode() {
         let mut model = model();
