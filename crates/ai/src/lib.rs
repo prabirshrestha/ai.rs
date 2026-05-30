@@ -10,6 +10,7 @@ pub mod image_models;
 pub mod images;
 pub mod images_api_registry;
 pub mod models;
+pub mod oauth;
 pub mod providers;
 pub mod session_resources;
 pub mod stream;
@@ -32,6 +33,12 @@ pub use images::generate_images;
 pub use models::{
     calculate_cost, clamp_thinking_level, get_model, get_models, get_providers,
     get_supported_thinking_levels, models_are_equal, register_model,
+};
+pub use oauth::{
+    GitHubCopilotOAuthProvider, OAuthCredentials, OAuthDeviceCodeInfo, OAuthDeviceCodePollResult,
+    OAuthLoginCallbacks, OAuthPrompt, get_github_copilot_base_url, github_copilot_oauth_provider,
+    login_github_copilot, modify_github_copilot_models, normalize_domain,
+    poll_oauth_device_code_flow, refresh_github_copilot_token,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
