@@ -1624,6 +1624,70 @@ mod tests {
         assert!(payload.get("include").is_none());
     }
 
+    #[test]
+    fn response_payload_sends_none_reasoning_for_openai_models_that_support_off() {
+        for model_id in [
+            "gpt-5.1",
+            "gpt-5.2",
+            "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.5",
+        ] {
+            let model = crate::get_model("openai", model_id).expect(model_id);
+            let context = Context {
+                system_prompt: Some("sys".to_string()),
+                messages: vec![Message::user_text("hi")],
+                tools: Vec::new(),
+            };
+
+            let payload = build_responses_payload(
+                &model,
+                &context,
+                &OpenAIResponsesOptions::default(),
+                &get_compat(&model),
+                CacheRetention::Short,
+            );
+
+            assert_eq!(
+                payload["reasoning"],
+                json!({ "effort": "none" }),
+                "{model_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_payload_omits_default_reasoning_when_off_is_unsupported() {
+        for model_id in [
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5-pro",
+            "gpt-5.2-pro",
+            "gpt-5.4-pro",
+            "gpt-5.5-pro",
+        ] {
+            let model = crate::get_model("openai", model_id).expect(model_id);
+            let context = Context {
+                system_prompt: Some("sys".to_string()),
+                messages: vec![Message::user_text("hi")],
+                tools: Vec::new(),
+            };
+
+            let payload = build_responses_payload(
+                &model,
+                &context,
+                &OpenAIResponsesOptions::default(),
+                &get_compat(&model),
+                CacheRetention::Short,
+            );
+
+            assert!(payload.get("reasoning").is_none(), "{model_id}");
+        }
+    }
+
     #[tokio::test]
     async fn response_text_delta_ignores_unsupported_content_parts() {
         let body = sse_body(&[
