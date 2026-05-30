@@ -35,6 +35,61 @@ async fn agent_prompt_records_user_and_assistant_messages() {
 }
 
 #[tokio::test]
+async fn agent_prompt_emits_full_lifecycle_for_provider_failures() {
+    let registration = register_faux_provider(None);
+    let mut options = AgentOptions::new(registration.get_model());
+    options.stream_fn = Some(Arc::new(|_model, _context, _options| {
+        Box::pin(async move { Err(ai::Error::Validation("provider exploded".to_string())) })
+    }));
+    let agent = Agent::new(options);
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    agent
+        .subscribe(Arc::new({
+            let events = Arc::clone(&events);
+            move |event| {
+                let events = Arc::clone(&events);
+                Box::pin(async move {
+                    events.lock().await.push(event_name(&event));
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    agent.prompt_text("hello", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        *events.lock().await,
+        vec![
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
+    let state = agent.state().await;
+    assert!(!state.is_streaming);
+    assert_eq!(state.error_message.as_deref(), Some("provider exploded"));
+    assert_eq!(state.messages.len(), 2);
+    assert!(matches!(state.messages[0], Message::User(_)));
+    let Message::Assistant(assistant) = &state.messages[1] else {
+        panic!("expected failure assistant message");
+    };
+    assert_eq!(assistant.stop_reason, StopReason::Error);
+    assert_eq!(
+        assistant.error_message.as_deref(),
+        Some("provider exploded")
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_subscribe_can_unsubscribe_listener() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("hello", None)]);
