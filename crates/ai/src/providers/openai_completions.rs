@@ -262,7 +262,11 @@ async fn run_stream(
         if let Some(id) = chunk.get("id").and_then(Value::as_str) {
             output.response_id.get_or_insert_with(|| id.to_string());
         }
-        if let Some(response_model) = chunk.get("model").and_then(Value::as_str) {
+        if let Some(response_model) = chunk
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        {
             if response_model != model.id && output.response_model.is_none() {
                 output.response_model = Some(response_model.to_string());
             }
@@ -1424,6 +1428,8 @@ mod tests {
     use crate::types::{
         Message, ModelCompat, ModelCost, OpenAICompletionsCompat, ToolResultMessage,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn model() -> Model {
         Model {
@@ -1615,6 +1621,135 @@ mod tests {
                 "required": ["value"]
             }),
         }
+    }
+
+    fn chat_sse_body(chunks: &[Value]) -> String {
+        let mut body = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect::<String>();
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    async fn spawn_sse_server(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn surfaces_routed_chunk_model_as_response_model() {
+        let mut routed_model = model();
+        routed_model.id = "openrouter/auto".to_string();
+        routed_model.provider = "openrouter".to_string();
+        routed_model.reasoning = false;
+        routed_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-1",
+                "model": "anthropic/claude-opus-4.8",
+                "choices": [{ "index": 0, "delta": { "content": "hi" } }]
+            }),
+            json!({
+                "id": "chatcmpl-1",
+                "model": "anthropic/claude-opus-4.8",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            routed_model,
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.model, "openrouter/auto");
+        assert_eq!(
+            message.response_model.as_deref(),
+            Some("anthropic/claude-opus-4.8")
+        );
+        assert_eq!(message.provider, "openrouter");
+        assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn ignores_empty_or_missing_chunk_model_for_response_model() {
+        let mut routed_model = model();
+        routed_model.id = "openrouter/auto".to_string();
+        routed_model.provider = "openrouter".to_string();
+        routed_model.reasoning = false;
+        routed_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-2",
+                "choices": [{ "index": 0, "delta": { "content": "hi" } }]
+            }),
+            json!({
+                "id": "chatcmpl-2",
+                "model": "",
+                "choices": [{ "index": 0, "delta": { "content": "!" } }]
+            }),
+            json!({
+                "id": "chatcmpl-2",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            routed_model,
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.model, "openrouter/auto");
+        assert_eq!(message.response_model, None);
+        assert_eq!(message.stop_reason, StopReason::Stop);
     }
 
     #[test]
