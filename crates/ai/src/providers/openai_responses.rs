@@ -2205,6 +2205,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn function_call_partial_json_is_not_persisted() {
+        let arguments = r#"{"path":"README.md","content":"updated"}"#;
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "edit",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "delta": r#"{"path":"README.md""#
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "delta": r#","content":"updated"}"#
+            }),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "arguments": arguments
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "edit",
+                    "arguments": arguments
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut ended_tool_call = None;
+        while let Some(event) = stream.next().await {
+            if let AssistantMessageEvent::ToolCallEnd { tool_call, .. } = event {
+                ended_tool_call = Some(tool_call);
+            }
+        }
+        let result = stream.result().await.unwrap();
+        let tool_call = match result.content.first().expect("tool call content") {
+            AssistantContent::ToolCall(tool_call) => tool_call,
+            other => panic!("expected tool call, got {other:?}"),
+        };
+
+        assert_eq!(tool_call.id, "call_test|fc_test");
+        assert_eq!(tool_call.name, "edit");
+        assert_eq!(
+            tool_call.arguments,
+            json!({ "path": "README.md", "content": "updated" })
+        );
+        assert_eq!(
+            ended_tool_call.expect("toolcall_end event"),
+            tool_call.clone()
+        );
+        let serialized = serde_json::to_value(tool_call).expect("serialize tool call");
+        assert!(serialized.get("partialJson").is_none());
+        assert!(serialized.get("partial_json").is_none());
+    }
+
+    #[tokio::test]
     async fn reasoning_summary_delta_ignores_missing_summary_part() {
         let body = sse_body(&[
             json!({
