@@ -260,6 +260,7 @@ async fn run_stream(
         }
         let event = match event {
             Ok(event) => event,
+            Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
             Err(error) => return Err(StreamFailure::new(output, error)),
         };
         if event.data.trim().is_empty() || event.data.trim() == "[DONE]" {
@@ -2052,6 +2053,67 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Aborted);
         assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
         assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_midstream_cancellation_returns_aborted_message() {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        let (base_url, release_server) = spawn_hanging_sse_server(sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "message",
+                    "id": "msg_abort",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "part": { "type": "output_text", "text": "" }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "partial"
+            }),
+        ]))
+        .await;
+        let mut response_model = model();
+        response_model.base_url = base_url;
+        let mut stream = stream_openai_responses(
+            response_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    cancellation_token: Some(cancellation_token.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        while let Some(event) = stream.next().await {
+            if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
+                cancellation_token.cancel();
+            }
+        }
+        let result = stream.result().await.unwrap();
+        release_server.notify_waiters();
+
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "partial".to_string(),
+                text_signature: None,
+            })]
+        );
     }
 
     #[test]

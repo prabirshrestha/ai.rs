@@ -326,6 +326,7 @@ async fn run_stream(
         }
         let event = match event {
             Ok(event) => event,
+            Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
             Err(error) => return Err(StreamFailure::new(output, error)),
         };
         if event.event.as_deref() == Some("error") {
@@ -1235,6 +1236,8 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use futures::StreamExt;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1921,6 +1924,29 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_hanging_sse_server(body: String) -> (String, Arc<tokio::sync::Notify>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_task = Arc::clone(&release);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.write_all(b"\n").await.unwrap();
+            socket.flush().await.unwrap();
+            release_task.notified().await;
+        });
+        (format!("http://{addr}"), release)
+    }
+
     #[tokio::test]
     async fn repairs_malformed_sse_json_and_streamed_tool_json() {
         let body = sse_body(&[
@@ -2144,6 +2170,85 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Aborted);
         assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
         assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn anthropic_midstream_cancellation_returns_aborted_message() {
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+        let (base_url, release_server) = spawn_hanging_sse_server(sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_abort",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "partial" }
+                })
+                .to_string(),
+            ),
+        ]))
+        .await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    cancellation_token: Some(cancellation_token.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        while let Some(event) = stream.next().await {
+            if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
+                cancellation_token.cancel();
+            }
+        }
+        let result = stream.result().await.unwrap();
+        release_server.notify_waiters();
+
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "partial".to_string(),
+                text_signature: None,
+            })]
+        );
     }
 
     #[tokio::test]
