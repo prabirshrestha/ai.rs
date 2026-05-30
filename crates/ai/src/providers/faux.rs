@@ -746,6 +746,7 @@ fn message_to_text(message: &Message) -> String {
         Message::User(message) => content_to_text(&message.content),
         Message::Assistant(message) => assistant_content_to_text(&message.content),
         Message::ToolResult(message) => tool_result_to_text(message),
+        Message::Custom(_) => String::new(),
     }
 }
 
@@ -754,6 +755,7 @@ fn message_role(message: &Message) -> &'static str {
         Message::User(_) => "user",
         Message::Assistant(_) => "assistant",
         Message::ToolResult(_) => "toolResult",
+        Message::Custom(_) => "custom",
     }
 }
 

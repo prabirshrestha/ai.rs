@@ -92,7 +92,12 @@ impl AgentContext {
     pub fn llm_context(&self) -> Context {
         Context {
             system_prompt: self.system_prompt.clone(),
-            messages: self.messages.clone(),
+            messages: self
+                .messages
+                .iter()
+                .filter(|message| message.is_llm_message())
+                .cloned()
+                .collect(),
             tools: self.tools.iter().map(|tool| tool.definition()).collect(),
         }
     }

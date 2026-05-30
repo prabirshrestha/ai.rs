@@ -1017,6 +1017,7 @@ fn try_convert_responses_messages(
                     "output": output
                 }));
             }
+            crate::types::Message::Custom(_) => {}
         }
         msg_index += 1;
     }

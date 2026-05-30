@@ -36,6 +36,41 @@ async fn agent_starts_with_default_state() {
 }
 
 #[tokio::test]
+async fn agent_state_keeps_custom_messages_but_default_llm_context_filters_them() {
+    let registration = register_faux_provider(None);
+    let observed_roles = Arc::new(Mutex::new(None));
+    registration.set_responses([FauxResponseStep::factory({
+        let observed_roles = Arc::clone(&observed_roles);
+        move |context, _options, _state, _model| {
+            let observed_roles = Arc::clone(&observed_roles);
+            async move {
+                *observed_roles.lock().await = Some(message_roles(&context.messages));
+                Ok(faux_assistant_message("done", None))
+            }
+        }
+    })]);
+    let mut options = AgentOptions::new(registration.get_model());
+    options.initial_state.messages = vec![Message::custom(json!({ "kind": "status" }))];
+    let agent = Agent::new(options);
+
+    agent.prompt_text("hello", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        *observed_roles.lock().await,
+        Some(vec!["user"]),
+        "custom messages should not be sent to the model by default"
+    );
+    let state = agent.state().await;
+    assert!(matches!(state.messages.first(), Some(Message::Custom(_))));
+    assert_eq!(
+        message_roles(&state.messages),
+        vec!["custom", "user", "assistant"]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_can_start_with_unknown_default_state() {
     let agent = Agent::default();
 
@@ -1206,6 +1241,7 @@ async fn agent_loop_continue_returns_only_new_messages_without_reemitting_contex
                 Message::User(_) => "user",
                 Message::Assistant(_) => "assistant",
                 Message::ToolResult(_) => "toolResult",
+                Message::Custom(_) => "custom",
             }),
             _ => None,
         })
@@ -2542,6 +2578,7 @@ fn message_roles(messages: &[Message]) -> Vec<&'static str> {
             Message::User(_) => "user",
             Message::Assistant(_) => "assistant",
             Message::ToolResult(_) => "toolResult",
+            Message::Custom(_) => "custom",
         })
         .collect()
 }

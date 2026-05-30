@@ -489,6 +489,7 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                     "content": content,
                 }));
             }
+            Message::Custom(_) => {}
         }
     }
     result

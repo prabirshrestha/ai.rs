@@ -307,6 +307,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<GoogleContent> 
                     });
                 }
             }
+            Message::Custom(_) => {}
         }
     }
 

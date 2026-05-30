@@ -350,6 +350,9 @@ async fn stream_assistant_response(
         convert(messages).await
     } else {
         messages
+            .into_iter()
+            .filter(|message| message.is_llm_message())
+            .collect()
     };
 
     let mut llm_context = context.llm_context();

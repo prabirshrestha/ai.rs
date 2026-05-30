@@ -4,7 +4,7 @@ use crate::types::{Message, ToolResultContent, UserContent, UserMessageContent};
 
 pub fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
     match messages.last() {
-        Some(Message::User(_)) | None => "user",
+        Some(Message::User(_)) | Some(Message::Custom(_)) | None => "user",
         Some(Message::Assistant(_)) | Some(Message::ToolResult(_)) => "agent",
     }
 }
@@ -22,6 +22,7 @@ pub fn has_copilot_vision_input(messages: &[Message]) -> bool {
             .iter()
             .any(|content| matches!(content, ToolResultContent::Image(_))),
         Message::Assistant(_) => false,
+        Message::Custom(_) => false,
     })
 }
 

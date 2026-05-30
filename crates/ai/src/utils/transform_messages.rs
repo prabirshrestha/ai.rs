@@ -92,6 +92,7 @@ where
                     ..assistant
                 }));
             }
+            Message::Custom(_) => {}
         }
     }
 
@@ -235,6 +236,7 @@ fn insert_synthetic_tool_results(messages: Vec<Message>) -> Vec<Message> {
                 );
                 result.push(message);
             }
+            Message::Custom(_) => {}
         }
     }
     insert(

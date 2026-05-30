@@ -1021,6 +1021,7 @@ pub fn convert_messages(
                     last_role = Some("toolResult");
                 }
             }
+            crate::types::Message::Custom(_) => {}
         }
         index += 1;
     }

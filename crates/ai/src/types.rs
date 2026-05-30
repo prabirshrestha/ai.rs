@@ -428,11 +428,24 @@ pub enum Message {
     Assistant(AssistantMessage),
     #[serde(rename = "toolResult")]
     ToolResult(ToolResultMessage),
+    #[serde(rename = "custom")]
+    Custom(Value),
 }
 
 impl Message {
     pub fn user_text<T: Into<String>>(text: T) -> Self {
         Self::User(UserMessage::text(text))
+    }
+
+    pub fn custom(value: Value) -> Self {
+        Self::Custom(value)
+    }
+
+    pub fn is_llm_message(&self) -> bool {
+        matches!(
+            self,
+            Self::User(_) | Self::Assistant(_) | Self::ToolResult(_)
+        )
     }
 }
 

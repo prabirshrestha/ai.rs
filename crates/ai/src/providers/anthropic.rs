@@ -860,6 +860,7 @@ pub fn convert_messages(
                 index = cursor - 1;
                 params.push(json!({ "role": "user", "content": tool_results }));
             }
+            crate::types::Message::Custom(_) => {}
         }
         index += 1;
     }
