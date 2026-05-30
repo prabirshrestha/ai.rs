@@ -30,7 +30,38 @@ fn registry() -> &'static RwLock<Vec<RegisteredApiProvider>> {
     REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
+fn mismatched_api_error(actual: &str, expected: &str) -> Error {
+    Error::UnsupportedApi(format!("Mismatched api: {actual} expected {expected}"))
+}
+
+fn wrap_registered_provider(provider: ApiProvider) -> ApiProvider {
+    let api = provider.api;
+    let expected_api = api.clone();
+    let stream = provider.stream;
+    let stream_simple = provider.stream_simple;
+
+    ApiProvider {
+        api,
+        stream: Arc::new({
+            let expected_api = expected_api.clone();
+            move |model, context, options| {
+                if model.api.as_str() != expected_api.as_str() {
+                    return Err(mismatched_api_error(&model.api, &expected_api));
+                }
+                stream(model, context, options)
+            }
+        }),
+        stream_simple: Arc::new(move |model, context, options| {
+            if model.api.as_str() != expected_api.as_str() {
+                return Err(mismatched_api_error(&model.api, &expected_api));
+            }
+            stream_simple(model, context, options)
+        }),
+    }
+}
+
 pub fn register_api_provider(provider: ApiProvider, source_id: Option<String>) {
+    let provider = wrap_registered_provider(provider);
     let mut registry = registry().write().expect("api registry poisoned");
     if let Some(existing) = registry
         .iter_mut()
@@ -86,10 +117,7 @@ where
 {
     Arc::new(move |model, context, options| {
         if model.api != api {
-            return Err(Error::UnsupportedApi(format!(
-                "Mismatched api: {} expected {}",
-                model.api, api
-            )));
+            return Err(mismatched_api_error(&model.api, api));
         }
         stream(model, context, options)
     })
@@ -104,10 +132,7 @@ where
 {
     Arc::new(move |model, context, options| {
         if model.api != api {
-            return Err(Error::UnsupportedApi(format!(
-                "Mismatched api: {} expected {}",
-                model.api, api
-            )));
+            return Err(mismatched_api_error(&model.api, api));
         }
         stream(model, context, options)
     })
@@ -204,6 +229,44 @@ mod tests {
 
         unregister_api_providers(source_id);
         assert!(get_api_provider("test-custom-api").is_none());
+    }
+
+    #[test]
+    fn registered_provider_rejects_mismatched_api_without_manual_wrap() {
+        let source_id = "api-registry-auto-wrap-test";
+        let called = Arc::new(AtomicBool::new(false));
+        register_api_provider(
+            ApiProvider {
+                api: "test-auto-wrap-api".to_string(),
+                stream: Arc::new(|_model, _context, _options| {
+                    Ok(done_stream(assistant_text("unreachable")))
+                }),
+                stream_simple: {
+                    let called = called.clone();
+                    Arc::new(move |_model, _context, _options| {
+                        called.store(true, Ordering::SeqCst);
+                        Ok(done_stream(assistant_text("unreachable")))
+                    })
+                },
+            },
+            Some(source_id.to_string()),
+        );
+
+        let provider = get_api_provider("test-auto-wrap-api").expect("registered provider");
+        let error = match (provider.stream_simple)(
+            test_model("actual-api"),
+            Context::default(),
+            SimpleStreamOptions::default(),
+        ) {
+            Ok(_) => panic!("expected mismatched api error"),
+            Err(error) => error,
+        };
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(
+            matches!(error, Error::UnsupportedApi(message) if message == "Mismatched api: actual-api expected test-auto-wrap-api")
+        );
+        unregister_api_providers(source_id);
     }
 
     #[test]
