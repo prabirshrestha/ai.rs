@@ -1364,6 +1364,76 @@ async fn sequential_tool_execution_mode_forces_batch_sequential() {
 }
 
 #[tokio::test]
+async fn sequential_tool_execution_mode_on_one_tool_forces_mixed_batch_sequential() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        tool_use_response(vec![
+            faux_tool_call(
+                "slow",
+                json!({ "value": "first" }),
+                Some("tool-1".to_string()),
+            ),
+            faux_tool_call(
+                "fast",
+                json!({ "value": "second" }),
+                Some("tool-2".to_string()),
+            ),
+        ]),
+        faux_assistant_message("done", None),
+    ]);
+
+    let release_first = Arc::new(Notify::new());
+    let first_done = Arc::new(AtomicBool::new(false));
+    let parallel_observed = Arc::new(AtomicBool::new(false));
+    let executions = Arc::new(Mutex::new(Vec::new()));
+    tokio::spawn({
+        let release_first = Arc::clone(&release_first);
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            release_first.notify_waiters();
+        }
+    });
+
+    run_agent_loop(
+        vec![Message::user_text("run both")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![
+                Arc::new(EchoTool {
+                    name: Some("slow"),
+                    mode: Some(ToolExecutionMode::Sequential),
+                    first_done: Some(Arc::clone(&first_done)),
+                    parallel_observed: Some(Arc::clone(&parallel_observed)),
+                    release_first: Some(Arc::clone(&release_first)),
+                    executions: Some(Arc::clone(&executions)),
+                    ..Default::default()
+                }),
+                Arc::new(EchoTool {
+                    name: Some("fast"),
+                    mode: Some(ToolExecutionMode::Parallel),
+                    first_done: Some(Arc::clone(&first_done)),
+                    parallel_observed: Some(Arc::clone(&parallel_observed)),
+                    executions: Some(Arc::clone(&executions)),
+                    ..Default::default()
+                }),
+            ],
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(!parallel_observed.load(Ordering::SeqCst));
+    assert_eq!(*executions.lock().await, vec!["first", "second"]);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn parallel_tool_execution_mode_allows_concurrent_tools() {
     let registration = register_faux_provider(None);
     registration.set_responses([
@@ -1461,6 +1531,7 @@ fn quiet_sink() -> AgentEventSink {
 
 #[derive(Default)]
 struct EchoTool {
+    name: Option<&'static str>,
     delay_first: bool,
     terminate_values: Vec<String>,
     mode: Option<ToolExecutionMode>,
@@ -1474,7 +1545,7 @@ struct EchoTool {
 impl AgentTool for EchoTool {
     fn definition(&self) -> Tool {
         Tool {
-            name: "echo".to_string(),
+            name: self.name.unwrap_or("echo").to_string(),
             description: "Echo tool".to_string(),
             parameters: json!({
                 "type": "object",
