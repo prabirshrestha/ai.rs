@@ -3,9 +3,14 @@ use std::collections::HashMap;
 use crate::types::{Message, ToolResultContent, UserContent, UserMessageContent};
 
 pub fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
-    match messages.last() {
-        Some(Message::User(_)) | Some(Message::Custom(_)) | None => "user",
+    match messages
+        .iter()
+        .rev()
+        .find(|message| !matches!(message, Message::Custom(_)))
+    {
+        Some(Message::User(_)) | None => "user",
         Some(Message::Assistant(_)) | Some(Message::ToolResult(_)) => "agent",
+        Some(Message::Custom(_)) => unreachable!("custom messages are filtered above"),
     }
 }
 
@@ -86,6 +91,37 @@ mod tests {
             timestamp: 1,
         });
         assert_eq!(infer_copilot_initiator(&[tool_result]), "agent");
+    }
+
+    #[test]
+    fn infers_initiator_from_latest_non_custom_message() {
+        let model = Model {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "github-copilot".to_string(),
+            base_url: "http://localhost".to_string(),
+            cost: ModelCost::default(),
+            ..Model::default()
+        };
+        let assistant = Message::Assistant(AssistantMessage::empty_for(&model));
+        let tool_result = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "tool-1".to_string(),
+            tool_name: "echo".to_string(),
+            content: vec![],
+            details: None,
+            is_error: false,
+            timestamp: 1,
+        });
+        let custom = || Message::custom(serde_json::json!({ "kind": "metadata" }));
+
+        assert_eq!(
+            infer_copilot_initiator(&[Message::user_text("hi"), custom()]),
+            "user"
+        );
+        assert_eq!(infer_copilot_initiator(&[assistant, custom()]), "agent");
+        assert_eq!(infer_copilot_initiator(&[tool_result, custom()]), "agent");
+        assert_eq!(infer_copilot_initiator(&[custom()]), "user");
     }
 
     #[test]
