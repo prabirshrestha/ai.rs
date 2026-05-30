@@ -722,6 +722,15 @@ async fn prepare_tool_call(
         .await
         {
             Ok(Some(before_result)) => {
+                if cancellation_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                        tool_call,
+                        "Operation aborted",
+                    )));
+                }
                 if before_result.block {
                     let reason = before_result
                         .reason
