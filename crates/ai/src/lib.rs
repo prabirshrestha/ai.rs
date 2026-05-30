@@ -35,10 +35,12 @@ pub use models::{
     get_supported_thinking_levels, models_are_equal, register_model,
 };
 pub use oauth::{
-    GitHubCopilotOAuthProvider, OAuthCredentials, OAuthDeviceCodeInfo, OAuthDeviceCodePollResult,
-    OAuthLoginCallbacks, OAuthPrompt, get_github_copilot_base_url, github_copilot_oauth_provider,
-    login_github_copilot, modify_github_copilot_models, normalize_domain,
-    poll_oauth_device_code_flow, refresh_github_copilot_token,
+    AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthCredentials, OAuthDeviceCodeInfo,
+    OAuthDeviceCodePollResult, OAuthLoginCallbacks, OAuthPrompt, anthropic_oauth_provider,
+    exchange_anthropic_authorization_code, get_github_copilot_base_url,
+    github_copilot_oauth_provider, login_github_copilot, modify_github_copilot_models,
+    normalize_domain, poll_oauth_device_code_flow, refresh_anthropic_token,
+    refresh_github_copilot_token,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,

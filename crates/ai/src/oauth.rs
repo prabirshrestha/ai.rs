@@ -11,6 +11,9 @@ use crate::types::Model;
 use crate::{Error, Result};
 
 const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const OAUTH_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
 const DEFAULT_COPILOT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
@@ -95,6 +98,31 @@ impl GitHubCopilotOAuthProvider {
 
 pub fn github_copilot_oauth_provider() -> GitHubCopilotOAuthProvider {
     GitHubCopilotOAuthProvider
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnthropicOAuthProvider;
+
+impl AnthropicOAuthProvider {
+    pub const fn id(self) -> &'static str {
+        "anthropic"
+    }
+
+    pub const fn name(self) -> &'static str {
+        "Anthropic (Claude Pro/Max)"
+    }
+
+    pub async fn refresh_token(self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
+        refresh_anthropic_token(&credentials.refresh).await
+    }
+
+    pub fn get_api_key(self, credentials: &OAuthCredentials) -> String {
+        credentials.access.clone()
+    }
+}
+
+pub fn anthropic_oauth_provider() -> AnthropicOAuthProvider {
+    AnthropicOAuthProvider
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +289,29 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     }
     enable_all_github_copilot_models(&credentials.access, enterprise_domain.as_deref()).await;
     Ok(credentials)
+}
+
+pub async fn exchange_anthropic_authorization_code(
+    code: &str,
+    state: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthCredentials> {
+    let client = reqwest::Client::new();
+    exchange_anthropic_authorization_code_at(
+        &client,
+        ANTHROPIC_TOKEN_URL,
+        code,
+        state,
+        verifier,
+        redirect_uri,
+    )
+    .await
+}
+
+pub async fn refresh_anthropic_token(refresh_token: &str) -> Result<OAuthCredentials> {
+    let client = reqwest::Client::new();
+    refresh_anthropic_token_at(&client, ANTHROPIC_TOKEN_URL, refresh_token).await
 }
 
 pub fn modify_github_copilot_models(
@@ -434,6 +485,72 @@ fn copilot_credentials_from_token(
     }
 }
 
+async fn exchange_anthropic_authorization_code_at(
+    client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    state: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthCredentials> {
+    let response = client
+        .post(token_url)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": ANTHROPIC_CLIENT_ID,
+            "code": code,
+            "state": state,
+            "redirect_uri": redirect_uri,
+            "code_verifier": verifier,
+        }))
+        .send()
+        .await?;
+    anthropic_credentials_from_response(response).await
+}
+
+async fn refresh_anthropic_token_at(
+    client: &reqwest::Client,
+    token_url: &str,
+    refresh_token: &str,
+) -> Result<OAuthCredentials> {
+    let response = client
+        .post(token_url)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": ANTHROPIC_CLIENT_ID,
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await?;
+    anthropic_credentials_from_response(response).await
+}
+
+async fn anthropic_credentials_from_response(
+    response: reqwest::Response,
+) -> Result<OAuthCredentials> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(Error::ApiStatus { status, body });
+    }
+
+    let token = response.json::<AnthropicTokenResponse>().await?;
+    Ok(anthropic_credentials_from_token(token))
+}
+
+fn anthropic_credentials_from_token(token: AnthropicTokenResponse) -> OAuthCredentials {
+    OAuthCredentials {
+        refresh: token.refresh_token,
+        access: token.access_token,
+        expires: crate::utils::time::now_millis()
+            .saturating_add(token.expires_in.saturating_mul(1000))
+            .saturating_sub(OAUTH_TOKEN_EXPIRY_SKEW_MS),
+        enterprise_url: None,
+    }
+}
+
 fn copilot_headers(refresh_token: Option<&str>) -> Result<reqwest::header::HeaderMap> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -562,12 +679,23 @@ struct CopilotTokenResponse {
     expires_at: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct AnthropicTokenResponse {
+    access_token: String,
+    refresh_token: String,
+    expires_in: u64,
+    #[serde(rename = "scope")]
+    _scope: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::types::ModelCost;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn normalizes_enterprise_domains() {
@@ -719,6 +847,68 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_provider_metadata_matches_upstream() {
+        let provider = anthropic_oauth_provider();
+        assert_eq!(provider.id(), "anthropic");
+        assert_eq!(provider.name(), "Anthropic (Claude Pro/Max)");
+    }
+
+    #[tokio::test]
+    async fn refresh_anthropic_token_omits_scope() {
+        let captured_body = Arc::new(Mutex::new(None));
+        let token_url = spawn_anthropic_token_server(Arc::clone(&captured_body)).await;
+        let client = reqwest::Client::new();
+
+        let credentials = refresh_anthropic_token_at(&client, &token_url, "refresh-token")
+            .await
+            .unwrap();
+
+        assert_eq!(credentials.access, "access-token");
+        assert_eq!(credentials.refresh, "new-refresh-token");
+        let body = captured_body
+            .lock()
+            .expect("captured body lock poisoned")
+            .clone()
+            .expect("captured request body");
+        assert_eq!(body["grant_type"], "refresh_token");
+        assert_eq!(body["client_id"], ANTHROPIC_CLIENT_ID);
+        assert_eq!(body["refresh_token"], "refresh-token");
+        assert!(body.get("scope").is_none());
+    }
+
+    #[tokio::test]
+    async fn anthropic_authorization_exchange_preserves_redirect_uri() {
+        let captured_body = Arc::new(Mutex::new(None));
+        let token_url = spawn_anthropic_token_server(Arc::clone(&captured_body)).await;
+        let client = reqwest::Client::new();
+
+        let credentials = exchange_anthropic_authorization_code_at(
+            &client,
+            &token_url,
+            "manual-code",
+            "state-value",
+            "verifier-value",
+            "http://localhost:53692/callback",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(credentials.access, "access-token");
+        assert_eq!(credentials.refresh, "new-refresh-token");
+        let body = captured_body
+            .lock()
+            .expect("captured body lock poisoned")
+            .clone()
+            .expect("captured request body");
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["client_id"], ANTHROPIC_CLIENT_ID);
+        assert_eq!(body["code"], "manual-code");
+        assert_eq!(body["state"], "state-value");
+        assert_eq!(body["code_verifier"], "verifier-value");
+        assert_eq!(body["redirect_uri"], "http://localhost:53692/callback");
+    }
+
+    #[test]
     fn copilot_headers_include_static_client_metadata_and_bearer() {
         let headers = copilot_headers(Some("refresh-token")).unwrap();
 
@@ -752,5 +942,69 @@ mod tests {
             ]),
             "client_id=Iv1.b507a08c87ecfe98&scope=read%3Auser&device_code=abc+def%2Fghi"
         );
+    }
+
+    async fn spawn_anthropic_token_server(
+        captured_body: Arc<Mutex<Option<serde_json::Value>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            *captured_body.lock().expect("captured body lock poisoned") =
+                Some(serde_json::from_str(body).unwrap());
+            let response_body = serde_json::json!({
+                "access_token": "access-token",
+                "refresh_token": "new-refresh-token",
+                "expires_in": 3600,
+                "scope": "ignored"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}/oauth/token")
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if http_request_complete(&bytes) {
+                break;
+            }
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn http_request_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
     }
 }
