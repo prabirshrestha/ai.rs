@@ -1832,6 +1832,36 @@ mod tests {
         assert_eq!(result.usage.cost.total, 3.0);
     }
 
+    #[test]
+    fn response_service_tier_pricing_multipliers_match_openai_models() {
+        for (model_id, service_tier, multiplier) in [
+            ("gpt-5.4", "priority", 2.0),
+            ("gpt-5.5", "priority", 2.5),
+            ("gpt-5.5", "flex", 0.5),
+        ] {
+            let mut model = model();
+            model.id = model_id.to_string();
+            let mut usage = Usage {
+                cost: crate::types::UsageCost {
+                    input: 2.0,
+                    output: 4.0,
+                    cache_read: 1.0,
+                    cache_write: 3.0,
+                    total: 10.0,
+                },
+                ..Default::default()
+            };
+
+            apply_service_tier_pricing(&mut usage, service_tier, &model);
+
+            assert_eq!(usage.cost.input, 2.0 * multiplier);
+            assert_eq!(usage.cost.output, 4.0 * multiplier);
+            assert_eq!(usage.cost.cache_read, multiplier);
+            assert_eq!(usage.cost.cache_write, 3.0 * multiplier);
+            assert_eq!(usage.cost.total, 10.0 * multiplier);
+        }
+    }
+
     #[tokio::test]
     async fn response_function_call_done_uses_final_arguments_without_deltas() {
         let body = sse_body(&[
