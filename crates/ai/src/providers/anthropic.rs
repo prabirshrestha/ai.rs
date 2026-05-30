@@ -2051,6 +2051,13 @@ mod tests {
             Some("vscode-chat")
         );
         assert!(request_headers.get("anthropic-beta").is_none());
+
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), false, None);
+        assert_eq!(payload["model"], json!("claude-sonnet-4.6"));
+        assert_eq!(payload["stream"], json!(true));
+        assert_eq!(payload["max_tokens"], json!(model.max_tokens));
+        assert!(payload["messages"].as_array().is_some());
     }
 
     #[test]
