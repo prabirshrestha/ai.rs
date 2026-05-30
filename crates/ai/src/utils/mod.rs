@@ -1,6 +1,7 @@
 pub mod diagnostics;
 pub mod hash;
 pub mod headers;
+pub mod http;
 pub mod json;
 pub mod overflow;
 pub mod sanitize;

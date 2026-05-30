@@ -177,29 +177,33 @@ async fn run_stream(
         Ok(base_url) => base_url,
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
+    let request_url = format!("{}/chat/completions", trim_end_slash(&base_url));
+    let request_headers = match headers(
+        &model,
+        &context,
+        &options.base,
+        &api_key,
+        &compat,
+        cache_retention,
+    ) {
+        Ok(headers) => headers,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     let client = reqwest::Client::new();
-    let mut request = client
-        .post(format!("{}/chat/completions", trim_end_slash(&base_url)))
-        .headers(
-            match headers(
-                &model,
-                &context,
-                &options.base,
-                &api_key,
-                &compat,
-                cache_retention,
-            ) {
-                Ok(headers) => headers,
-                Err(error) => return Err(StreamFailure::new(output, error)),
-            },
-        )
-        .json(&payload);
-    if let Some(timeout_ms) = options.base.timeout_ms {
-        request = request.timeout(Duration::from_millis(timeout_ms));
-    }
-
-    let response = match request.send().await {
+    let response = match crate::utils::http::send_with_retries(&options.base, || {
+        let mut request = client
+            .post(request_url.as_str())
+            .headers(request_headers.clone())
+            .json(&payload);
+        if let Some(timeout_ms) = options.base.timeout_ms {
+            request = request.timeout(Duration::from_millis(timeout_ms));
+        }
+        request
+    })
+    .await
+    {
         Ok(response) => response,
+        Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     if let Some(on_response) = &options.base.on_response {
