@@ -6,8 +6,8 @@ use ai::{
     AgentLoopConfig, AgentLoopTurnUpdate, AgentOptions, AgentResult, AgentState, AgentTool,
     AgentToolResult, BeforeToolCallContext, BeforeToolCallResult, FauxAssistantMessageOptions,
     FauxResponseStep, Message, QueueMode, StopReason, Tool, ToolExecutionMode, agent_loop,
-    agent_loop_continue, faux_assistant_message, faux_text, faux_tool_call, register_faux_provider,
-    run_agent_loop, run_agent_loop_continue,
+    agent_loop_continue, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
+    register_faux_provider, run_agent_loop, run_agent_loop_continue,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -91,6 +91,34 @@ async fn agent_prompt_records_user_and_assistant_messages() {
         panic!("expected assistant message");
     };
     assert_eq!(assistant.content, vec![faux_text("hello")]);
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_prompt_preserves_thinking_content_blocks() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message(
+        vec![faux_thinking("step by step"), faux_text("4")],
+        None,
+    )]);
+    let mut options = AgentOptions::new(registration.get_model());
+    options.initial_state.reasoning_level = Some(ai::ModelThinkingLevel::Low);
+    let agent = Agent::new(options);
+
+    agent
+        .prompt_text("what is 2 + 2?", Vec::new())
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let Message::Assistant(assistant) = &state.messages[1] else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(
+        assistant.content,
+        vec![faux_thinking("step by step"), faux_text("4")]
+    );
 
     registration.unregister();
 }
