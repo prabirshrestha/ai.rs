@@ -2141,6 +2141,72 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_capturing_sse_server(
+        body: String,
+        captured_payload: Arc<Mutex<Option<Value>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            *captured_payload.lock().unwrap() = Some(request_body_json(&request));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = vec![0u8; 4096];
+        let mut expected_len = None;
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_len.is_none() {
+                expected_len = expected_request_len(&request);
+            }
+            if expected_len.is_some_and(|len| request.len() >= len) {
+                break;
+            }
+        }
+        request
+    }
+
+    fn expected_request_len(request: &[u8]) -> Option<usize> {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?;
+        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        Some(header_end + 4 + content_length)
+    }
+
+    fn request_body_json(request: &[u8]) -> Value {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("request headers");
+        let expected_len = expected_request_len(request).expect("request length");
+        serde_json::from_slice(&request[header_end + 4..expected_len]).expect("request JSON")
+    }
+
     async fn spawn_hanging_sse_server(body: String) -> (String, Arc<tokio::sync::Notify>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3787,6 +3853,85 @@ mod tests {
             json!({
                 "role": "assistant",
                 "content": [{ "type": "text", "text": "internal reasoning" }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_as_text_replay_reaches_endpoint() {
+        let captured_payload = Arc::new(Mutex::new(None));
+        let body = chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-thinking-text",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-5.5",
+                "choices": [{ "index": 0, "delta": { "content": "ok" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-thinking-text",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-5.5",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            }),
+        ]);
+        let base_url = spawn_capturing_sse_server(body, Arc::clone(&captured_payload)).await;
+        let mut model = model();
+        model.base_url = base_url;
+        model.compat.openai_completions.requires_thinking_as_text = Some(true);
+        let assistant = assistant_message(
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "internal reasoning".to_string(),
+                    thinking_signature: None,
+                    redacted: None,
+                }),
+                AssistantContent::Text(TextContent {
+                    text: "visible answer".to_string(),
+                    text_signature: None,
+                }),
+            ],
+            &model,
+        );
+
+        let mut stream = stream_openai_completions(
+            model,
+            Context {
+                messages: vec![
+                    Message::user_text("hello"),
+                    Message::Assistant(assistant),
+                    Message::user_text("continue"),
+                ],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+        let payload = captured_payload
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured payload");
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(
+            payload["messages"][1],
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "internal reasoning" },
+                    { "type": "text", "text": "visible answer" }
+                ]
             })
         );
     }
