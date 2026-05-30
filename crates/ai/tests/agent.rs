@@ -567,6 +567,77 @@ async fn agent_get_api_key_falls_back_to_static_api_key() {
 }
 
 #[tokio::test]
+async fn agent_get_api_key_resolves_for_each_llm_turn() {
+    let registration = register_faux_provider(None);
+    let observed_api_keys = Arc::new(Mutex::new(Vec::new()));
+    let next_key = Arc::new(AtomicUsize::new(1));
+    let stream_call = Arc::new(AtomicUsize::new(0));
+
+    let mut options = AgentOptions::new(registration.get_model());
+    options.options = ai::SimpleStreamOptions {
+        stream: ai::StreamOptions {
+            api_key: Some("static-key".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    options.get_api_key = Some(Arc::new({
+        let next_key = Arc::clone(&next_key);
+        move |_provider| {
+            let next_key = Arc::clone(&next_key);
+            Box::pin(async move {
+                let key = next_key.fetch_add(1, Ordering::SeqCst);
+                Some(format!("dynamic-key-{key}"))
+            })
+        }
+    }));
+    options.stream_fn = Some(Arc::new({
+        let observed_api_keys = Arc::clone(&observed_api_keys);
+        let stream_call = Arc::clone(&stream_call);
+        move |model, _context, options| {
+            let observed_api_keys = Arc::clone(&observed_api_keys);
+            let stream_call = Arc::clone(&stream_call);
+            Box::pin(async move {
+                observed_api_keys.lock().await.push(options.stream.api_key);
+                let call_index = stream_call.fetch_add(1, Ordering::SeqCst);
+                let mut message = if call_index == 0 {
+                    tool_use_response(vec![faux_tool_call(
+                        "echo",
+                        json!({ "value": "hello" }),
+                        Some("tool-1".to_string()),
+                    )])
+                } else {
+                    faux_assistant_message("done", None)
+                };
+                message.api = model.api;
+                message.provider = model.provider;
+                message.model = model.id;
+                let (mut sender, stream) = ai::AssistantMessageEventStream::channel();
+                sender.push(ai::AssistantMessageEvent::Done {
+                    reason: message.stop_reason,
+                    message,
+                });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+    agent.set_tools(vec![Arc::new(EchoTool::default())]).await;
+
+    agent.prompt_text("hello", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        *observed_api_keys.lock().await,
+        vec![
+            Some("dynamic-key-1".to_string()),
+            Some("dynamic-key-2".to_string())
+        ]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_loop_ignores_message_updates_before_stream_start() {
     let registration = register_faux_provider(None);
     let events = Arc::new(Mutex::new(Vec::new()));
