@@ -1301,6 +1301,48 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_sends_store_false_by_default() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["store"], json!(false));
+    }
+
+    #[test]
+    fn response_payload_forwards_requested_service_tier() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            service_tier: Some("priority".to_string()),
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["service_tier"], json!("priority"));
+    }
+
+    #[test]
     fn response_payload_null_reasoning_summary_alone_does_not_enable_reasoning() {
         let model = model();
         let context = Context {
