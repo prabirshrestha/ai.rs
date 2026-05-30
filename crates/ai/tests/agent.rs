@@ -2088,6 +2088,55 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
 }
 
 #[tokio::test]
+async fn before_tool_call_mutable_args_execute_without_revalidation() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        tool_use_response(vec![faux_tool_call(
+            "raw",
+            json!({ "value": "valid" }),
+            Some("tool-1".to_string()),
+        )]),
+        faux_assistant_message("done", None),
+    ]);
+
+    let received_args = Arc::new(Mutex::new(Vec::new()));
+    let mut config = AgentLoopConfig::new(registration.get_model());
+    config.before_tool_call = Some(Arc::new(
+        |context: BeforeToolCallContext, _token: Option<CancellationToken>| {
+            Box::pin(async move {
+                context.mutable_args.set(json!({ "value": 42 })).await;
+                Ok(None)
+            })
+        },
+    ));
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("run raw")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(RecordingArgsTool {
+                received_args: Arc::clone(&received_args),
+            })],
+        },
+        config,
+        quiet_sink(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*received_args.lock().await, vec![json!({ "value": 42 })]);
+    let Message::ToolResult(result) = &messages[2] else {
+        panic!("expected tool result");
+    };
+    assert!(!result.is_error);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn prepare_tool_arguments_runs_before_validation() {
     let registration = register_faux_provider(None);
     registration.set_responses([
