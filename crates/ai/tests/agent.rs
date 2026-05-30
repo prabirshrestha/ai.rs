@@ -292,6 +292,29 @@ async fn agent_queue_modes_can_be_changed_after_construction() {
 }
 
 #[tokio::test]
+async fn agent_queues_can_be_cleared_independently() {
+    let registration = register_faux_provider(None);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+
+    agent.steer(Message::user_text("steer")).await;
+    agent.follow_up(Message::user_text("follow")).await;
+    assert!(agent.has_queued_messages().await);
+
+    agent.clear_steering_queue().await;
+    assert!(agent.has_queued_messages().await);
+
+    agent.clear_follow_up_queue().await;
+    assert!(!agent.has_queued_messages().await);
+
+    agent.steer(Message::user_text("steer again")).await;
+    agent.follow_up(Message::user_text("follow again")).await;
+    agent.clear_all_queues().await;
+    assert!(!agent.has_queued_messages().await);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_continue_run_processes_queued_follow_up_after_assistant_tail() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("processed", None)]);

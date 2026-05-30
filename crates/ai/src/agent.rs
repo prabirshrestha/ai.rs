@@ -272,9 +272,17 @@ impl Agent {
         self.follow_up_queue.lock().await.mode
     }
 
-    pub async fn clear_all_queues(&self) {
+    pub async fn clear_steering_queue(&self) {
         self.steering_queue.lock().await.clear();
+    }
+
+    pub async fn clear_follow_up_queue(&self) {
         self.follow_up_queue.lock().await.clear();
+    }
+
+    pub async fn clear_all_queues(&self) {
+        self.clear_steering_queue().await;
+        self.clear_follow_up_queue().await;
     }
 
     pub async fn has_queued_messages(&self) -> bool {
