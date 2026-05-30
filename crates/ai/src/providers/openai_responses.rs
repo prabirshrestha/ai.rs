@@ -605,6 +605,7 @@ async fn run_stream(
                 {
                     output.stop_reason = StopReason::ToolUse;
                 }
+                break;
             }
             "error" => {
                 let code = parsed
@@ -1240,6 +1241,8 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::types::{Message, ModelCost, ToolResultMessage};
     use futures::StreamExt;
@@ -1962,6 +1965,69 @@ mod tests {
         assert_eq!(result.response_id.as_deref(), Some("resp_completed"));
     }
 
+    #[tokio::test]
+    async fn terminal_response_events_finish_without_waiting_for_sse_close() {
+        for (event_type, status, expected_stop_reason) in [
+            ("response.completed", "completed", StopReason::Stop),
+            ("response.incomplete", "incomplete", StopReason::Length),
+        ] {
+            let body = sse_body(&[json!({
+                "type": event_type,
+                "response": {
+                    "id": format!("resp_{status}"),
+                    "status": status,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            })]);
+            let (base_url, release_server) = spawn_hanging_sse_server(body).await;
+            let mut model = model();
+            model.base_url = base_url;
+
+            let mut stream = stream_openai_responses(
+                model,
+                Context {
+                    messages: vec![Message::user_text("hello")],
+                    ..Default::default()
+                },
+                OpenAIResponsesOptions {
+                    base: StreamOptions {
+                        api_key: Some("test-key".to_string()),
+                        cache_retention: Some(CacheRetention::None),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream.result(),
+            )
+            .await
+            {
+                Ok(result) => result.unwrap(),
+                Err(error) => {
+                    release_server.notify_waiters();
+                    panic!("stream did not finish after {event_type}: {error}");
+                }
+            };
+            release_server.notify_waiters();
+
+            let expected_response_id = format!("resp_{status}");
+            assert_eq!(result.stop_reason, expected_stop_reason, "{event_type}");
+            assert_eq!(
+                result.response_id.as_deref(),
+                Some(expected_response_id.as_str()),
+                "{event_type}"
+            );
+        }
+    }
+
     #[test]
     fn response_service_tier_pricing_multipliers_match_openai_models() {
         for (model_id, service_tier, multiplier) in [
@@ -2524,6 +2590,28 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    async fn spawn_hanging_sse_server(body: String) -> (String, Arc<tokio::sync::Notify>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_task = Arc::clone(&release);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            release_task.notified().await;
+        });
+        (format!("http://{addr}"), release)
     }
 
     async fn spawn_status_server(status: u16, reason: &str, body: String) -> String {
