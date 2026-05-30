@@ -16,7 +16,7 @@ pub mod stream;
 pub mod types;
 pub mod utils;
 
-pub use agent::{Agent, AgentOptions, AgentState};
+pub use agent::{Agent, AgentListenerId, AgentOptions, AgentState};
 pub use agent_error::{AgentError, AgentResult};
 pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,

@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     AssistantContent, AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions,
     StopReason, TextContent, Usage,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
@@ -15,6 +16,8 @@ use crate::agent_types::{
     ShouldStopAfterTurnFn, StreamFn, ToolExecutionMode, TransformContextFn, user_message,
 };
 use crate::{AgentError, AgentResult};
+
+pub type AgentListenerId = u64;
 
 #[derive(Clone)]
 pub struct AgentState {
@@ -125,7 +128,8 @@ impl PendingMessageQueue {
 
 pub struct Agent {
     state: Arc<Mutex<AgentState>>,
-    listeners: Arc<Mutex<Vec<AgentEventSink>>>,
+    listeners: Arc<Mutex<Vec<(AgentListenerId, AgentEventSink)>>>,
+    next_listener_id: Arc<AtomicU64>,
     steering_queue: Arc<Mutex<PendingMessageQueue>>,
     follow_up_queue: Arc<Mutex<PendingMessageQueue>>,
     convert_to_llm: Option<ConvertToLlmFn>,
@@ -139,6 +143,7 @@ pub struct Agent {
     session_id: Option<String>,
     base_options: SimpleStreamOptions,
     active_token: Arc<Mutex<Option<CancellationToken>>>,
+    idle_notify: Arc<Notify>,
     tool_execution: ToolExecutionMode,
 }
 
@@ -147,6 +152,7 @@ impl Agent {
         Self {
             state: Arc::new(Mutex::new(options.initial_state)),
             listeners: Arc::new(Mutex::new(Vec::new())),
+            next_listener_id: Arc::new(AtomicU64::new(1)),
             steering_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.steering_mode))),
             follow_up_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.follow_up_mode))),
             convert_to_llm: options.convert_to_llm,
@@ -160,6 +166,7 @@ impl Agent {
             session_id: options.session_id,
             base_options: options.options,
             active_token: Arc::new(Mutex::new(None)),
+            idle_notify: Arc::new(Notify::new()),
             tool_execution: options.tool_execution,
         }
     }
@@ -168,8 +175,17 @@ impl Agent {
         self.state.lock().await.clone()
     }
 
-    pub async fn subscribe(&self, listener: AgentEventSink) {
-        self.listeners.lock().await.push(listener);
+    pub async fn subscribe(&self, listener: AgentEventSink) -> AgentListenerId {
+        let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
+        self.listeners.lock().await.push((id, listener));
+        id
+    }
+
+    pub async fn unsubscribe(&self, id: AgentListenerId) -> bool {
+        let mut listeners = self.listeners.lock().await;
+        let before = listeners.len();
+        listeners.retain(|(listener_id, _)| *listener_id != id);
+        listeners.len() != before
     }
 
     pub async fn steer(&self, message: AgentMessage) {
@@ -193,6 +209,20 @@ impl Agent {
     pub async fn abort(&self) {
         if let Some(token) = self.active_token.lock().await.as_ref() {
             token.cancel();
+        }
+    }
+
+    pub async fn cancellation_token(&self) -> Option<CancellationToken> {
+        self.active_token.lock().await.clone()
+    }
+
+    pub async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.idle_notify.notified();
+            if self.active_token.lock().await.is_none() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -296,6 +326,7 @@ impl Agent {
         state.pending_tool_calls.clear();
         drop(state);
         *self.active_token.lock().await = None;
+        self.idle_notify.notify_waiters();
         failure_result
     }
 
@@ -430,7 +461,8 @@ impl Agent {
                         _ => {}
                     }
                 }
-                for listener in listeners.lock().await.iter() {
+                let listeners = listeners.lock().await.clone();
+                for (_, listener) in listeners {
                     listener(event.clone()).await?;
                 }
                 Ok(())

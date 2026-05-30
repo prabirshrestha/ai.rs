@@ -34,6 +34,177 @@ async fn agent_prompt_records_user_and_assistant_messages() {
 }
 
 #[tokio::test]
+async fn agent_subscribe_can_unsubscribe_listener() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+    let event_count = Arc::new(AtomicUsize::new(0));
+
+    let listener_id = agent
+        .subscribe(Arc::new({
+            let event_count = Arc::clone(&event_count);
+            move |_event| {
+                let event_count = Arc::clone(&event_count);
+                Box::pin(async move {
+                    event_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    assert!(agent.unsubscribe(listener_id).await);
+    assert!(!agent.unsubscribe(listener_id).await);
+
+    agent.prompt_text("hi", Vec::new()).await.unwrap();
+    assert_eq!(event_count.load(Ordering::SeqCst), 0);
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_wait_for_idle_waits_for_async_listeners() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+    let listener_entered = Arc::new(Notify::new());
+    let release_listener = Arc::new(Notify::new());
+
+    agent
+        .subscribe(Arc::new({
+            let listener_entered = Arc::clone(&listener_entered);
+            let release_listener = Arc::clone(&release_listener);
+            move |event| {
+                let listener_entered = Arc::clone(&listener_entered);
+                let release_listener = Arc::clone(&release_listener);
+                Box::pin(async move {
+                    if matches!(event, AgentEvent::AgentEnd { .. }) {
+                        listener_entered.notify_waiters();
+                        release_listener.notified().await;
+                    }
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    let prompt = agent.prompt_text("hi", Vec::new());
+    tokio::pin!(prompt);
+    tokio::select! {
+        _ = listener_entered.notified() => {}
+        result = &mut prompt => panic!("prompt completed before agent_end listener blocked: {result:?}"),
+    }
+
+    let idle = agent.wait_for_idle();
+    tokio::pin!(idle);
+    tokio::select! {
+        _ = &mut idle => panic!("agent became idle before awaited listener settled"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+    }
+
+    release_listener.notify_waiters();
+    prompt.await.unwrap();
+    idle.await;
+    assert!(!agent.state().await.is_streaming);
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_exposes_active_cancellation_token() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+    let agent = Arc::new(Agent::new(AgentOptions::new(registration.get_model())));
+    let saw_active_token = Arc::new(AtomicBool::new(false));
+
+    agent
+        .subscribe(Arc::new({
+            let agent = Arc::clone(&agent);
+            let saw_active_token = Arc::clone(&saw_active_token);
+            move |event| {
+                let agent = Arc::clone(&agent);
+                let saw_active_token = Arc::clone(&saw_active_token);
+                Box::pin(async move {
+                    if matches!(event, AgentEvent::AgentStart) {
+                        saw_active_token
+                            .store(agent.cancellation_token().await.is_some(), Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+            }
+        }))
+        .await;
+
+    agent.prompt_text("hi", Vec::new()).await.unwrap();
+    assert!(saw_active_token.load(Ordering::SeqCst));
+    assert!(agent.cancellation_token().await.is_none());
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_continue_run_processes_queued_follow_up_after_assistant_tail() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("processed", None)]);
+    let mut options = AgentOptions::new(registration.get_model());
+    options.initial_state.messages = vec![
+        Message::user_text("initial"),
+        Message::Assistant(faux_assistant_message("initial response", None)),
+    ];
+    let agent = Agent::new(options);
+
+    agent
+        .follow_up(Message::user_text("queued follow-up"))
+        .await;
+    agent.continue_run().await.unwrap();
+
+    let state = agent.state().await;
+    assert_eq!(
+        message_roles(&state.messages),
+        vec!["user", "assistant", "user", "assistant"]
+    );
+    assert!(matches!(state.messages[2], Message::User(_)));
+    assert!(matches!(state.messages[3], Message::Assistant(_)));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_continue_run_keeps_one_at_a_time_steering_from_assistant_tail() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([
+        faux_assistant_message("processed 1", None),
+        faux_assistant_message("processed 2", None),
+    ]);
+    let mut options = AgentOptions::new(registration.get_model());
+    options.initial_state.messages = vec![
+        Message::user_text("initial"),
+        Message::Assistant(faux_assistant_message("initial response", None)),
+    ];
+    let agent = Agent::new(options);
+
+    agent.steer(Message::user_text("steering 1")).await;
+    agent.steer(Message::user_text("steering 2")).await;
+    agent.continue_run().await.unwrap();
+
+    let state = agent.state().await;
+    assert_eq!(
+        message_roles(&state.messages),
+        vec![
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant"
+        ]
+    );
+    assert_eq!(registration.state.call_count(), 2);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn run_agent_loop_is_exported_from_ai_crate() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("done", None)]);
