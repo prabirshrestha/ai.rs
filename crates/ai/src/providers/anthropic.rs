@@ -733,27 +733,23 @@ pub fn convert_messages(
         match &transformed[index] {
             crate::types::Message::User(user) => match &user.content {
                 UserMessageContent::Text(text) => {
-                    if !text.trim().is_empty() {
-                        params
-                            .push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
-                    }
+                    params.push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
                 }
                 UserMessageContent::Parts(parts) => {
                     let blocks: Vec<Value> = parts
                         .iter()
-                        .filter_map(|item| match item {
-                            UserContent::Text(text) if !text.text.trim().is_empty() => Some(
-                                json!({ "type": "text", "text": sanitize_surrogates(&text.text) }),
-                            ),
-                            UserContent::Text(_) => None,
-                            UserContent::Image(image) => Some(json!({
+                        .map(|item| match item {
+                            UserContent::Text(text) => {
+                                json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
+                            }
+                            UserContent::Image(image) => json!({
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
                                     "media_type": image.mime_type,
                                     "data": image.data
                                 }
-                            })),
+                            }),
                         })
                         .collect();
                     if !blocks.is_empty() {
@@ -1369,6 +1365,28 @@ mod tests {
         assert_eq!(
             assistant["content"],
             json!([{ "type": "thinking", "thinking": "internal reasoning", "signature": "" }])
+        );
+    }
+
+    #[test]
+    fn empty_user_text_is_preserved_for_anthropic_messages() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let messages = vec![
+            crate::types::Message::user_text(""),
+            crate::types::Message::User(crate::types::UserMessage {
+                content: crate::types::UserMessageContent::Parts(vec![
+                    crate::types::UserContent::text(""),
+                ]),
+                timestamp: crate::utils::time::now_millis(),
+            }),
+        ];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+
+        assert_eq!(converted[0], json!({ "role": "user", "content": "" }));
+        assert_eq!(
+            converted[1],
+            json!({ "role": "user", "content": [{ "type": "text", "text": "" }] })
         );
     }
 
