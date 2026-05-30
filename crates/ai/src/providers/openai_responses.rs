@@ -1840,6 +1840,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_function_call_done_replaces_delta_arguments() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "edit",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "delta": "{\"path\":\"README.md\""
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "delta": ",\"content\":\"updated\"}"
+            }),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "arguments": "{\"path\":\"README.md\",\"content\":\"updated\"}"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "edit",
+                    "arguments": "{\"path\":\"README.md\",\"content\":\"updated\"}"
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("edit")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let mut ended_tool_call = None;
+        while let Some(event) = stream.next().await {
+            if let AssistantMessageEvent::ToolCallEnd { tool_call, .. } = event {
+                ended_tool_call = Some(tool_call);
+            }
+        }
+        let result = stream.result().await.unwrap();
+        let expected = ToolCall {
+            id: "call_test|fc_test".to_string(),
+            name: "edit".to_string(),
+            arguments: json!({ "path": "README.md", "content": "updated" }),
+            thought_signature: None,
+        };
+
+        assert_eq!(ended_tool_call, Some(expected.clone()));
+        assert_eq!(result.content, vec![AssistantContent::ToolCall(expected)]);
+    }
+
+    #[tokio::test]
     async fn formats_http_status_errors_like_openai_responses() {
         let base_url = spawn_status_server(
             400,
