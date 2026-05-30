@@ -1684,6 +1684,35 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_sets_proxy_prompt_cache_when_long_retention_is_supported() {
+        let mut model = model();
+        model.base_url = "https://proxy.example.com/v1".to_string();
+        let compat = get_compat(&model);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                session_id: Some("session-proxy".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &compat,
+            CacheRetention::Long,
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("session-proxy"));
+        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
+    }
+
+    #[test]
     fn chat_payload_omits_default_max_token_fields() {
         let model = model();
         let context = Context {

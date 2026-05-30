@@ -1634,6 +1634,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn payload_omits_cache_control_when_cache_retention_is_none() {
+        let model = anthropic_model("claude-haiku-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                system_prompt: Some("You are helpful.".to_string()),
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions::default(),
+            false,
+            None,
+        );
+
+        assert!(payload["system"][0].get("cache_control").is_none());
+        assert!(
+            payload["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
     fn lookup_tool() -> Tool {
         Tool {
             name: "lookup".to_string(),
