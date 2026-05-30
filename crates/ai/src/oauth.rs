@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::get_models;
@@ -236,7 +237,7 @@ pub async fn refresh_github_copilot_token(
         return Err(Error::ApiStatus { status, body });
     }
 
-    let token = response.json::<CopilotTokenResponse>().await?;
+    let token = parse_copilot_token_response(response.json::<Value>().await?)?;
     Ok(copilot_credentials_from_token(
         refresh_token,
         enterprise_domain.and_then(normalize_domain),
@@ -399,27 +400,7 @@ async fn poll_for_github_access_token(
                     let body = response.text().await.unwrap_or_default();
                     return Err(Error::ApiStatus { status, body });
                 }
-                let raw = response.json::<DeviceTokenResponse>().await?;
-                Ok(match raw {
-                    DeviceTokenResponse::Success { access_token, .. } => {
-                        OAuthDeviceCodePollResult::Complete(access_token)
-                    }
-                    DeviceTokenResponse::Error {
-                        error,
-                        error_description,
-                    } => match error.as_str() {
-                        "authorization_pending" => OAuthDeviceCodePollResult::Pending,
-                        "slow_down" => OAuthDeviceCodePollResult::SlowDown,
-                        _ => {
-                            let suffix = error_description
-                                .map(|description| format!(": {description}"))
-                                .unwrap_or_default();
-                            OAuthDeviceCodePollResult::Failed(format!(
-                                "Device flow failed: {error}{suffix}"
-                            ))
-                        }
-                    },
-                })
+                Ok(parse_device_token_response(response.json::<Value>().await?))
             }
         },
     )
@@ -467,6 +448,57 @@ fn get_base_url_from_token(token: &str) -> Option<String> {
         .map(|host| format!("api.{host}"))
         .unwrap_or_else(|| proxy_host.to_string());
     Some(format!("https://{api_host}"))
+}
+
+fn parse_device_token_response(raw: Value) -> OAuthDeviceCodePollResult<String> {
+    let Some(object) = raw.as_object() else {
+        return OAuthDeviceCodePollResult::Failed("Invalid device token response".to_string());
+    };
+
+    if let Some(access_token) = object.get("access_token").and_then(Value::as_str) {
+        return OAuthDeviceCodePollResult::Complete(access_token.to_string());
+    }
+
+    let Some(error) = object.get("error").and_then(Value::as_str) else {
+        return OAuthDeviceCodePollResult::Failed("Invalid device token response".to_string());
+    };
+
+    match error {
+        "authorization_pending" => OAuthDeviceCodePollResult::Pending,
+        "slow_down" => OAuthDeviceCodePollResult::SlowDown,
+        error => {
+            let suffix = object
+                .get("error_description")
+                .and_then(Value::as_str)
+                .map(|description| format!(": {description}"))
+                .unwrap_or_default();
+            OAuthDeviceCodePollResult::Failed(format!("Device flow failed: {error}{suffix}"))
+        }
+    }
+}
+
+fn parse_copilot_token_response(raw: Value) -> Result<CopilotTokenResponse> {
+    let Some(object) = raw.as_object() else {
+        return Err(Error::Provider(
+            "Invalid Copilot token response".to_string(),
+        ));
+    };
+
+    let Some(token) = object.get("token").and_then(Value::as_str) else {
+        return Err(Error::Provider(
+            "Invalid Copilot token response fields".to_string(),
+        ));
+    };
+    let Some(expires_at) = object.get("expires_at").and_then(Value::as_u64) else {
+        return Err(Error::Provider(
+            "Invalid Copilot token response fields".to_string(),
+        ));
+    };
+
+    Ok(CopilotTokenResponse {
+        token: token.to_string(),
+        expires_at,
+    })
 }
 
 fn copilot_credentials_from_token(
@@ -657,23 +689,7 @@ struct DeviceCodeResponse {
     expires_in: u64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum DeviceTokenResponse {
-    Success {
-        access_token: String,
-        #[serde(rename = "token_type")]
-        _token_type: Option<String>,
-        #[serde(rename = "scope")]
-        _scope: Option<String>,
-    },
-    Error {
-        error: String,
-        error_description: Option<String>,
-    },
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct CopilotTokenResponse {
     token: String,
     expires_at: u64,
@@ -783,6 +799,78 @@ mod tests {
 
         assert_eq!(updated[0].base_url, "https://api.enterprise.example.com");
         assert_eq!(updated[1].base_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn parses_device_token_response_like_upstream() {
+        assert_eq!(
+            parse_device_token_response(serde_json::json!({ "access_token": "ghu_refresh" })),
+            OAuthDeviceCodePollResult::Complete("ghu_refresh".to_string())
+        );
+        assert_eq!(
+            parse_device_token_response(serde_json::json!({
+                "error": "authorization_pending",
+                "error_description": "pending"
+            })),
+            OAuthDeviceCodePollResult::Pending
+        );
+        assert_eq!(
+            parse_device_token_response(serde_json::json!({
+                "error": "slow_down",
+                "error_description": "slow down"
+            })),
+            OAuthDeviceCodePollResult::SlowDown
+        );
+        assert_eq!(
+            parse_device_token_response(serde_json::json!({
+                "error": "access_denied",
+                "error_description": "denied"
+            })),
+            OAuthDeviceCodePollResult::Failed(
+                "Device flow failed: access_denied: denied".to_string()
+            )
+        );
+        assert_eq!(
+            parse_device_token_response(serde_json::json!({ "access_token": 1 })),
+            OAuthDeviceCodePollResult::Failed("Invalid device token response".to_string())
+        );
+        assert_eq!(
+            parse_device_token_response(serde_json::Value::Null),
+            OAuthDeviceCodePollResult::Failed("Invalid device token response".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_copilot_token_response_like_upstream() {
+        let token = parse_copilot_token_response(serde_json::json!({
+            "token": "tid=test;exp=9999999999",
+            "expires_at": 9999999999_u64
+        }))
+        .unwrap();
+
+        assert_eq!(token.token, "tid=test;exp=9999999999");
+        assert_eq!(token.expires_at, 9999999999);
+        assert_eq!(
+            parse_copilot_token_response(serde_json::Value::Null)
+                .unwrap_err()
+                .to_string(),
+            "provider error: Invalid Copilot token response"
+        );
+        assert_eq!(
+            parse_copilot_token_response(serde_json::json!({ "token": "tid=test" }))
+                .unwrap_err()
+                .to_string(),
+            "provider error: Invalid Copilot token response fields"
+        );
+        assert_eq!(
+            parse_copilot_token_response(serde_json::json!({
+                "token": "tid=test",
+                "expires_at": "later"
+            }))
+            .unwrap_err()
+            .to_string(),
+            "provider error: Invalid Copilot token response fields"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
