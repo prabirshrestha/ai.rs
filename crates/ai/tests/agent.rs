@@ -1672,7 +1672,7 @@ async fn prepare_next_turn_updates_context_before_tool_continuation() {
     let mut config = AgentLoopConfig::new(registration.get_model());
     config.prepare_next_turn = Some(Arc::new({
         let prepared = Arc::clone(&prepared);
-        move |context| {
+        move |context, _token| {
             let prepared = Arc::clone(&prepared);
             Box::pin(async move {
                 if prepared.swap(true, Ordering::SeqCst) {
@@ -1715,6 +1715,55 @@ async fn prepare_next_turn_updates_context_before_tool_continuation() {
         message_roles(&messages),
         vec!["user", "assistant", "toolResult", "assistant"]
     );
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn prepare_next_turn_receives_cancellation_token() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("done", None)]);
+    let token = CancellationToken::new();
+    let hook_started = Arc::new(Notify::new());
+    let observed_cancel = Arc::new(AtomicBool::new(false));
+    let mut config = AgentLoopConfig::new(registration.get_model());
+    config.prepare_next_turn = Some(Arc::new({
+        let hook_started = Arc::clone(&hook_started);
+        let observed_cancel = Arc::clone(&observed_cancel);
+        move |_context, token| {
+            let hook_started = Arc::clone(&hook_started);
+            let observed_cancel = Arc::clone(&observed_cancel);
+            Box::pin(async move {
+                let token = token.expect("prepare_next_turn should receive active token");
+                hook_started.notify_waiters();
+                token.cancelled().await;
+                observed_cancel.store(true, Ordering::SeqCst);
+                None
+            })
+        }
+    }));
+
+    let run = run_agent_loop(
+        vec![Message::user_text("hello")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+        config,
+        quiet_sink(),
+        Some(token.clone()),
+        None,
+    );
+    tokio::pin!(run);
+    tokio::select! {
+        _ = hook_started.notified() => {}
+        result = &mut run => panic!("run completed before prepare_next_turn waited for cancellation: {result:?}"),
+    }
+
+    token.cancel();
+    run.await.unwrap();
+    assert!(observed_cancel.load(Ordering::SeqCst));
 
     registration.unregister();
 }
@@ -2117,7 +2166,7 @@ async fn queued_steering_messages_wait_until_tool_batch_finishes() {
 }
 
 #[tokio::test]
-async fn before_tool_call_args_override_executes_without_revalidation() {
+async fn before_tool_call_args_override_is_revalidated() {
     let registration = register_faux_provider(None);
     registration.set_responses([
         tool_use_response(vec![faux_tool_call(
@@ -2134,7 +2183,7 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
         |_context: BeforeToolCallContext, _token: Option<CancellationToken>| {
             Box::pin(async move {
                 Ok(Some(BeforeToolCallResult {
-                    args: Some(json!({ "value": 42 })),
+                    args: Some(json!({})),
                     ..Default::default()
                 }))
             })
@@ -2158,17 +2207,17 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
     .await
     .unwrap();
 
-    assert_eq!(*received_args.lock().await, vec![json!({ "value": 42 })]);
+    assert!(received_args.lock().await.is_empty());
     let Message::ToolResult(result) = &messages[2] else {
         panic!("expected tool result");
     };
-    assert!(!result.is_error);
+    assert!(result.is_error);
 
     registration.unregister();
 }
 
 #[tokio::test]
-async fn before_tool_call_mutable_args_execute_without_revalidation() {
+async fn before_tool_call_mutable_args_are_revalidated() {
     let registration = register_faux_provider(None);
     registration.set_responses([
         tool_use_response(vec![faux_tool_call(
@@ -2184,7 +2233,7 @@ async fn before_tool_call_mutable_args_execute_without_revalidation() {
     config.before_tool_call = Some(Arc::new(
         |context: BeforeToolCallContext, _token: Option<CancellationToken>| {
             Box::pin(async move {
-                context.mutable_args.set(json!({ "value": 42 })).await;
+                context.mutable_args.set(json!({})).await;
                 Ok(None)
             })
         },
@@ -2207,11 +2256,11 @@ async fn before_tool_call_mutable_args_execute_without_revalidation() {
     .await
     .unwrap();
 
-    assert_eq!(*received_args.lock().await, vec![json!({ "value": 42 })]);
+    assert!(received_args.lock().await.is_empty());
     let Message::ToolResult(result) = &messages[2] else {
         panic!("expected tool result");
     };
-    assert!(!result.is_error);
+    assert!(result.is_error);
 
     registration.unregister();
 }

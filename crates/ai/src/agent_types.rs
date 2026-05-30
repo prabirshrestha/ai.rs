@@ -119,6 +119,7 @@ pub type ShouldStopAfterTurnFn = Arc<
 pub type PrepareNextTurnFn = Arc<
     dyn Fn(
             PrepareNextTurnContext,
+            Option<CancellationToken>,
         ) -> Pin<Box<dyn Future<Output = Option<AgentLoopTurnUpdate>> + Send>>
         + Send
         + Sync,

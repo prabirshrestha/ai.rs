@@ -275,14 +275,16 @@ async fn run_loop(
             .await?;
 
             if let Some(prepare_next_turn) = config.prepare_next_turn.clone()
-                && let Some(update) =
-                    prepare_next_turn(crate::agent_types::PrepareNextTurnContext {
+                && let Some(update) = prepare_next_turn(
+                    crate::agent_types::PrepareNextTurnContext {
                         message: assistant.clone(),
                         tool_results: tool_results.clone(),
                         context: context.clone(),
                         new_messages: new_messages.clone(),
-                    })
-                    .await
+                    },
+                    cancellation_token.clone(),
+                )
+                .await
             {
                 if let Some(next_context) = update.context {
                     *context = next_context;
@@ -765,6 +767,21 @@ async fn prepare_tool_call(
             args
         } else {
             mutable_args.get().await
+        };
+
+        let mut prepared_tool_call = tool_call.clone();
+        prepared_tool_call.arguments = prepared_args;
+        prepared_args = match crate::utils::validation::validate_tool_arguments(
+            &tool.definition(),
+            &prepared_tool_call,
+        ) {
+            Ok(args) => args,
+            Err(error) => {
+                return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
+                    tool_call,
+                    error.to_string(),
+                )));
+            }
         };
     }
 

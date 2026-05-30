@@ -366,26 +366,40 @@ impl Agent {
     }
 
     pub async fn continue_run(&self) -> AgentResult<()> {
-        if self.active_token.lock().await.is_some() {
-            return Err(AgentError::AlreadyProcessing);
-        }
+        let token = self.acquire_active_token().await?;
         let last = self.state.lock().await.messages.last().cloned();
-        match last {
+        let action = match last {
             None => Err(AgentError::NoMessagesToContinue),
             Some(Message::Assistant(_)) => {
                 let queued = self.steering_queue.lock().await.drain();
                 if !queued.is_empty() {
-                    self.run_with_lifecycle(queued, false, true).await
+                    Ok((queued, false, true))
                 } else {
                     let follow_up = self.follow_up_queue.lock().await.drain();
                     if follow_up.is_empty() {
                         Err(AgentError::CannotContinueFromAssistant)
                     } else {
-                        self.run_with_lifecycle(follow_up, false, false).await
+                        Ok((follow_up, false, false))
                     }
                 }
             }
-            Some(_) => self.run_with_lifecycle(Vec::new(), true, false).await,
+            Some(_) => Ok((Vec::new(), true, false)),
+        };
+
+        match action {
+            Ok((prompts, continue_existing, skip_initial_steering_poll)) => {
+                self.run_with_lifecycle_after_acquire(
+                    prompts,
+                    continue_existing,
+                    skip_initial_steering_poll,
+                    token,
+                )
+                .await
+            }
+            Err(error) => {
+                self.clear_active_token().await;
+                Err(error)
+            }
         }
     }
 
@@ -395,13 +409,38 @@ impl Agent {
         continue_existing: bool,
         skip_initial_steering_poll: bool,
     ) -> AgentResult<()> {
-        {
-            let mut active = self.active_token.lock().await;
-            if active.is_some() {
-                return Err(AgentError::AlreadyProcessing);
-            }
-            *active = Some(CancellationToken::new());
+        let token = self.acquire_active_token().await?;
+        self.run_with_lifecycle_after_acquire(
+            prompts,
+            continue_existing,
+            skip_initial_steering_poll,
+            token,
+        )
+        .await
+    }
+
+    async fn acquire_active_token(&self) -> AgentResult<CancellationToken> {
+        let mut active = self.active_token.lock().await;
+        if active.is_some() {
+            return Err(AgentError::AlreadyProcessing);
         }
+        let token = CancellationToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    async fn clear_active_token(&self) {
+        *self.active_token.lock().await = None;
+        self.idle_notify.notify_waiters();
+    }
+
+    async fn run_with_lifecycle_after_acquire(
+        &self,
+        prompts: Vec<AgentMessage>,
+        continue_existing: bool,
+        skip_initial_steering_poll: bool,
+        token: CancellationToken,
+    ) -> AgentResult<()> {
         {
             let mut state = self.state.lock().await;
             state.is_streaming = true;
@@ -409,13 +448,12 @@ impl Agent {
             state.error_message = None;
         }
 
-        let token = self.active_token.lock().await.clone();
         let result = if continue_existing {
             run_agent_loop_continue(
                 self.create_context_snapshot().await,
                 self.create_loop_config(skip_initial_steering_poll).await,
                 self.event_sink(),
-                token.clone(),
+                Some(token.clone()),
                 self.stream_fn.clone(),
             )
             .await
@@ -425,14 +463,14 @@ impl Agent {
                 self.create_context_snapshot().await,
                 self.create_loop_config(skip_initial_steering_poll).await,
                 self.event_sink(),
-                token.clone(),
+                Some(token.clone()),
                 self.stream_fn.clone(),
             )
             .await
         };
 
         let failure_result = if let Err(error) = result {
-            let aborted = token.as_ref().is_some_and(CancellationToken::is_cancelled);
+            let aborted = token.is_cancelled();
             self.emit_run_failure(error, aborted).await
         } else {
             Ok(())
@@ -443,8 +481,7 @@ impl Agent {
         state.streaming_message = None;
         state.pending_tool_calls.clear();
         drop(state);
-        *self.active_token.lock().await = None;
-        self.idle_notify.notify_waiters();
+        self.clear_active_token().await;
         failure_result
     }
 
