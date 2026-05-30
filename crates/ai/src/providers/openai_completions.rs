@@ -521,6 +521,9 @@ fn ensure_tool_call_block(
     }
     if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str) {
         if let Some(index) = by_id.get(id).copied() {
+            if let Some(stream_index) = stream_index {
+                by_index.insert(stream_index, index);
+            }
             return index;
         }
     }
@@ -3307,6 +3310,106 @@ mod tests {
             message.content,
             vec![AssistantContent::ToolCall(ToolCall {
                 id: "functions.read:0".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn binds_late_tool_call_index_to_existing_id() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-late-index",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "tc_late",
+                            "type": "function",
+                            "function": { "name": "read", "arguments": "{\"path\"" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-index",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "tc_late",
+                            "type": "function",
+                            "function": { "arguments": ":\"README" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-index",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "type": "function",
+                            "function": { "arguments": ".md\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Read README.md")],
+                tools: vec![lookup_tool()],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let mut tool_call_indexes = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                AssistantMessageEvent::ToolCallStart { content_index, .. }
+                | AssistantMessageEvent::ToolCallDelta { content_index, .. }
+                | AssistantMessageEvent::ToolCallEnd { content_index, .. } => {
+                    tool_call_indexes.push(content_index);
+                }
+                _ => {}
+            }
+        }
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(tool_call_indexes, vec![0, 0, 0, 0, 0]);
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "tc_late".to_string(),
                 name: "read".to_string(),
                 arguments: json!({ "path": "README.md" }),
                 thought_signature: None,
