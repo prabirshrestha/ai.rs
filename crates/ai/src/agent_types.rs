@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::AgentResult;
 
 pub type AgentMessage = Message;
+pub type AgentToolCall = crate::ToolCall;
 
 pub type StreamFn = Arc<
     dyn Fn(

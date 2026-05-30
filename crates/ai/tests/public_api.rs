@@ -1,5 +1,5 @@
 use ai::{
-    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, AssistantContent,
+    AgentToolCall, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, AssistantContent,
     AssistantMessage, AssistantMessageEvent, CacheRetention, Context, OpenAICompletionsOptions,
     OpenAIResponsesAuthHeader, OpenAIResponsesOptions, SimpleStreamOptions, StopReason,
     TextContent, Usage, build_anthropic_payload, build_chat_completions_payload,
@@ -218,4 +218,19 @@ fn oauth_credentials(access: &str) -> ai::OAuthCredentials {
         expires: u64::MAX,
         enterprise_url: None,
     }
+}
+
+#[test]
+fn agent_type_aliases_are_exported_from_ai_crate() {
+    let _tool_call: AgentToolCall = ai::ToolCall {
+        id: "call-1".to_string(),
+        name: "lookup".to_string(),
+        arguments: serde_json::json!({ "query": "rust" }),
+        thought_signature: None,
+    };
+    let level: ai::ThinkingLevel = ai::ThinkingLevel::Low;
+    assert_eq!(
+        ai::ModelThinkingLevel::from(level),
+        ai::ModelThinkingLevel::Low
+    );
 }
