@@ -343,7 +343,7 @@ async fn run_stream(
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
-                            arguments: parse_streaming_json(Some(args)),
+                            arguments: json!({}),
                             thought_signature: None,
                         }));
                         partial_json.insert(index, args.to_string());
@@ -2784,6 +2784,92 @@ mod tests {
                 thought_signature: None,
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn response_function_call_start_keeps_initial_arguments_private_until_done() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("read")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let mut start_arguments = None;
+        let mut ended_tool_call = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                AssistantMessageEvent::ToolCallStart { partial, .. } => {
+                    start_arguments = partial.content.iter().find_map(|block| match block {
+                        AssistantContent::ToolCall(tool_call) => Some(tool_call.arguments.clone()),
+                        _ => None,
+                    });
+                }
+                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
+                    ended_tool_call = Some(tool_call);
+                }
+                _ => {}
+            }
+        }
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(start_arguments, Some(json!({})));
+        let expected = ToolCall {
+            id: "call_test|fc_test".to_string(),
+            name: "read".to_string(),
+            arguments: json!({ "path": "README.md" }),
+            thought_signature: None,
+        };
+        assert_eq!(ended_tool_call, Some(expected.clone()));
+        assert_eq!(result.content, vec![AssistantContent::ToolCall(expected)]);
     }
 
     #[tokio::test]
