@@ -692,7 +692,7 @@ pub fn build_responses_payload(
     if options.include_store.unwrap_or(true) {
         object.insert("store".to_string(), json!(false));
     }
-    if let Some(max_tokens) = options.base.max_tokens {
+    if let Some(max_tokens) = options.base.max_tokens.filter(|max_tokens| *max_tokens > 0) {
         object.insert("max_output_tokens".to_string(), json!(max_tokens));
     }
     if let Some(temperature) = options.base.temperature {
@@ -719,7 +719,11 @@ pub fn build_responses_payload(
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
     }
     if model.reasoning {
-        if options.reasoning_effort.is_some() || options.reasoning_summary.is_some() {
+        let has_reasoning_summary = options
+            .reasoning_summary
+            .as_ref()
+            .is_some_and(Option::is_some);
+        if options.reasoning_effort.is_some() || has_reasoning_summary {
             let effort = options
                 .reasoning_effort
                 .and_then(|effort| {
@@ -1293,6 +1297,53 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_null_reasoning_summary_alone_does_not_enable_reasoning() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions {
+                reasoning_summary: Some(None),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning"], json!({ "effort": "none" }));
+        assert!(payload.get("include").is_none());
+    }
+
+    #[test]
+    fn response_payload_reasoning_summary_uses_medium_effort_without_explicit_effort() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions {
+                reasoning_summary: Some(Some("concise".to_string())),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["reasoning"],
+            json!({ "effort": "medium", "summary": "concise" })
+        );
+        assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
     fn response_headers_let_explicit_headers_override_session_affinity() {
         let model = model();
         let context = Context {
@@ -1515,6 +1566,31 @@ mod tests {
         );
 
         assert_eq!(payload["max_output_tokens"], json!(1234));
+    }
+
+    #[test]
+    fn response_payload_omits_zero_max_output_tokens() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                max_tokens: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("max_output_tokens").is_none());
     }
 
     #[test]

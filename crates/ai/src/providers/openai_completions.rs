@@ -616,7 +616,7 @@ pub fn build_chat_completions_payload(
     if compat.supports_store {
         object.insert("store".to_string(), json!(false));
     }
-    if let Some(max_tokens) = options.base.max_tokens {
+    if let Some(max_tokens) = options.base.max_tokens.filter(|max_tokens| *max_tokens > 0) {
         let field = match compat.max_tokens_field {
             MaxTokensField::MaxTokens => "max_tokens",
             MaxTokensField::MaxCompletionTokens => "max_completion_tokens",
@@ -1756,6 +1756,32 @@ mod tests {
 
         assert!(payload.get("max_tokens").is_none());
         assert_eq!(payload["max_completion_tokens"], json!(1234));
+    }
+
+    #[test]
+    fn chat_payload_omits_zero_max_tokens() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                max_tokens: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("max_tokens").is_none());
+        assert!(payload.get("max_completion_tokens").is_none());
     }
 
     #[test]
