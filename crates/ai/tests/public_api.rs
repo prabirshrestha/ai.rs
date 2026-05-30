@@ -3,11 +3,13 @@ use ai::{
     AssistantMessage, AssistantMessageEvent, CacheRetention, Context, OpenAICompletionsOptions,
     OpenAIResponsesAuthHeader, OpenAIResponsesOptions, SimpleStreamOptions, StopReason,
     TextContent, Usage, build_anthropic_payload, build_chat_completions_payload,
-    build_copilot_dynamic_headers, build_responses_payload, convert_anthropic_messages,
-    convert_openai_completions_messages, create_assistant_message_event_stream,
+    build_copilot_dynamic_headers, build_responses_payload, clear_api_providers,
+    convert_anthropic_messages, convert_openai_completions_messages,
+    create_assistant_message_event_stream, get_api_provider, get_api_providers,
     get_openai_completions_compat, get_openai_responses_compat, has_copilot_vision_input,
-    infer_copilot_initiator, stream_anthropic, stream_openai_completions, stream_openai_responses,
-    stream_simple_anthropic, stream_simple_openai_completions, stream_simple_openai_responses,
+    infer_copilot_initiator, register_builtin_api_providers, reset_api_providers, stream_anthropic,
+    stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
+    stream_simple_openai_completions, stream_simple_openai_responses,
 };
 use futures::StreamExt;
 
@@ -133,4 +135,26 @@ async fn assistant_event_stream_factory_is_exported_and_terminal() {
     ));
     assert!(stream.next().await.is_none());
     assert_eq!(stream.result().await.unwrap(), message);
+}
+
+#[test]
+fn api_registry_and_builtin_provider_helpers_are_exported() {
+    reset_api_providers();
+
+    assert!(get_api_provider("openai-completions").is_some());
+    assert!(get_api_provider("openai-responses").is_some());
+    assert!(get_api_provider("anthropic-messages").is_some());
+    assert!(
+        get_api_providers()
+            .iter()
+            .any(|provider| provider.api == "openai-completions")
+    );
+
+    clear_api_providers();
+    assert!(get_api_provider("openai-completions").is_none());
+
+    register_builtin_api_providers();
+    assert!(get_api_provider("openai-responses").is_some());
+
+    reset_api_providers();
 }

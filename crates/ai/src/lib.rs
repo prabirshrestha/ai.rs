@@ -26,6 +26,10 @@ pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
 };
 pub use agent_types::*;
+pub use api_registry::{
+    ApiProvider, ApiStreamFunction, ApiStreamSimpleFunction, clear_api_providers, get_api_provider,
+    get_api_providers, register_api_provider, unregister_api_providers,
+};
 pub use env_api_keys::{api_key_env_vars, find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use event_stream::{
@@ -74,6 +78,7 @@ pub use providers::openai_responses::{
     get_compat as get_openai_responses_compat, stream_openai_responses,
     stream_simple_openai_responses,
 };
+pub use providers::register_builtins::{register_builtin_api_providers, reset_api_providers};
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
     register_session_resource_cleanup,

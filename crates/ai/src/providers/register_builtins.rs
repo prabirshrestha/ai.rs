@@ -13,6 +13,15 @@ pub fn ensure_builtins_registered() {
     REGISTERED.get_or_init(register_builtins);
 }
 
+pub fn register_builtin_api_providers() {
+    register_builtins();
+}
+
+pub fn reset_api_providers() {
+    api_registry::clear_api_providers();
+    register_builtins();
+}
+
 pub fn register_builtins() {
     api_registry::register_api_provider(
         ApiProvider {
