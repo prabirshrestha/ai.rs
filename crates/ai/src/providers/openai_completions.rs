@@ -1758,6 +1758,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_uses_openrouter_reasoning_object() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.id = "deepseek/deepseek-r1".to_string();
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.reasoning = true;
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(ModelThinkingLevel::High),
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::None,
+        );
+
+        assert_eq!(payload["reasoning"], json!({ "effort": "high" }));
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn chat_payload_omits_tools_when_context_tools_are_empty() {
         let model = model();
         let context = Context {
@@ -3510,6 +3538,48 @@ mod tests {
             &context,
             &OpenAICompletionsOptions::default(),
             &compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            payload["tools"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            payload["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn detects_anthropic_cache_markers_for_openrouter_anthropic_models() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.id = "anthropic/claude-sonnet-4.5".to_string();
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        let context = Context {
+            system_prompt: Some("System prompt".to_string()),
+            messages: vec![Message::user_text("Hello")],
+            tools: vec![Tool {
+                name: "read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            }],
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
             CacheRetention::Short,
         );
 
