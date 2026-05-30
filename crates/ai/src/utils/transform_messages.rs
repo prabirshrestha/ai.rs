@@ -244,3 +244,212 @@ fn insert_synthetic_tool_results(messages: Vec<Message>) -> Vec<Message> {
     );
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ModelCost, StopReason, ThinkingContent, Usage};
+    use serde_json::json;
+
+    fn copilot_claude_model() -> Model {
+        Model {
+            id: "claude-sonnet-4.6".to_string(),
+            name: "Claude Sonnet 4.6".to_string(),
+            api: "anthropic-messages".to_string(),
+            provider: "github-copilot".to_string(),
+            base_url: "https://api.individual.githubcopilot.com".to_string(),
+            reasoning: true,
+            input: vec![ModelInput::Text, ModelInput::Image],
+            cost: ModelCost::default(),
+            context_window: 128_000,
+            max_tokens: 16_000,
+            ..Default::default()
+        }
+    }
+
+    fn assistant_message(content: Vec<AssistantContent>) -> AssistantMessage {
+        AssistantMessage {
+            content,
+            api: "openai-responses".to_string(),
+            provider: "github-copilot".to_string(),
+            model: "gpt-5".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn normalize_for_anthropic(id: &str, _model: &Model, _source: &AssistantMessage) -> String {
+        id.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .take(64)
+            .collect()
+    }
+
+    #[test]
+    fn converts_cross_model_thinking_to_text_for_copilot_anthropic_handoff() {
+        let model = copilot_claude_model();
+        let source = AssistantMessage {
+            content: vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "Let me think about this...".to_string(),
+                    thinking_signature: Some("reasoning_content".to_string()),
+                    redacted: None,
+                }),
+                AssistantContent::Text(TextContent {
+                    text: "Hi there!".to_string(),
+                    text_signature: None,
+                }),
+            ],
+            api: "openai-completions".to_string(),
+            provider: "github-copilot".to_string(),
+            model: "gpt-4o".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        };
+
+        let transformed = transform_messages(
+            &[Message::user_text("hello"), Message::Assistant(source)],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        let assistant = transformed
+            .iter()
+            .find_map(|message| match message {
+                Message::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("assistant message");
+        assert!(
+            assistant
+                .content
+                .iter()
+                .all(|block| !matches!(block, AssistantContent::Thinking(_)))
+        );
+        assert_eq!(
+            assistant.content,
+            vec![
+                AssistantContent::Text(TextContent {
+                    text: "Let me think about this...".to_string(),
+                    text_signature: None,
+                }),
+                AssistantContent::Text(TextContent {
+                    text: "Hi there!".to_string(),
+                    text_signature: None,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_tool_call_thought_signatures_when_migrating_between_models() {
+        let model = copilot_claude_model();
+        let transformed = transform_messages(
+            &[
+                Message::user_text("run a command"),
+                Message::Assistant(assistant_message(vec![AssistantContent::ToolCall(
+                    ToolCall {
+                        id: "call_123".to_string(),
+                        name: "bash".to_string(),
+                        arguments: json!({ "command": "ls" }),
+                        thought_signature: Some(
+                            json!({ "type": "reasoning.encrypted", "id": "call_123" }).to_string(),
+                        ),
+                    },
+                )])),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_123".to_string(),
+                    tool_name: "bash".to_string(),
+                    content: vec![ToolResultContent::text("output")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 0,
+                }),
+            ],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        let tool_call = transformed
+            .iter()
+            .find_map(|message| match message {
+                Message::Assistant(assistant) => assistant.content.iter().find_map(|block| {
+                    if let AssistantContent::ToolCall(tool_call) = block {
+                        Some(tool_call)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .expect("tool call");
+        assert_eq!(tool_call.id, "call_123");
+        assert_eq!(tool_call.thought_signature, None);
+    }
+
+    #[test]
+    fn adds_synthetic_results_for_trailing_orphaned_tool_calls_after_normalization() {
+        let model = copilot_claude_model();
+        let transformed = transform_messages(
+            &[
+                Message::user_text("run commands"),
+                Message::Assistant(assistant_message(vec![
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "call_1|fc_1".to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({ "path": "README.md" }),
+                        thought_signature: None,
+                    }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "call_2|fc_2".to_string(),
+                        name: "bash".to_string(),
+                        arguments: json!({ "command": "pwd" }),
+                        thought_signature: None,
+                    }),
+                ])),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1|fc_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("done")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 0,
+                }),
+            ],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        let synthetic_results = transformed
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) if result.is_error => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(synthetic_results.len(), 1);
+        assert_eq!(synthetic_results[0].tool_call_id, "call_2_fc_2");
+        assert_eq!(synthetic_results[0].tool_name, "bash");
+        assert_eq!(
+            synthetic_results[0].content,
+            vec![ToolResultContent::text("No result provided")]
+        );
+    }
+}
