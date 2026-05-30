@@ -36,6 +36,25 @@ async fn agent_starts_with_default_state() {
 }
 
 #[tokio::test]
+async fn agent_can_start_with_unknown_default_state() {
+    let agent = Agent::default();
+
+    let state = agent.state().await;
+    assert_eq!(state.system_prompt, None);
+    assert_eq!(state.model.id, "unknown");
+    assert_eq!(state.model.name, "unknown");
+    assert_eq!(state.model.api, "unknown");
+    assert_eq!(state.model.provider, "unknown");
+    assert_eq!(state.reasoning_level, None);
+    assert!(state.tools.is_empty());
+    assert!(state.messages.is_empty());
+    assert!(!state.is_streaming);
+    assert!(state.streaming_message.is_none());
+    assert!(state.pending_tool_calls.is_empty());
+    assert!(state.error_message.is_none());
+}
+
+#[tokio::test]
 async fn agent_starts_with_custom_initial_state() {
     let registration = register_faux_provider(None);
     let model = registration.get_model();

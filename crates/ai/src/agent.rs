@@ -20,6 +20,16 @@ use crate::{AgentError, AgentResult};
 
 pub type AgentListenerId = u64;
 
+fn default_agent_model() -> Model {
+    Model {
+        id: "unknown".to_string(),
+        name: "unknown".to_string(),
+        api: "unknown".to_string(),
+        provider: "unknown".to_string(),
+        ..Default::default()
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentState {
     pub system_prompt: Option<String>,
@@ -46,6 +56,12 @@ impl AgentState {
             pending_tool_calls: HashSet::new(),
             error_message: None,
         }
+    }
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self::new(default_agent_model())
     }
 }
 
@@ -85,6 +101,12 @@ impl AgentOptions {
             follow_up_mode: QueueMode::OneAtATime,
             tool_execution: ToolExecutionMode::Parallel,
         }
+    }
+}
+
+impl Default for AgentOptions {
+    fn default() -> Self {
+        Self::new(default_agent_model())
     }
 }
 
@@ -564,5 +586,11 @@ impl Agent {
                 Ok(())
             })
         })
+    }
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self::new(AgentOptions::default())
     }
 }
