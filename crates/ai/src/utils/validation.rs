@@ -243,6 +243,8 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
         }
     }
 
+    validate_const_and_enum(value, schema, path, errors);
+
     let types = schema_types(schema);
     if !types.is_empty()
         && !types
@@ -260,12 +262,36 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
     if types.contains(&"array") {
         validate_array(value, schema, path, errors);
     }
+
+    if value.is_number() {
+        validate_number(value, schema, path, errors);
+    }
+
+    if value.is_string() {
+        validate_string(value, schema, path, errors);
+    }
 }
 
 fn validate_object(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
     let Some(object) = value.as_object() else {
         return;
     };
+
+    if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64) {
+        if (object.len() as u64) < min_properties {
+            errors.push(format!(
+                "{path}: must have at least {min_properties} properties"
+            ));
+        }
+    }
+
+    if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64) {
+        if (object.len() as u64) > max_properties {
+            errors.push(format!(
+                "{path}: must have at most {max_properties} properties"
+            ));
+        }
+    }
 
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         for key in required.iter().filter_map(Value::as_str) {
@@ -291,14 +317,34 @@ fn validate_object(value: &Value, schema: &Value, path: &str, errors: &mut Vec<S
         }
     }
 
-    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
-        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-            for key in object.keys() {
-                if !properties.contains_key(key) {
-                    errors.push(format!("{}: unexpected property", child_path(path, key)));
+    match schema.get("additionalProperties") {
+        Some(Value::Bool(false)) => {
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for key in object.keys() {
+                    if !properties.contains_key(key) {
+                        errors.push(format!("{}: unexpected property", child_path(path, key)));
+                    }
                 }
             }
         }
+        Some(additional_schema) if additional_schema.is_object() => {
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for (key, property_value) in object {
+                if !properties.contains(key) {
+                    validate_value(
+                        property_value,
+                        additional_schema,
+                        &child_path(path, key),
+                        errors,
+                    );
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -306,6 +352,32 @@ fn validate_array(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
     let Some(array) = value.as_array() else {
         return;
     };
+
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64) {
+        if (array.len() as u64) < min_items {
+            errors.push(format!("{path}: must have at least {min_items} items"));
+        }
+    }
+
+    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64) {
+        if (array.len() as u64) > max_items {
+            errors.push(format!("{path}: must have at most {max_items} items"));
+        }
+    }
+
+    if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
+        for (index, item) in array.iter().enumerate() {
+            if array
+                .iter()
+                .skip(index + 1)
+                .any(|other| json_schema_equal(item, other))
+            {
+                errors.push(format!("{path}: must have unique items"));
+                break;
+            }
+        }
+    }
+
     match schema.get("items") {
         Some(Value::Array(items)) => {
             for (index, item_schema) in items.iter().enumerate() {
@@ -320,6 +392,102 @@ fn validate_array(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
             }
         }
         _ => {}
+    }
+}
+
+fn validate_const_and_enum(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
+    if let Some(expected) = schema.get("const") {
+        if !json_schema_equal(value, expected) {
+            errors.push(format!("{path}: must equal const value"));
+        }
+    }
+
+    if let Some(variants) = schema.get("enum").and_then(Value::as_array) {
+        if !variants
+            .iter()
+            .any(|variant| json_schema_equal(value, variant))
+        {
+            errors.push(format!("{path}: must equal one of the allowed values"));
+        }
+    }
+}
+
+fn validate_number(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
+    let Some(number) = value.as_f64() else {
+        return;
+    };
+
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+        if number < minimum {
+            errors.push(format!("{path}: must be >= {minimum}"));
+        }
+    }
+
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
+        if number > maximum {
+            errors.push(format!("{path}: must be <= {maximum}"));
+        }
+    }
+
+    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
+        if number <= exclusive_minimum {
+            errors.push(format!("{path}: must be > {exclusive_minimum}"));
+        }
+    }
+
+    if let Some(exclusive_maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
+        if number >= exclusive_maximum {
+            errors.push(format!("{path}: must be < {exclusive_maximum}"));
+        }
+    }
+
+    if let Some(multiple_of) = schema.get("multipleOf").and_then(Value::as_f64) {
+        if multiple_of > 0.0 {
+            let quotient = number / multiple_of;
+            if (quotient - quotient.round()).abs() > 1e-9 {
+                errors.push(format!("{path}: must be a multiple of {multiple_of}"));
+            }
+        }
+    }
+}
+
+fn validate_string(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
+    let Some(text) = value.as_str() else {
+        return;
+    };
+    let len = text.chars().count() as u64;
+
+    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64) {
+        if len < min_length {
+            errors.push(format!("{path}: must be at least {min_length} characters"));
+        }
+    }
+
+    if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64) {
+        if len > max_length {
+            errors.push(format!("{path}: must be at most {max_length} characters"));
+        }
+    }
+
+    if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+        match regex::Regex::new(pattern) {
+            Ok(regex) => {
+                if !regex.is_match(text) {
+                    errors.push(format!("{path}: must match pattern {pattern:?}"));
+                }
+            }
+            Err(error) => errors.push(format!("{path}: invalid regex pattern: {error}")),
+        }
+    }
+}
+
+fn json_schema_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => match (left.as_f64(), right.as_f64()) {
+            (Some(left), Some(right)) => (left - right).abs() <= f64::EPSILON,
+            _ => left == right,
+        },
+        _ => left == right,
     }
 }
 
@@ -411,5 +579,75 @@ mod tests {
                 .to_string();
             assert!(error.contains("Validation failed"));
         }
+    }
+
+    #[test]
+    fn validates_common_json_schema_constraints() {
+        let tool = Tool {
+            name: "configure".to_string(),
+            description: "Configure a task".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["fast", "safe"] },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "tag": { "type": "string", "minLength": 2, "maxLength": 4, "pattern": "^[a-z]+$" },
+                    "items": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "type": "string" } },
+                    "fixed": { "const": "yes" }
+                },
+                "required": ["mode", "count", "tag", "items", "fixed"],
+                "additionalProperties": { "type": "number" }
+            }),
+        };
+        let valid = ToolCall {
+            id: "tool-1".to_string(),
+            name: "configure".to_string(),
+            arguments: json!({
+                "mode": "safe",
+                "count": "3",
+                "tag": "ab",
+                "items": ["one"],
+                "fixed": "yes",
+                "extra": "4"
+            }),
+            thought_signature: None,
+        };
+
+        assert_eq!(
+            validate_tool_arguments(&tool, &valid).unwrap(),
+            json!({
+                "mode": "safe",
+                "count": 3,
+                "tag": "ab",
+                "items": ["one"],
+                "fixed": "yes",
+                "extra": 4.0
+            })
+        );
+
+        let invalid = ToolCall {
+            id: "tool-2".to_string(),
+            name: "configure".to_string(),
+            arguments: json!({
+                "mode": "unsafe",
+                "count": 6,
+                "tag": "A",
+                "items": ["one", "one", "two"],
+                "fixed": "no",
+                "extra": "not-a-number"
+            }),
+            thought_signature: None,
+        };
+        let error = validate_tool_arguments(&tool, &invalid)
+            .expect_err("expected validation error")
+            .to_string();
+        assert!(error.contains("mode: must equal one of the allowed values"));
+        assert!(error.contains("count: must be <= 5"));
+        assert!(error.contains("tag: must be at least 2 characters"));
+        assert!(error.contains("tag: must match pattern"));
+        assert!(error.contains("items: must have at most 2 items"));
+        assert!(error.contains("items: must have unique items"));
+        assert!(error.contains("fixed: must equal const value"));
+        assert!(error.contains("extra: expected number"));
     }
 }
