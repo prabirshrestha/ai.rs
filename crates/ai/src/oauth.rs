@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -63,6 +65,37 @@ pub struct OAuthLoginCallbacks {
     pub cancellation_token: Option<CancellationToken>,
 }
 
+pub type OAuthProviderId = String;
+pub type OAuthProvider = Arc<dyn OAuthProviderInterface>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProviderInfo {
+    pub id: OAuthProviderId,
+    pub name: String,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthApiKey {
+    pub new_credentials: OAuthCredentials,
+    pub api_key: String,
+}
+
+#[async_trait]
+pub trait OAuthProviderInterface: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn name(&self) -> &'static str;
+    fn uses_callback_server(&self) -> bool {
+        false
+    }
+    async fn login(&self, callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials>;
+    async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials>;
+    fn get_api_key(&self, credentials: &OAuthCredentials) -> String;
+    fn modify_models(&self, models: Vec<Model>, _credentials: &OAuthCredentials) -> Vec<Model> {
+        models
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitHubCopilotOAuthProvider;
 
@@ -101,6 +134,34 @@ pub fn github_copilot_oauth_provider() -> GitHubCopilotOAuthProvider {
     GitHubCopilotOAuthProvider
 }
 
+#[async_trait]
+impl OAuthProviderInterface for GitHubCopilotOAuthProvider {
+    fn id(&self) -> &'static str {
+        "github-copilot"
+    }
+
+    fn name(&self) -> &'static str {
+        "GitHub Copilot"
+    }
+
+    async fn login(&self, callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+        login_github_copilot(callbacks).await
+    }
+
+    async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
+        refresh_github_copilot_token(&credentials.refresh, credentials.enterprise_url.as_deref())
+            .await
+    }
+
+    fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
+        credentials.access.clone()
+    }
+
+    fn modify_models(&self, models: Vec<Model>, credentials: &OAuthCredentials) -> Vec<Model> {
+        modify_github_copilot_models(models, credentials)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnthropicOAuthProvider;
 
@@ -124,6 +185,147 @@ impl AnthropicOAuthProvider {
 
 pub fn anthropic_oauth_provider() -> AnthropicOAuthProvider {
     AnthropicOAuthProvider
+}
+
+#[async_trait]
+impl OAuthProviderInterface for AnthropicOAuthProvider {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn name(&self) -> &'static str {
+        "Anthropic (Claude Pro/Max)"
+    }
+
+    fn uses_callback_server(&self) -> bool {
+        true
+    }
+
+    async fn login(&self, _callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+        Err(Error::Provider(
+            "Anthropic OAuth login is not available in this Rust port yet; use exchange_anthropic_authorization_code"
+                .to_string(),
+        ))
+    }
+
+    async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
+        refresh_anthropic_token(&credentials.refresh).await
+    }
+
+    fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
+        credentials.access.clone()
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredOAuthProvider {
+    provider: OAuthProvider,
+}
+
+fn oauth_registry() -> &'static RwLock<HashMap<String, RegisteredOAuthProvider>> {
+    static REGISTRY: OnceLock<RwLock<HashMap<String, RegisteredOAuthProvider>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(builtin_oauth_providers()))
+}
+
+fn builtin_oauth_provider(id: &str) -> Option<OAuthProvider> {
+    match id {
+        "anthropic" => Some(Arc::new(AnthropicOAuthProvider)),
+        "github-copilot" => Some(Arc::new(GitHubCopilotOAuthProvider)),
+        _ => None,
+    }
+}
+
+fn builtin_oauth_providers() -> HashMap<String, RegisteredOAuthProvider> {
+    ["anthropic", "github-copilot"]
+        .into_iter()
+        .filter_map(|id| {
+            builtin_oauth_provider(id)
+                .map(|provider| (id.to_string(), RegisteredOAuthProvider { provider }))
+        })
+        .collect()
+}
+
+pub fn get_oauth_provider(id: &str) -> Option<OAuthProvider> {
+    oauth_registry()
+        .read()
+        .expect("oauth registry poisoned")
+        .get(id)
+        .map(|entry| entry.provider.clone())
+}
+
+pub fn register_oauth_provider(provider: OAuthProvider) {
+    oauth_registry()
+        .write()
+        .expect("oauth registry poisoned")
+        .insert(
+            provider.id().to_string(),
+            RegisteredOAuthProvider { provider },
+        );
+}
+
+pub fn unregister_oauth_provider(id: &str) {
+    let mut registry = oauth_registry().write().expect("oauth registry poisoned");
+    if let Some(provider) = builtin_oauth_provider(id) {
+        registry.insert(id.to_string(), RegisteredOAuthProvider { provider });
+    } else {
+        registry.remove(id);
+    }
+}
+
+pub fn reset_oauth_providers() {
+    *oauth_registry().write().expect("oauth registry poisoned") = builtin_oauth_providers();
+}
+
+pub fn get_oauth_providers() -> Vec<OAuthProvider> {
+    oauth_registry()
+        .read()
+        .expect("oauth registry poisoned")
+        .values()
+        .map(|entry| entry.provider.clone())
+        .collect()
+}
+
+pub fn get_oauth_provider_info_list() -> Vec<OAuthProviderInfo> {
+    get_oauth_providers()
+        .into_iter()
+        .map(|provider| OAuthProviderInfo {
+            id: provider.id().to_string(),
+            name: provider.name().to_string(),
+            available: true,
+        })
+        .collect()
+}
+
+pub async fn refresh_oauth_token(
+    provider_id: &str,
+    credentials: &OAuthCredentials,
+) -> Result<OAuthCredentials> {
+    let provider = get_oauth_provider(provider_id)
+        .ok_or_else(|| Error::Provider(format!("Unknown OAuth provider: {provider_id}")))?;
+    provider.refresh_token(credentials).await
+}
+
+pub async fn get_oauth_api_key(
+    provider_id: &str,
+    credentials: &HashMap<String, OAuthCredentials>,
+) -> Result<Option<OAuthApiKey>> {
+    let provider = get_oauth_provider(provider_id)
+        .ok_or_else(|| Error::Provider(format!("Unknown OAuth provider: {provider_id}")))?;
+    let Some(mut credentials) = credentials.get(provider_id).cloned() else {
+        return Ok(None);
+    };
+
+    if crate::utils::time::now_millis() >= credentials.expires {
+        credentials = provider.refresh_token(&credentials).await.map_err(|_| {
+            Error::Provider(format!("Failed to refresh OAuth token for {provider_id}"))
+        })?;
+    }
+
+    let api_key = provider.get_api_key(&credentials);
+    Ok(Some(OAuthApiKey {
+        new_credentials: credentials,
+        api_key,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,6 +914,98 @@ mod tests {
     use crate::types::ModelCost;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    struct TestOAuthProvider;
+
+    #[async_trait::async_trait]
+    impl OAuthProviderInterface for TestOAuthProvider {
+        fn id(&self) -> &'static str {
+            "test-oauth"
+        }
+
+        fn name(&self) -> &'static str {
+            "Test OAuth"
+        }
+
+        async fn login(&self, _callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+            Ok(OAuthCredentials {
+                refresh: "login-refresh".to_string(),
+                access: "login-access".to_string(),
+                expires: crate::utils::time::now_millis().saturating_add(60_000),
+                enterprise_url: None,
+            })
+        }
+
+        async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
+            Ok(OAuthCredentials {
+                refresh: credentials.refresh.clone(),
+                access: format!("{}-refreshed", credentials.access),
+                expires: crate::utils::time::now_millis().saturating_add(60_000),
+                enterprise_url: credentials.enterprise_url.clone(),
+            })
+        }
+
+        fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
+            credentials.access.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_registry_supports_custom_providers_and_api_keys() {
+        register_oauth_provider(Arc::new(TestOAuthProvider));
+
+        let provider = get_oauth_provider("test-oauth").expect("registered provider");
+        assert_eq!(provider.id(), "test-oauth");
+        assert_eq!(provider.name(), "Test OAuth");
+        assert!(
+            get_oauth_provider_info_list()
+                .iter()
+                .any(|info| info.id == "test-oauth" && info.available)
+        );
+
+        let credentials = OAuthCredentials {
+            refresh: "refresh".to_string(),
+            access: "access".to_string(),
+            expires: 0,
+            enterprise_url: None,
+        };
+        let refreshed = refresh_oauth_token("test-oauth", &credentials)
+            .await
+            .expect("refreshed credentials");
+        assert_eq!(refreshed.access, "access-refreshed");
+
+        let mut credential_map = HashMap::new();
+        credential_map.insert(
+            "test-oauth".to_string(),
+            OAuthCredentials {
+                refresh: "refresh".to_string(),
+                access: "current-access".to_string(),
+                expires: crate::utils::time::now_millis().saturating_add(60_000),
+                enterprise_url: None,
+            },
+        );
+        let api_key = get_oauth_api_key("test-oauth", &credential_map)
+            .await
+            .expect("api key result")
+            .expect("api key");
+        assert_eq!(api_key.api_key, "current-access");
+        assert_eq!(api_key.new_credentials.access, "current-access");
+
+        unregister_oauth_provider("test-oauth");
+        assert!(get_oauth_provider("test-oauth").is_none());
+    }
+
+    #[test]
+    fn oauth_registry_exposes_focused_builtins() {
+        let copilot = get_oauth_provider("github-copilot").expect("copilot provider");
+        assert_eq!(copilot.id(), "github-copilot");
+        assert_eq!(copilot.name(), "GitHub Copilot");
+        assert!(!copilot.uses_callback_server());
+
+        let anthropic = get_oauth_provider("anthropic").expect("anthropic provider");
+        assert_eq!(anthropic.id(), "anthropic");
+        assert!(anthropic.uses_callback_server());
+    }
 
     #[test]
     fn normalizes_enterprise_domains() {

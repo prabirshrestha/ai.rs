@@ -45,12 +45,15 @@ pub use models::{
     get_supported_thinking_levels, models_are_equal, register_model,
 };
 pub use oauth::{
-    AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthCredentials, OAuthDeviceCodeInfo,
-    OAuthDeviceCodePollResult, OAuthLoginCallbacks, OAuthPrompt, anthropic_oauth_provider,
-    exchange_anthropic_authorization_code, get_github_copilot_base_url,
+    AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials,
+    OAuthDeviceCodeInfo, OAuthDeviceCodePollResult, OAuthLoginCallbacks, OAuthPrompt,
+    OAuthProvider, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface,
+    anthropic_oauth_provider, exchange_anthropic_authorization_code, get_github_copilot_base_url,
+    get_oauth_api_key, get_oauth_provider, get_oauth_provider_info_list, get_oauth_providers,
     github_copilot_oauth_provider, login_github_copilot, modify_github_copilot_models,
     normalize_domain, poll_oauth_device_code_flow, refresh_anthropic_token,
-    refresh_github_copilot_token,
+    refresh_github_copilot_token, refresh_oauth_token, register_oauth_provider,
+    reset_oauth_providers, unregister_oauth_provider,
 };
 pub use providers::anthropic::{
     AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, ResolvedAnthropicCompat,

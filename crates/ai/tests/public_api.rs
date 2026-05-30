@@ -5,14 +5,16 @@ use ai::{
     TextContent, Usage, build_anthropic_payload, build_chat_completions_payload,
     build_copilot_dynamic_headers, build_responses_payload, clear_api_providers,
     convert_anthropic_messages, convert_openai_completions_messages,
-    create_assistant_message_event_stream, get_api_provider, get_api_providers,
-    get_openai_completions_compat, get_openai_responses_compat, has_copilot_vision_input,
-    infer_copilot_initiator, register_builtin_api_providers, repair_json, reset_api_providers,
-    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
-    stream_simple_openai_completions, stream_simple_openai_responses, validate_tool_arguments,
-    validate_tool_call,
+    create_assistant_message_event_stream, get_api_provider, get_api_providers, get_oauth_api_key,
+    get_oauth_provider, get_oauth_provider_info_list, get_openai_completions_compat,
+    get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
+    register_builtin_api_providers, register_oauth_provider, repair_json, reset_api_providers,
+    reset_oauth_providers, stream_anthropic, stream_openai_completions, stream_openai_responses,
+    stream_simple_anthropic, stream_simple_openai_completions, stream_simple_openai_responses,
+    unregister_oauth_provider, validate_tool_arguments, validate_tool_call,
 };
 use futures::StreamExt;
+use std::collections::HashMap;
 
 #[test]
 fn focused_provider_symbols_are_exported_from_ai_crate() {
@@ -177,4 +179,43 @@ fn json_and_validation_helpers_are_exported() {
         validate_tool_call;
     let _validate_tool_arguments: fn(&ai::Tool, &ai::ToolCall) -> ai::Result<serde_json::Value> =
         validate_tool_arguments;
+}
+
+#[tokio::test]
+async fn oauth_registry_helpers_are_exported() {
+    let provider = get_oauth_provider("github-copilot").expect("copilot provider");
+    assert_eq!(provider.id(), "github-copilot");
+    assert_eq!(
+        provider.get_api_key(&oauth_credentials("copilot-access")),
+        "copilot-access"
+    );
+    assert!(
+        get_oauth_provider_info_list()
+            .iter()
+            .any(|info| info.id == "github-copilot")
+    );
+
+    let mut credentials = HashMap::new();
+    credentials.insert(
+        "github-copilot".to_string(),
+        oauth_credentials("copilot-access"),
+    );
+    let key = get_oauth_api_key("github-copilot", &credentials)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.api_key, "copilot-access");
+
+    let _register: fn(ai::OAuthProvider) = register_oauth_provider;
+    let _unregister: fn(&str) = unregister_oauth_provider;
+    let _reset: fn() = reset_oauth_providers;
+}
+
+fn oauth_credentials(access: &str) -> ai::OAuthCredentials {
+    ai::OAuthCredentials {
+        refresh: "refresh".to_string(),
+        access: access.to_string(),
+        expires: u64::MAX,
+        enterprise_url: None,
+    }
 }
