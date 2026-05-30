@@ -3581,6 +3581,61 @@ mod tests {
     }
 
     #[test]
+    fn zai_tool_stream_metadata_matches_supported_builtin_models() {
+        let supported = crate::get_model("zai", "glm-4.7").expect("glm-4.7");
+        let unsupported = crate::get_model("zai", "glm-4.5-air").expect("glm-4.5-air");
+
+        assert_eq!(
+            supported.compat.openai_completions.zai_tool_stream,
+            Some(true)
+        );
+        assert_ne!(
+            unsupported.compat.openai_completions.zai_tool_stream,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn groq_qwen_reasoning_levels_map_to_default_reasoning_effort() {
+        let model = crate::get_model("groq", "qwen/qwen3-32b").expect("qwen/qwen3-32b");
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("Think carefully.")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning_effort"], json!("default"));
+    }
+
+    #[test]
+    fn groq_models_without_level_mapping_keep_reasoning_effort() {
+        let model = crate::get_model("groq", "openai/gpt-oss-20b").expect("openai/gpt-oss-20b");
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("Think carefully.")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::Medium),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning_effort"], json!("medium"));
+    }
+
+    #[test]
     fn deepseek_thinking_payload_respects_reasoning_effort_compat() {
         let opencode_go = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
         let opencode_compat = get_compat(&opencode_go);
