@@ -3381,6 +3381,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn non_opencode_go_reasoning_deltas_keep_source_signature() {
+        let mut chat_model = model();
+        chat_model.id = "gpt-4o-mini".to_string();
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
+            "id": "chatcmpl-reasoning",
+            "choices": [{
+                "delta": { "reasoning": "think" },
+                "finish_reason": "stop"
+            }]
+        })]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Use reasoning.")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let message = stream.result().await.unwrap();
+
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "think".to_string(),
+                thinking_signature: Some("reasoning".to_string()),
+                redacted: None,
+            })]
+        );
+    }
+
     #[test]
     fn omits_strict_when_compat_disables_strict_mode() {
         let mut model = model();
@@ -3498,6 +3539,27 @@ mod tests {
 
         assert_eq!(xiaomi_payload["thinking"], json!({ "type": "enabled" }));
         assert_eq!(xiaomi_payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn openai_thinking_payload_respects_reasoning_effort_compat() {
+        let opencode = crate::get_model("opencode", "grok-build-0.1").expect("grok-build-0.1");
+        let compat = get_compat(&opencode);
+        let payload = build_chat_completions_payload(
+            &opencode,
+            &Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("reasoning_effort").is_none());
     }
 
     fn assistant_message(content: Vec<AssistantContent>, model: &Model) -> AssistantMessage {
