@@ -1545,6 +1545,86 @@ mod tests {
         );
     }
 
+    fn lookup_tool() -> Tool {
+        Tool {
+            name: "lookup".to_string(),
+            description: "Look up a value".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"]
+            }),
+        }
+    }
+
+    #[test]
+    fn omits_strict_when_compat_disables_strict_mode() {
+        let mut model = model();
+        model.compat.openai_completions.supports_strict_mode = Some(false);
+        let compat = get_compat(&model);
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("Use the tool")],
+                tools: vec![lookup_tool()],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        let function = &payload["tools"][0]["function"];
+        assert_eq!(function["name"], json!("lookup"));
+        assert!(function.get("strict").is_none());
+    }
+
+    #[test]
+    fn enables_zai_tool_stream_for_supported_models_with_tools() {
+        let mut model = model();
+        model.provider = "zai".to_string();
+        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.compat.openai_completions.zai_tool_stream = Some(true);
+        let compat = get_compat(&model);
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("Use the tool")],
+                tools: vec![lookup_tool()],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["tool_stream"], json!(true));
+    }
+
+    #[test]
+    fn omits_zai_tool_stream_without_tools() {
+        let mut model = model();
+        model.provider = "zai".to_string();
+        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.compat.openai_completions.zai_tool_stream = Some(true);
+        let compat = get_compat(&model);
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("No tools")],
+                tools: Vec::new(),
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("tool_stream").is_none());
+    }
+
     fn assistant_message(content: Vec<AssistantContent>, model: &Model) -> AssistantMessage {
         AssistantMessage {
             content,
