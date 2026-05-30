@@ -2,7 +2,8 @@ use ai::{
     AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, CacheRetention, Context,
     OpenAICompletionsOptions, OpenAIResponsesAuthHeader, OpenAIResponsesOptions,
     SimpleStreamOptions, build_anthropic_payload, build_chat_completions_payload,
-    build_copilot_dynamic_headers, build_responses_payload, get_openai_completions_compat,
+    build_copilot_dynamic_headers, build_responses_payload, convert_anthropic_messages,
+    convert_openai_completions_messages, get_openai_completions_compat,
     get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
     stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
     stream_simple_openai_completions, stream_simple_openai_responses,
@@ -39,6 +40,7 @@ fn focused_provider_symbols_are_exported_from_ai_crate() {
 
     let chat_options = OpenAICompletionsOptions::default();
     let chat_compat = get_openai_completions_compat(&model);
+    let _chat_messages = convert_openai_completions_messages(&model, &context, &chat_compat);
     let _chat_payload = build_chat_completions_payload(
         &model,
         &context,
@@ -51,17 +53,14 @@ fn focused_provider_symbols_are_exported_from_ai_crate() {
     assert!(anthropic_options.interleaved_thinking);
     let _effort = AnthropicEffort::High;
     let _display = AnthropicThinkingDisplay::Summarized;
-    let _anthropic_payload = build_anthropic_payload(
-        &ai::Model {
-            api: "anthropic-messages".to_string(),
-            provider: "anthropic".to_string(),
-            ..model.clone()
-        },
-        &context,
-        &anthropic_options,
-        false,
-        None,
-    );
+    let anthropic_model = ai::Model {
+        api: "anthropic-messages".to_string(),
+        provider: "anthropic".to_string(),
+        ..model.clone()
+    };
+    let _anthropic_messages = convert_anthropic_messages(&[], &anthropic_model, false, None, false);
+    let _anthropic_payload =
+        build_anthropic_payload(&anthropic_model, &context, &anthropic_options, false, None);
 
     assert_eq!(infer_copilot_initiator(&[]), "user");
     assert!(!has_copilot_vision_input(&[]));

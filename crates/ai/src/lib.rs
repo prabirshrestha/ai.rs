@@ -47,7 +47,8 @@ pub use oauth::{
 };
 pub use providers::anthropic::{
     AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, ResolvedAnthropicCompat,
-    build_anthropic_payload, stream_anthropic, stream_simple_anthropic,
+    build_anthropic_payload, convert_messages as convert_anthropic_messages, stream_anthropic,
+    stream_simple_anthropic,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
@@ -60,6 +61,7 @@ pub use providers::github_copilot_headers::{
 };
 pub use providers::openai_completions::{
     OpenAICompletionsOptions, ResolvedOpenAICompletionsCompat, build_chat_completions_payload,
+    convert_messages as convert_openai_completions_messages,
     detect_compat as detect_openai_completions_compat, get_compat as get_openai_completions_compat,
     stream_openai_completions, stream_simple_openai_completions,
 };
