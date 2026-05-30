@@ -942,6 +942,7 @@ async fn agent_loop_event_stream_is_exported_from_ai_crate() {
     let messages = stream.result().await.unwrap();
 
     assert_eq!(messages.len(), 2);
+    assert_eq!(stream.result().await.unwrap(), messages);
     assert_eq!(events.last(), Some(&"agent_end"));
 
     registration.unregister();

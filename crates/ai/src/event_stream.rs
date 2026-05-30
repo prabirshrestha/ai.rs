@@ -10,6 +10,7 @@ use crate::{Error, Result};
 pub struct AssistantMessageEventStream {
     receiver: mpsc::UnboundedReceiver<AssistantMessageEvent>,
     result_receiver: Option<oneshot::Receiver<AssistantMessage>>,
+    result: Option<AssistantMessage>,
 }
 
 pub struct AssistantMessageEventStreamSender {
@@ -29,13 +30,19 @@ impl AssistantMessageEventStream {
             Self {
                 receiver,
                 result_receiver: Some(result_receiver),
+                result: None,
             },
         )
     }
 
     pub async fn result(&mut self) -> Result<AssistantMessage> {
+        if let Some(result) = &self.result {
+            return Ok(result.clone());
+        }
         let receiver = self.result_receiver.take().ok_or(Error::StreamClosed)?;
-        receiver.await.map_err(|_| Error::StreamClosed)
+        let result = receiver.await.map_err(|_| Error::StreamClosed)?;
+        self.result = Some(result.clone());
+        Ok(result)
     }
 }
 

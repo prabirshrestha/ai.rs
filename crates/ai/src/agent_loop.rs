@@ -17,15 +17,21 @@ use crate::{AgentError, AgentResult};
 pub struct AgentEventStream {
     receiver: mpsc::UnboundedReceiver<AgentEvent>,
     result_receiver: Option<oneshot::Receiver<AgentResult<Vec<AgentMessage>>>>,
+    result: Option<Vec<AgentMessage>>,
 }
 
 impl AgentEventStream {
     pub async fn result(&mut self) -> AgentResult<Vec<AgentMessage>> {
+        if let Some(result) = &self.result {
+            return Ok(result.clone());
+        }
         let receiver = self
             .result_receiver
             .take()
             .ok_or(AgentError::StreamClosed)?;
-        receiver.await.map_err(|_| AgentError::StreamClosed)?
+        let result = receiver.await.map_err(|_| AgentError::StreamClosed)??;
+        self.result = Some(result.clone());
+        Ok(result)
     }
 }
 
@@ -70,6 +76,7 @@ pub fn agent_loop(
     AgentEventStream {
         receiver,
         result_receiver: Some(result_receiver),
+        result: None,
     }
 }
 
@@ -105,6 +112,7 @@ pub fn agent_loop_continue(
     Ok(AgentEventStream {
         receiver,
         result_receiver: Some(result_receiver),
+        result: None,
     })
 }
 

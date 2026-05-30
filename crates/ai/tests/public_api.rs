@@ -139,6 +139,7 @@ async fn assistant_event_stream_factory_is_exported_and_terminal() {
     ));
     assert!(stream.next().await.is_none());
     assert_eq!(stream.result().await.unwrap(), message);
+    assert_eq!(stream.result().await.unwrap(), message);
 }
 
 #[test]
