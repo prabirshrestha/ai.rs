@@ -452,4 +452,56 @@ mod tests {
             vec![ToolResultContent::text("No result provided")]
         );
     }
+
+    #[test]
+    fn inserts_synthetic_result_before_user_interrupting_tool_flow() {
+        let model = copilot_claude_model();
+        let transformed = transform_messages(
+            &[
+                Message::user_text("read the file"),
+                Message::Assistant(assistant_message(vec![AssistantContent::ToolCall(
+                    ToolCall {
+                        id: "call_123|fc_123".to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({ "path": "README.md" }),
+                        thought_signature: None,
+                    },
+                )])),
+                Message::user_text("Never mind, answer directly."),
+            ],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        let synthetic_index = transformed
+            .iter()
+            .position(|message| matches!(message, Message::ToolResult(result) if result.is_error))
+            .expect("synthetic tool result");
+        let user_index = transformed
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    Message::User(UserMessage {
+                        content: UserMessageContent::Text(text),
+                        ..
+                    }) if text == "Never mind, answer directly."
+                )
+            })
+            .expect("interrupting user message");
+
+        assert!(
+            synthetic_index < user_index,
+            "synthetic result should precede the interrupting user turn"
+        );
+        let Message::ToolResult(result) = &transformed[synthetic_index] else {
+            panic!("expected synthetic result");
+        };
+        assert_eq!(result.tool_call_id, "call_123_fc_123");
+        assert_eq!(result.tool_name, "read");
+        assert_eq!(
+            result.content,
+            vec![ToolResultContent::text("No result provided")]
+        );
+    }
 }
