@@ -2123,6 +2123,50 @@ mod tests {
         assert_eq!(from_claude_code_name("Glob", &tools, true), "Glob");
     }
 
+    #[test]
+    fn oauth_tool_names_preserve_builtin_original_names_and_custom_names() {
+        let model = anthropic_model("claude-sonnet-4-6");
+        let tools = ["read", "write", "edit", "bash", "my_custom_tool"]
+            .into_iter()
+            .map(|name| Tool {
+                name: name.to_string(),
+                description: format!("{name} tool"),
+                parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+            })
+            .collect::<Vec<_>>();
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            tools: tools.clone(),
+            ..Default::default()
+        };
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), true, None);
+        let tool_names: Vec<_> = payload["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            tool_names,
+            vec!["Read", "Write", "Edit", "Bash", "my_custom_tool"]
+        );
+        for (provider_name, original_name) in [
+            ("Read", "read"),
+            ("Write", "write"),
+            ("Edit", "edit"),
+            ("Bash", "bash"),
+            ("my_custom_tool", "my_custom_tool"),
+        ] {
+            assert_eq!(
+                from_claude_code_name(provider_name, &tools, true),
+                original_name
+            );
+        }
+        assert_eq!(from_claude_code_name("Read", &tools, false), "Read");
+    }
+
     fn sse_body(events: &[(&str, String)]) -> String {
         events
             .iter()
