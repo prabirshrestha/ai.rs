@@ -2077,6 +2077,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaves_response_model_empty_when_chunks_echo_requested_model() {
+        let mut routed_model = model();
+        routed_model.id = "openrouter/auto".to_string();
+        routed_model.provider = "openrouter".to_string();
+        routed_model.reasoning = false;
+        routed_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-echo",
+                "model": "openrouter/auto",
+                "choices": [{ "index": 0, "delta": { "content": "hi" } }]
+            }),
+            json!({
+                "id": "chatcmpl-echo",
+                "model": "openrouter/auto",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": { "cached_tokens": 0 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            routed_model,
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.model, "openrouter/auto");
+        assert_eq!(message.response_model, None);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
     async fn ignores_empty_or_missing_chunk_model_for_response_model() {
         let mut routed_model = model();
         routed_model.id = "openrouter/auto".to_string();
