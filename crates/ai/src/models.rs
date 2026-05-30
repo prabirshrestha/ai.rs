@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 use crate::types::{Model, ModelThinkingLevel, Usage, UsageCost};
@@ -81,7 +80,64 @@ pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
     }
 }
 
-type ModelRegistry = HashMap<String, HashMap<String, Model>>;
+#[derive(Debug, Clone, Default)]
+struct ProviderModels {
+    provider: String,
+    models: Vec<Model>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelRegistry {
+    providers: Vec<ProviderModels>,
+}
+
+impl ModelRegistry {
+    fn register_model(&mut self, provider: String, model: Model) {
+        if let Some(provider_models) = self
+            .providers
+            .iter_mut()
+            .find(|entry| entry.provider == provider)
+        {
+            if let Some(existing) = provider_models
+                .models
+                .iter_mut()
+                .find(|existing| existing.id == model.id)
+            {
+                *existing = model;
+            } else {
+                provider_models.models.push(model);
+            }
+        } else {
+            self.providers.push(ProviderModels {
+                provider,
+                models: vec![model],
+            });
+        }
+    }
+
+    fn get_model(&self, provider: &str, model_id: &str) -> Option<Model> {
+        self.providers
+            .iter()
+            .find(|entry| entry.provider == provider)
+            .and_then(|entry| entry.models.iter().find(|model| model.id == model_id))
+            .cloned()
+    }
+
+    fn get_providers(&self) -> Vec<String> {
+        self.providers
+            .iter()
+            .map(|entry| entry.provider.clone())
+            .collect()
+    }
+
+    fn get_models(&self, provider: &str) -> Vec<Model> {
+        self.providers
+            .iter()
+            .find(|entry| entry.provider == provider)
+            .map(|entry| entry.models.clone())
+            .unwrap_or_default()
+    }
+}
 
 fn registry() -> &'static RwLock<ModelRegistry> {
     static REGISTRY: OnceLock<RwLock<ModelRegistry>> = OnceLock::new();
@@ -92,45 +148,55 @@ pub fn register_model(provider: impl Into<String>, model: Model) {
     registry()
         .write()
         .expect("model registry poisoned")
-        .entry(provider.into())
-        .or_default()
-        .insert(model.id.clone(), model);
+        .register_model(provider.into(), model);
 }
 
 pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
     registry()
         .read()
         .expect("model registry poisoned")
-        .get(provider)
-        .and_then(|models| models.get(model_id))
-        .cloned()
+        .get_model(provider, model_id)
 }
 
 pub fn get_providers() -> Vec<String> {
-    let mut providers = registry()
+    registry()
         .read()
         .expect("model registry poisoned")
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    providers.sort();
-    providers
+        .get_providers()
 }
 
 pub fn get_models(provider: &str) -> Vec<Model> {
-    let mut models = registry()
+    registry()
         .read()
         .expect("model registry poisoned")
-        .get(provider)
-        .map(|models| models.values().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-    models
+        .get_models(provider)
 }
 
 fn builtin_models() -> ModelRegistry {
-    serde_json::from_str(include_str!("models.generated.json"))
-        .expect("generated model registry should deserialize")
+    let raw: serde_json::Value = serde_json::from_str(include_str!("models.generated.json"))
+        .expect("generated model registry should parse");
+    let providers = raw
+        .as_object()
+        .expect("generated model registry should be an object")
+        .iter()
+        .map(|(provider, models)| {
+            let models = models
+                .as_object()
+                .expect("generated provider models should be an object")
+                .values()
+                .cloned()
+                .map(|model| {
+                    serde_json::from_value(model)
+                        .expect("generated model registry should deserialize")
+                })
+                .collect();
+            ProviderModels {
+                provider: provider.clone(),
+                models,
+            }
+        })
+        .collect();
+    ModelRegistry { providers }
 }
 
 #[cfg(test)]
@@ -140,9 +206,13 @@ mod tests {
     #[test]
     fn generated_registry_matches_upstream_catalog_size() {
         let registry = builtin_models();
-        assert_eq!(registry.len(), 32);
+        assert_eq!(registry.providers.len(), 32);
         assert_eq!(
-            registry.values().map(|models| models.len()).sum::<usize>(),
+            registry
+                .providers
+                .iter()
+                .map(|provider| provider.models.len())
+                .sum::<usize>(),
             931
         );
     }
@@ -165,6 +235,108 @@ mod tests {
             get_model("openrouter", "stepfun/step-3.7-flash").expect("stepfun/step-3.7-flash");
         assert_eq!(step.max_tokens, 256_000);
         assert!(get_providers().contains(&"anthropic".to_string()));
+    }
+
+    #[test]
+    fn generated_provider_order_matches_upstream_registry_order() {
+        let registry = builtin_models();
+        let providers = registry.get_providers();
+
+        assert_eq!(
+            &providers[..10],
+            [
+                "amazon-bedrock",
+                "anthropic",
+                "azure-openai-responses",
+                "cerebras",
+                "cloudflare-ai-gateway",
+                "cloudflare-workers-ai",
+                "deepseek",
+                "fireworks",
+                "github-copilot",
+                "google",
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_model_order_matches_upstream_registry_order() {
+        let registry = builtin_models();
+        let openai_ids = registry
+            .get_models("openai")
+            .into_iter()
+            .take(10)
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        let copilot_ids = registry
+            .get_models("github-copilot")
+            .into_iter()
+            .take(10)
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            openai_ids,
+            [
+                "gpt-4",
+                "gpt-4-turbo",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4.1-nano",
+                "gpt-4o",
+                "gpt-4o-2024-05-13",
+                "gpt-4o-2024-08-06",
+                "gpt-4o-2024-11-20",
+                "gpt-4o-mini",
+            ]
+        );
+        assert_eq!(
+            copilot_ids,
+            [
+                "claude-haiku-4.5",
+                "claude-opus-4.5",
+                "claude-opus-4.6",
+                "claude-opus-4.7",
+                "claude-opus-4.8",
+                "claude-sonnet-4.5",
+                "claude-sonnet-4.6",
+                "gemini-2.5-pro",
+                "gemini-3-flash-preview",
+                "gemini-3.1-pro-preview",
+            ]
+        );
+    }
+
+    #[test]
+    fn register_model_preserves_insertion_order_and_updates_in_place() {
+        let provider = "ordered-test-provider";
+        let mut first = get_model("openai", "gpt-4o-mini").expect("gpt-4o-mini");
+        first.id = "z-model".to_string();
+        first.provider = provider.to_string();
+        let mut second = first.clone();
+        second.id = "a-model".to_string();
+
+        register_model(provider, first.clone());
+        register_model(provider, second.clone());
+
+        let ids = get_models(provider)
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["z-model", "a-model"]);
+
+        first.name = "Updated Z Model".to_string();
+        register_model(provider, first);
+
+        let models = get_models(provider);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-model", "a-model"]
+        );
+        assert_eq!(models[0].name, "Updated Z Model");
     }
 
     #[test]
