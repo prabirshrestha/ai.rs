@@ -205,6 +205,41 @@ async fn local_agent_openai_responses_gpt55_low_effort() -> ai::AgentResult<()> 
 }
 
 #[tokio::test]
+async fn local_agent_openai_responses_gpt55_tool_call() -> ai::AgentResult<()> {
+    if skip_unless_available("local_agent_openai_responses_gpt55_tool_call").await {
+        return Ok(());
+    }
+
+    let mut options = AgentOptions::new(local_model("openai-responses", "gpt-5.5", true));
+    options.initial_state.system_prompt =
+        Some("When the echo_check tool is available, call it once before answering.".to_string());
+    options.initial_state.tools = vec![std::sync::Arc::new(LocalEchoTool)];
+    options.options = local_options(Some(ModelThinkingLevel::Low));
+    let agent = Agent::new(options);
+
+    agent
+        .prompt_text("Use echo_check with value local-tool-ok.", Vec::new())
+        .await?;
+
+    let state = agent.state().await;
+    let tool_result = state
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "echo_check" => Some(result),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected echo_check tool result, got {:#?}", state.messages));
+
+    assert!(!tool_result.is_error, "{tool_result:#?}");
+    assert!(tool_result.content.iter().any(|content| matches!(
+        content,
+        ToolResultContent::Text(text) if text.text == "local-tool-ok"
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_agent_openai_chat_completions_streaming() -> ai::AgentResult<()> {
     if skip_unless_available("local_agent_openai_chat_completions_streaming").await {
         return Ok(());
