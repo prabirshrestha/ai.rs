@@ -1039,7 +1039,8 @@ fn headers(
     auth_header: OpenAIResponsesAuthHeader,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
-    if !api_key.is_empty() {
+    let is_cloudflare_ai_gateway = model.provider == "cloudflare-ai-gateway";
+    if !api_key.is_empty() && !is_cloudflare_ai_gateway {
         match auth_header {
             OpenAIResponsesAuthHeader::Bearer => {
                 headers.insert(
@@ -1079,14 +1080,6 @@ fn headers(
             headers.insert(name, value);
         }
     }
-    for (name, value) in &options.headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let value = HeaderValue::from_str(value)
-            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
-        headers.insert(name, value);
-    }
     if let Some(session_id) = &options.session_id {
         if cache_retention != CacheRetention::None {
             if compat.send_session_id_header {
@@ -1102,6 +1095,21 @@ fn headers(
                     .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
             );
         }
+    }
+    for (name, value) in &options.headers {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
+        headers.insert(name, value);
+    }
+    if !api_key.is_empty() && is_cloudflare_ai_gateway {
+        headers.insert(
+            HeaderName::from_static("cf-aig-authorization"),
+            HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|e| Error::InvalidHeaderValue("cf-aig-authorization".to_string(), e))?,
+        );
     }
     Ok(headers)
 }
@@ -1204,6 +1212,81 @@ mod tests {
         assert_eq!(payload["input"][0]["role"], "developer");
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn response_headers_let_explicit_headers_override_session_affinity() {
+        let model = model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+        let mut options = StreamOptions {
+            session_id: Some("session-123".to_string()),
+            ..Default::default()
+        };
+        options
+            .headers
+            .insert("session_id".to_string(), "override-session".to_string());
+        options.headers.insert(
+            "x-client-request-id".to_string(),
+            "override-request".to_string(),
+        );
+
+        let headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
+            Some("override-session")
+        );
+        assert_eq!(
+            headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("override-request")
+        );
+    }
+
+    #[test]
+    fn response_headers_use_cloudflare_ai_gateway_authorization() {
+        let mut model = model();
+        model.provider = "cloudflare-ai-gateway".to_string();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+        };
+
+        let headers = headers(
+            &model,
+            &context,
+            &StreamOptions::default(),
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+            OpenAIResponsesAuthHeader::Bearer,
+        )
+        .unwrap();
+
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(
+            headers
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-key")
+        );
     }
 
     #[test]
