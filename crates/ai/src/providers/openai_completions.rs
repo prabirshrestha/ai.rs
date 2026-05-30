@@ -792,14 +792,13 @@ pub fn convert_messages(
         }
 
         match msg {
-            crate::types::Message::User(user) => {
-                match &user.content {
-                    UserMessageContent::Text(text) => {
-                        params
-                            .push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
-                    }
-                    UserMessageContent::Parts(parts) => {
-                        let content: Vec<Value> = parts
+            crate::types::Message::User(user) => match &user.content {
+                UserMessageContent::Text(text) => {
+                    params.push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
+                    last_role = Some("user");
+                }
+                UserMessageContent::Parts(parts) => {
+                    let content: Vec<Value> = parts
                             .iter()
                             .map(|part| match part {
                                 UserContent::Text(text) => {
@@ -811,13 +810,12 @@ pub fn convert_messages(
                                 }),
                             })
                             .collect();
-                        if !content.is_empty() {
-                            params.push(json!({ "role": "user", "content": content }));
-                        }
+                    if !content.is_empty() {
+                        params.push(json!({ "role": "user", "content": content }));
+                        last_role = Some("user");
                     }
                 }
-                last_role = Some("user");
-            }
+            },
             crate::types::Message::Assistant(assistant) => {
                 let mut assistant_msg = json!({
                     "role": "assistant",
@@ -939,8 +937,8 @@ pub fn convert_messages(
                     });
                 if has_content || assistant_obj.contains_key("tool_calls") {
                     params.push(assistant_msg);
+                    last_role = Some("assistant");
                 }
-                last_role = Some("assistant");
             }
             crate::types::Message::ToolResult(_) => {
                 let mut image_blocks = Vec::new();
@@ -2033,6 +2031,42 @@ mod tests {
 
         assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
         assert_eq!(image_parts, 2);
+    }
+
+    #[test]
+    fn skipped_empty_assistant_preserves_tool_result_bridge_state() {
+        let model = model();
+        let mut compat = get_compat(&model);
+        compat.requires_assistant_after_tool_result = true;
+        let empty_assistant = AssistantMessage::empty_for(&model);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "tool-1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("done")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 1,
+                }),
+                Message::Assistant(empty_assistant),
+                Message::user_text("next"),
+            ],
+            tools: Vec::new(),
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+        let roles = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(roles, ["tool", "assistant", "user"]);
+        assert_eq!(
+            messages[1]["content"],
+            json!("I have processed the tool results.")
+        );
     }
 
     #[test]

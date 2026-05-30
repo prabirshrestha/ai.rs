@@ -797,9 +797,10 @@ pub fn convert_responses_messages(
                             }),
                         })
                         .collect();
-                    if !content.is_empty() {
-                        messages.push(json!({ "role": "user", "content": content }));
+                    if content.is_empty() {
+                        continue;
                     }
+                    messages.push(json!({ "role": "user", "content": content }));
                 }
             },
             crate::types::Message::Assistant(assistant) => {
@@ -878,6 +879,9 @@ pub fn convert_responses_messages(
                             }));
                         }
                     }
+                }
+                if output.is_empty() {
+                    continue;
                 }
                 messages.extend(output);
             }
@@ -1548,6 +1552,43 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(message_ids, ["msg_pi_1", "msg_pi_1_1"]);
+    }
+
+    #[test]
+    fn fallback_message_ids_skip_empty_converted_assistant_turns() {
+        let model = model();
+        let mut empty_assistant = AssistantMessage::empty_for(&model);
+        empty_assistant
+            .content
+            .push(AssistantContent::Thinking(ThinkingContent {
+                thinking: "transient reasoning".to_string(),
+                thinking_signature: None,
+                redacted: None,
+            }));
+        let mut text_assistant = AssistantMessage::empty_for(&model);
+        text_assistant
+            .content
+            .push(AssistantContent::Text(TextContent {
+                text: "visible".to_string(),
+                text_signature: None,
+            }));
+
+        let messages = convert_responses_messages(
+            &model,
+            &Context {
+                messages: vec![
+                    Message::Assistant(empty_assistant),
+                    Message::Assistant(text_assistant),
+                ],
+                ..Default::default()
+            },
+            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            true,
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], json!("msg_pi_0"));
+        assert_eq!(messages[0]["content"][0]["text"], json!("visible"));
     }
 
     #[test]
