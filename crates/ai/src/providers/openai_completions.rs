@@ -664,7 +664,12 @@ pub fn build_chat_completions_payload(
     }
     if model.base_url.contains("ai-gateway.vercel.sh") {
         if let Some(routing) = &compat.vercel_gateway_routing {
-            object.insert("providerOptions".to_string(), json!({ "gateway": routing }));
+            if let Some(gateway_options) = vercel_gateway_options(routing) {
+                object.insert(
+                    "providerOptions".to_string(),
+                    json!({ "gateway": gateway_options }),
+                );
+            }
         }
     }
 
@@ -673,6 +678,16 @@ pub fn build_chat_completions_payload(
     }
 
     payload
+}
+
+fn vercel_gateway_options(routing: &Value) -> Option<Value> {
+    let mut gateway = serde_json::Map::new();
+    for key in ["only", "order"] {
+        if let Some(value) = routing.get(key).filter(|value| !value.is_null()) {
+            gateway.insert(key.to_string(), value.clone());
+        }
+    }
+    (!gateway.is_empty()).then_some(Value::Object(gateway))
 }
 
 fn apply_reasoning_options(
@@ -1846,6 +1861,67 @@ mod tests {
 
         assert_eq!(payload["reasoning"], json!({ "effort": "high" }));
         assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn chat_payload_omits_empty_vercel_gateway_routing() {
+        let mut model = model();
+        model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
+        model.compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                vercel_gateway_routing: Some(json!({})),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("providerOptions").is_none());
+    }
+
+    #[test]
+    fn chat_payload_maps_vercel_gateway_routing_to_gateway_options() {
+        let mut model = model();
+        model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
+        model.compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                vercel_gateway_routing: Some(json!({
+                    "only": ["openai"],
+                    "order": ["openai", "anthropic"],
+                    "ignored": ["not-forwarded"]
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["providerOptions"],
+            json!({ "gateway": { "only": ["openai"], "order": ["openai", "anthropic"] } })
+        );
     }
 
     #[test]
