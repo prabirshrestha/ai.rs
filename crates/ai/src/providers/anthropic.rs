@@ -2347,6 +2347,67 @@ mod tests {
             .join("\n")
     }
 
+    fn successful_anthropic_sse_body() -> String {
+        sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_retry",
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "ok" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" },
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ])
+    }
+
     async fn spawn_sse_server(body: String) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2360,6 +2421,32 @@ mod tests {
                 body
             );
             socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_retrying_sse_server(body: String, attempts: Arc<AtomicUsize>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0u8; 4096];
+                let _ = socket.read(&mut buffer).await.unwrap();
+                let response = if attempt == 0 {
+                    "HTTP/1.1 500 Internal Server Error\r\nretry-after-ms: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
         });
         format!("http://{addr}")
     }
@@ -2702,6 +2789,77 @@ mod tests {
 
         assert_eq!(result.stop_reason, StopReason::Error);
         assert_eq!(response_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_does_not_retry_by_default() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let base_url =
+            spawn_retrying_sse_server(successful_anthropic_sse_body(), Arc::clone(&attempts)).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("500"))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_honors_explicit_retry_settings() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let base_url =
+            spawn_retrying_sse_server(successful_anthropic_sse_body(), Arc::clone(&attempts)).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let mut stream = stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    max_retries: Some(1),
+                    max_retry_delay_ms: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.response_id.as_deref(), Some("msg_retry"));
     }
 
     #[tokio::test]
