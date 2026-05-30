@@ -1389,6 +1389,34 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_omits_long_retention_when_compat_disables_it() {
+        let mut model = model();
+        model.compat.openai_responses.supports_long_cache_retention = Some(false);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                session_id: Some("session-compat-false".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Long,
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("session-compat-false"));
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
     fn response_payload_omits_prompt_cache_fields_when_retention_is_none() {
         let model = model();
         let context = Context {
