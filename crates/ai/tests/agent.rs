@@ -820,6 +820,42 @@ async fn agent_queues_can_be_cleared_independently() {
 }
 
 #[tokio::test]
+async fn agent_reset_clears_runtime_state_and_queues() {
+    let registration = register_faux_provider(None);
+    let model = registration.get_model();
+    let mut options = AgentOptions::new(model.clone());
+    options.initial_state.system_prompt = Some("Keep this prompt".to_string());
+    options.initial_state.tools = vec![Arc::new(EchoTool::default())];
+    options.initial_state.messages = vec![Message::user_text("existing")];
+    options.initial_state.is_streaming = true;
+    options.initial_state.streaming_message = Some(Message::user_text("streaming"));
+    options
+        .initial_state
+        .pending_tool_calls
+        .insert("tool-1".to_string());
+    options.initial_state.error_message = Some("previous error".to_string());
+    let agent = Agent::new(options);
+    agent.steer(Message::user_text("steer")).await;
+    agent.follow_up(Message::user_text("follow")).await;
+    assert!(agent.has_queued_messages().await);
+
+    agent.reset().await;
+
+    let state = agent.state().await;
+    assert_eq!(state.system_prompt.as_deref(), Some("Keep this prompt"));
+    assert_eq!(state.model, model);
+    assert_eq!(state.tools.len(), 1);
+    assert!(state.messages.is_empty());
+    assert!(!state.is_streaming);
+    assert!(state.streaming_message.is_none());
+    assert!(state.pending_tool_calls.is_empty());
+    assert!(state.error_message.is_none());
+    assert!(!agent.has_queued_messages().await);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_continue_run_processes_queued_follow_up_after_assistant_tail() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("processed", None)]);
