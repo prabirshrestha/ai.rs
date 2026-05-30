@@ -7,6 +7,7 @@ use ai::{
     BeforeToolCallContext, BeforeToolCallResult, FauxAssistantMessageOptions, FauxResponseStep,
     Message, QueueMode, StopReason, Tool, ToolExecutionMode, agent_loop, agent_loop_continue,
     faux_assistant_message, faux_text, faux_tool_call, register_faux_provider, run_agent_loop,
+    run_agent_loop_continue,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -581,6 +582,56 @@ async fn agent_loop_continue_rejects_invalid_contexts() {
         assistant_tail,
         Some(AgentError::CannotContinueFromAssistant)
     ));
+
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn agent_loop_continue_returns_only_new_messages_without_reemitting_context() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("continued", None)]);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emit: AgentEventSink = Arc::new({
+        let events = Arc::clone(&events);
+        move |event| {
+            let events = Arc::clone(&events);
+            Box::pin(async move {
+                events.lock().await.push(event);
+                Ok(())
+            })
+        }
+    });
+
+    let messages = run_agent_loop_continue(
+        AgentContext {
+            system_prompt: Some("You are helpful.".to_string()),
+            messages: vec![Message::user_text("existing prompt")],
+            tools: Vec::new(),
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        emit,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(message_roles(&messages), vec!["assistant"]);
+    let message_end_roles = events
+        .lock()
+        .await
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageEnd { message } => Some(match message {
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+                Message::ToolResult(_) => "toolResult",
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(message_end_roles, vec!["assistant"]);
 
     registration.unregister();
 }
