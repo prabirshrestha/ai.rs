@@ -1667,6 +1667,66 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_omits_tools_when_context_tools_are_empty() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("tools").is_none());
+    }
+
+    #[test]
+    fn chat_payload_sends_empty_tools_for_tool_history_without_current_tools() {
+        let model = model();
+        let mut assistant = AssistantMessage::empty_for(&model);
+        assistant.content.push(AssistantContent::ToolCall(ToolCall {
+            id: "tool-1".to_string(),
+            name: "read".to_string(),
+            arguments: json!({ "path": "README.md" }),
+            thought_signature: None,
+        }));
+        assistant.stop_reason = StopReason::ToolUse;
+
+        let context = Context {
+            messages: vec![
+                Message::user_text("read"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "tool-1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("done")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 0,
+                }),
+            ],
+            tools: Vec::new(),
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["tools"], json!([]));
+    }
+
+    #[test]
     fn chat_headers_set_and_omit_session_affinity_by_cache_retention() {
         let mut model = model();
         model.base_url = "https://proxy.example.com/v1".to_string();
