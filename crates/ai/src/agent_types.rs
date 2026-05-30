@@ -306,14 +306,10 @@ pub fn text_result_message(
 }
 
 pub fn user_message(text: impl Into<String>, images: Vec<ImageContent>) -> AgentMessage {
-    if images.is_empty() {
-        Message::user_text(text)
-    } else {
-        let mut content = vec![crate::UserContent::text(text)];
-        content.extend(images.into_iter().map(crate::UserContent::Image));
-        Message::User(crate::UserMessage {
-            content: crate::UserMessageContent::Parts(content),
-            timestamp: crate::utils::time::now_millis(),
-        })
-    }
+    let mut content = vec![crate::UserContent::text(text)];
+    content.extend(images.into_iter().map(crate::UserContent::Image));
+    Message::User(crate::UserMessage {
+        content: crate::UserMessageContent::Parts(content),
+        timestamp: crate::utils::time::now_millis(),
+    })
 }

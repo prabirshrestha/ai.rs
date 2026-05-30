@@ -96,6 +96,26 @@ async fn agent_prompt_records_user_and_assistant_messages() {
 }
 
 #[tokio::test]
+async fn agent_prompt_text_records_text_content_part() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([faux_assistant_message("hello", None)]);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+
+    agent.prompt_text("hi", Vec::new()).await.unwrap();
+
+    let state = agent.state().await;
+    let Message::User(user) = &state.messages[0] else {
+        panic!("expected user message");
+    };
+    let ai::UserMessageContent::Parts(parts) = &user.content else {
+        panic!("expected content parts");
+    };
+    assert_eq!(parts, &vec![ai::UserContent::text("hi")]);
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_prompt_emits_full_lifecycle_for_provider_failures() {
     let registration = register_faux_provider(None);
     let mut options = AgentOptions::new(registration.get_model());
