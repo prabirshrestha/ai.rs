@@ -176,6 +176,7 @@ pub struct SimpleStreamOptions {
     pub stream: StreamOptions,
     pub reasoning: Option<ModelThinkingLevel>,
     pub thinking_budgets: Option<ThinkingBudgets>,
+    pub tool_choice: Option<Value>,
 }
 
 #[derive(Clone, Default)]

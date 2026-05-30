@@ -113,6 +113,7 @@ pub fn stream_simple_anthropic(
         return immediate_error(model, "No API key for provider");
     };
     let base = build_base_options(&model, &options, api_key);
+    let tool_choice = options.tool_choice.clone();
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
         return stream_anthropic(
@@ -121,6 +122,7 @@ pub fn stream_simple_anthropic(
             AnthropicOptions {
                 base,
                 thinking_enabled: Some(false),
+                tool_choice,
                 ..Default::default()
             },
         );
@@ -134,6 +136,7 @@ pub fn stream_simple_anthropic(
                 base,
                 thinking_enabled: Some(true),
                 effort: Some(map_thinking_level_to_effort(&model, reasoning)),
+                tool_choice,
                 ..Default::default()
             },
         );
@@ -154,6 +157,7 @@ pub fn stream_simple_anthropic(
             base: adjusted_base,
             thinking_enabled: Some(true),
             thinking_budget_tokens: Some(adjusted.thinking_budget),
+            tool_choice,
             ..Default::default()
         },
     )
@@ -699,7 +703,11 @@ pub fn build_anthropic_payload(
         }
     }
     if let Some(tool_choice) = &options.tool_choice {
-        object.insert("tool_choice".to_string(), tool_choice.clone());
+        let value = tool_choice
+            .as_str()
+            .map(|choice| json!({ "type": choice }))
+            .unwrap_or_else(|| tool_choice.clone());
+        object.insert("tool_choice".to_string(), value);
     }
     payload
 }
@@ -1345,6 +1353,31 @@ mod tests {
 
         assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
         assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn string_tool_choice_is_wrapped_for_anthropic_payload() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("Use lookup")],
+                tools: vec![Tool {
+                    name: "lookup".to_string(),
+                    description: "Look up a value".to_string(),
+                    parameters: json!({ "type": "object" }),
+                }],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                tool_choice: Some(json!("any")),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["tool_choice"], json!({ "type": "any" }));
     }
 
     #[test]

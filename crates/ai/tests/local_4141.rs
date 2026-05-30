@@ -31,6 +31,7 @@ fn local_options(reasoning: Option<ModelThinkingLevel>) -> SimpleStreamOptions {
         },
         reasoning,
         thinking_budgets: None,
+        tool_choice: None,
     }
 }
 

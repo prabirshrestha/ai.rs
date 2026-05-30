@@ -79,7 +79,7 @@ pub fn stream_simple_openai_completions(
         context,
         OpenAICompletionsOptions {
             base,
-            tool_choice: None,
+            tool_choice: options.tool_choice,
             reasoning_effort,
         },
     )
@@ -1426,8 +1426,9 @@ fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventS
 mod tests {
     use super::*;
     use crate::types::{
-        Message, ModelCompat, ModelCost, OpenAICompletionsCompat, ToolResultMessage,
+        Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ToolResultMessage,
     };
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1750,6 +1751,62 @@ mod tests {
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
         assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn stream_simple_forwards_tool_choice_to_payload() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
+            "id": "chatcmpl-3",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "prompt_tokens_details": { "cached_tokens": 0 },
+                "completion_tokens_details": { "reasoning_tokens": 0 }
+            }
+        })]))
+        .await;
+
+        let captured_payload = Arc::new(Mutex::new(None));
+        let hook_capture = Arc::clone(&captured_payload);
+        let on_payload: PayloadHook = Arc::new(move |payload, _model| {
+            let hook_capture = Arc::clone(&hook_capture);
+            Box::pin(async move {
+                *hook_capture.lock().unwrap() = Some(payload.clone());
+                Ok(Some(payload))
+            })
+        });
+
+        let mut stream = stream_simple_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Call lookup")],
+                tools: vec![lookup_tool()],
+                ..Default::default()
+            },
+            SimpleStreamOptions {
+                stream: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    on_payload: Some(on_payload),
+                    ..Default::default()
+                },
+                tool_choice: Some(json!("required")),
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        let payload = captured_payload.lock().unwrap().take().expect("payload");
+        assert_eq!(payload["tool_choice"], json!("required"));
+        assert!(
+            payload["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
+        );
     }
 
     #[test]
