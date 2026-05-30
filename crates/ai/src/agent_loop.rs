@@ -790,13 +790,13 @@ async fn execute_prepared_tool_call(
         let emit = emit_for_update.clone();
         let tool_call = update_tool_call.clone();
         let handle = tokio::spawn(async move {
-            let _ = emit(AgentEvent::ToolExecutionUpdate {
+            emit(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: tool_call.id,
                 tool_name: tool_call.name,
                 args: tool_call.arguments,
                 partial_result,
             })
-            .await;
+            .await
         });
         if let Ok(mut tasks) = update_tasks_for_callback.lock() {
             tasks.push(handle);
@@ -817,7 +817,7 @@ async fn execute_prepared_tool_call(
         Err(error) => (true, error_tool_result(error.to_string())),
     };
 
-    await_tool_update_tasks(&update_tasks).await;
+    await_tool_update_tasks(&update_tasks).await?;
 
     if let Some(after_tool_call) = &config.after_tool_call {
         match after_tool_call(
@@ -865,14 +865,28 @@ async fn execute_prepared_tool_call(
     Ok((tool_call, is_error, result))
 }
 
-async fn await_tool_update_tasks(tasks: &Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>) {
+async fn await_tool_update_tasks(
+    tasks: &Arc<StdMutex<Vec<tokio::task::JoinHandle<AgentResult<()>>>>>,
+) -> AgentResult<()> {
     let handles = match tasks.lock() {
         Ok(mut tasks) => tasks.drain(..).collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
+        Err(error) => {
+            return Err(AgentError::Other(format!(
+                "tool update task lock poisoned: {error}"
+            )));
+        }
     };
     for handle in handles {
-        let _ = handle.await;
+        match handle.await {
+            Ok(result) => result?,
+            Err(error) => {
+                return Err(AgentError::Other(format!(
+                    "tool update task failed: {error}"
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
 fn finalized_error(tool_call: crate::ToolCall, message: impl Into<String>) -> FinalizedToolCall {

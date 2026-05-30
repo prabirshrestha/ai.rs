@@ -1375,6 +1375,46 @@ async fn tool_update_events_flush_even_when_callback_future_is_not_awaited() {
 }
 
 #[tokio::test]
+async fn tool_update_event_errors_propagate_from_agent_loop() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([tool_use_response(vec![faux_tool_call(
+        "echo",
+        json!({ "value": "first" }),
+        Some("tool-1".to_string()),
+    )])]);
+    let emit: AgentEventSink = Arc::new(|event| {
+        Box::pin(async move {
+            if matches!(event, AgentEvent::ToolExecutionUpdate { .. }) {
+                return Err(AgentError::Other("update failed".to_string()));
+            }
+            Ok(())
+        })
+    });
+
+    let error = run_agent_loop(
+        vec![Message::user_text("run tool")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                emit_update_without_await: true,
+                ..Default::default()
+            })],
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        emit,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "update failed");
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn prepare_next_turn_updates_context_before_tool_continuation() {
     let registration = register_faux_provider(None);
     let second_turn_system_prompt = Arc::new(Mutex::new(None));
