@@ -370,14 +370,11 @@ async fn run_stream(
                     == Some("reasoning")
                 {
                     if let Some(item) = current_item.as_mut() {
-                        item["summary"].as_array_mut().map(|summary| {
-                            if let Some(part) = parsed.get("part") {
-                                summary.push(part.clone());
-                            }
-                        });
-                        if item.get("summary").is_none() {
-                            item["summary"] =
-                                json!([parsed.get("part").cloned().unwrap_or(Value::Null)]);
+                        let part = parsed.get("part").cloned().unwrap_or(Value::Null);
+                        if let Some(Value::Array(summary)) = item.get_mut("summary") {
+                            summary.push(part);
+                        } else {
+                            item["summary"] = json!([part]);
                         }
                     }
                 }
@@ -2164,6 +2161,95 @@ mod tests {
                         "type": "reasoning",
                         "id": "rs_test",
                         "summary": []
+                    })
+                    .to_string()
+                ),
+                redacted: None,
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_summary_part_added_initializes_null_summary() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_test",
+                    "summary": null
+                }
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "part": { "type": "summary_text", "text": "" }
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "delta": "kept"
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.done"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_test",
+                    "summary": null
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AssistantMessageEvent::ThinkingDelta { delta, .. } = event {
+                deltas.push(delta);
+            }
+        }
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(deltas, vec!["kept", "\n\n"]);
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "kept\n\n".to_string(),
+                thinking_signature: Some(
+                    json!({
+                        "type": "reasoning",
+                        "id": "rs_test",
+                        "summary": null
                     })
                     .to_string()
                 ),
