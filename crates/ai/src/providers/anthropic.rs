@@ -865,16 +865,15 @@ fn convert_content_blocks(content: &[ToolResultContent]) -> Value {
         .iter()
         .any(|content| matches!(content, ToolResultContent::Image(_)));
     if !has_images {
-        return json!(
-            content
-                .iter()
-                .filter_map(|content| match content {
-                    ToolResultContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        let text = content
+            .iter()
+            .filter_map(|content| match content {
+                ToolResultContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return json!(sanitize_surrogates(&text));
     }
 
     let mut blocks: Vec<Value> = content
@@ -1370,6 +1369,35 @@ mod tests {
         assert_eq!(
             assistant["content"],
             json!([{ "type": "thinking", "thinking": "internal reasoning", "signature": "" }])
+        );
+    }
+
+    #[test]
+    fn text_only_tool_result_content_uses_concatenated_string() {
+        let model = anthropic_model("claude-haiku-4-5");
+        let converted = convert_messages(
+            &[crate::types::Message::ToolResult(
+                crate::types::ToolResultMessage {
+                    tool_call_id: "toolu_123".to_string(),
+                    tool_name: "lookup".to_string(),
+                    content: vec![
+                        ToolResultContent::text("first"),
+                        ToolResultContent::text("second"),
+                    ],
+                    details: None,
+                    is_error: false,
+                    timestamp: 1,
+                },
+            )],
+            &model,
+            false,
+            None,
+            false,
+        );
+
+        assert_eq!(
+            converted[0]["content"][0]["content"],
+            json!("first\nsecond")
         );
     }
 
