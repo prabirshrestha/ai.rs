@@ -582,10 +582,10 @@ async fn run_stream(
                 }
                 if let Some(usage) = response.get("usage") {
                     output.usage = parse_response_usage(usage, &model);
-                    if let Some(service_tier) = options
-                        .service_tier
-                        .as_deref()
-                        .or_else(|| response.get("service_tier").and_then(Value::as_str))
+                    if let Some(service_tier) = response
+                        .get("service_tier")
+                        .and_then(Value::as_str)
+                        .or(options.service_tier.as_deref())
                     {
                         apply_service_tier_pricing(&mut output.usage, service_tier, &model);
                     }
@@ -1505,6 +1505,56 @@ mod tests {
                 ),
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn response_service_tier_overrides_requested_tier_for_pricing() {
+        let body = sse_body(&[json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_test",
+                "status": "completed",
+                "service_tier": "flex",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                    "input_tokens_details": { "cached_tokens": 0 }
+                }
+            }
+        })]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+        model.cost = ModelCost {
+            input: 2.0,
+            output: 4.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        };
+
+        let mut stream = stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                service_tier: Some("priority".to_string()),
+                ..Default::default()
+            },
+        );
+        while stream.next().await.is_some() {}
+        let result = stream.result().await.unwrap();
+
+        assert_eq!(result.usage.cost.input, 1.0);
+        assert_eq!(result.usage.cost.output, 2.0);
+        assert_eq!(result.usage.cost.total, 3.0);
     }
 
     #[test]
