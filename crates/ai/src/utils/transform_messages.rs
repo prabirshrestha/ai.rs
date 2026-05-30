@@ -504,4 +504,43 @@ mod tests {
             vec![ToolResultContent::text("No result provided")]
         );
     }
+
+    #[test]
+    fn drops_aborted_assistant_turns_before_follow_up_messages() {
+        let model = copilot_claude_model();
+        let mut aborted = assistant_message(vec![
+            AssistantContent::Thinking(ThinkingContent {
+                thinking: "partial reasoning".to_string(),
+                thinking_signature: Some("reasoning_content".to_string()),
+                redacted: None,
+            }),
+            AssistantContent::ToolCall(ToolCall {
+                id: "call_123|fc_123".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: None,
+            }),
+        ]);
+        aborted.stop_reason = StopReason::Aborted;
+        let first_user = Message::User(UserMessage {
+            content: UserMessageContent::Text("read the file".to_string()),
+            timestamp: 1,
+        });
+        let follow_up = Message::User(UserMessage {
+            content: UserMessageContent::Text("Never mind, answer directly.".to_string()),
+            timestamp: 2,
+        });
+
+        let transformed = transform_messages(
+            &[
+                first_user.clone(),
+                Message::Assistant(aborted),
+                follow_up.clone(),
+            ],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        assert_eq!(transformed, vec![first_user, follow_up]);
+    }
 }
