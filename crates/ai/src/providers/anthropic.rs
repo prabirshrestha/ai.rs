@@ -1769,6 +1769,121 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_affinity_headers_follow_cache_retention_and_overrides() {
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.provider = "fireworks".to_string();
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            ..Default::default()
+        };
+        let mut options = AnthropicOptions::default();
+        options.base.session_id = Some("session-123".to_string());
+        let compat = get_anthropic_compat(&model);
+
+        let short_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            false,
+            compat,
+            CacheRetention::Short,
+        )
+        .unwrap();
+        assert_eq!(
+            short_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+
+        let none_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            false,
+            compat,
+            CacheRetention::None,
+        )
+        .unwrap();
+        assert!(none_headers.get("x-session-affinity").is_none());
+
+        options
+            .base
+            .headers
+            .insert("x-session-affinity".to_string(), "override".to_string());
+        let override_headers = headers(
+            &model,
+            &context,
+            &options,
+            "test-key",
+            false,
+            compat,
+            CacheRetention::Short,
+        )
+        .unwrap();
+        assert_eq!(
+            override_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("override")
+        );
+    }
+
+    #[test]
+    fn tool_cache_control_respects_tool_support_compat() {
+        let model = anthropic_model("claude-haiku-4-5");
+        let mut second_tool = lookup_tool();
+        second_tool.name = "lookup_again".to_string();
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("hello")],
+            tools: vec![lookup_tool(), second_tool],
+            ..Default::default()
+        };
+        let payload = build_anthropic_payload(
+            &model,
+            &context,
+            &AnthropicOptions::default(),
+            false,
+            Some(json!({ "type": "ephemeral" })),
+        );
+
+        assert!(
+            payload["tools"][0].get("cache_control").is_none(),
+            "only the last tool should receive a cache marker"
+        );
+        assert_eq!(
+            payload["tools"][1]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+
+        let mut unsupported = model;
+        unsupported
+            .compat
+            .anthropic_messages
+            .supports_cache_control_on_tools = Some(false);
+        let unsupported_payload = build_anthropic_payload(
+            &unsupported,
+            &context,
+            &AnthropicOptions::default(),
+            false,
+            Some(json!({ "type": "ephemeral" })),
+        );
+
+        assert!(
+            unsupported_payload["tools"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            unsupported_payload["tools"][1]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
     fn lookup_tool() -> Tool {
         Tool {
             name: "lookup".to_string(),
