@@ -2339,6 +2339,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_usage_does_not_double_count_reasoning_tokens() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
+            "id": "chatcmpl-reasoning-usage",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 33,
+                "prompt_tokens_details": { "cached_tokens": 0 },
+                "completion_tokens_details": { "reasoning_tokens": 21 }
+            }
+        })]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Use reasoning.")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.usage.input, 10);
+        assert_eq!(message.usage.output, 33);
+        assert_eq!(message.usage.total_tokens, 43);
+    }
+
+    #[tokio::test]
+    async fn chat_usage_preserves_cache_read_and_write_from_chunk_usage() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-cache-write",
+                "choices": [{ "index": 0, "delta": { "content": "OK" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-cache-write",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": { "cached_tokens": 50, "cache_write_tokens": 30 },
+                    "completion_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Reply with exactly OK")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.usage.input, 20);
+        assert_eq!(message.usage.cache_read, 50);
+        assert_eq!(message.usage.cache_write, 30);
+        assert_eq!(message.usage.output, 5);
+        assert_eq!(message.usage.total_tokens, 105);
+    }
+
+    #[tokio::test]
+    async fn chat_usage_preserves_cache_read_and_write_from_choice_usage() {
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-cache-write-choice",
+                "choices": [{ "index": 0, "delta": { "content": "OK" }, "finish_reason": null }]
+            }),
+            json!({
+                "id": "chatcmpl-cache-write-choice",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 5,
+                        "prompt_tokens_details": { "cached_tokens": 50, "cache_write_tokens": 30 },
+                        "completion_tokens_details": { "reasoning_tokens": 0 }
+                    }
+                }]
+            }),
+        ]))
+        .await;
+
+        let mut stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("Reply with exactly OK")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let message = stream.result().await.unwrap();
+        assert_eq!(message.usage.input, 20);
+        assert_eq!(message.usage.cache_read, 50);
+        assert_eq!(message.usage.cache_write, 30);
+        assert_eq!(message.usage.output, 5);
+        assert_eq!(message.usage.total_tokens, 105);
+    }
+
+    #[tokio::test]
     async fn stream_simple_forwards_tool_choice_to_payload() {
         let mut chat_model = model();
         chat_model.reasoning = false;
