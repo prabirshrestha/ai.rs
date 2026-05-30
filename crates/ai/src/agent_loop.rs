@@ -386,12 +386,12 @@ async fn stream_assistant_response(
                     if let Some(last) = context.messages.last_mut() {
                         *last = crate::Message::Assistant(partial.clone());
                     }
+                    emit(AgentEvent::MessageUpdate {
+                        message: crate::Message::Assistant(partial.clone()),
+                        assistant_message_event: event.clone(),
+                    })
+                    .await?;
                 }
-                emit(AgentEvent::MessageUpdate {
-                    message: crate::Message::Assistant(partial.clone()),
-                    assistant_message_event: event.clone(),
-                })
-                .await?;
             }
             AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {
                 let final_message = response.result().await?;

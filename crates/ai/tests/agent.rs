@@ -567,6 +567,61 @@ async fn agent_get_api_key_falls_back_to_static_api_key() {
 }
 
 #[tokio::test]
+async fn agent_loop_ignores_message_updates_before_stream_start() {
+    let registration = register_faux_provider(None);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emit: AgentEventSink = Arc::new({
+        let events = Arc::clone(&events);
+        move |event| {
+            let events = Arc::clone(&events);
+            Box::pin(async move {
+                events.lock().await.push(event_name(&event));
+                Ok(())
+            })
+        }
+    });
+    let stream_fn: ai::StreamFn = Arc::new(|model, _context, _options| {
+        Box::pin(async move {
+            let mut message = faux_assistant_message("final", None);
+            message.api = model.api;
+            message.provider = model.provider;
+            message.model = model.id;
+            let (mut sender, stream) = ai::AssistantMessageEventStream::channel();
+            sender.push(ai::AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "ignored".to_string(),
+                partial: message.clone(),
+            });
+            sender.push(ai::AssistantMessageEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            });
+            Ok(stream)
+        })
+    });
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("hello")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+        AgentLoopConfig::new(registration.get_model()),
+        emit,
+        None,
+        Some(stream_fn),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(message_roles(&messages), vec!["user", "assistant"]);
+    assert!(!events.lock().await.contains(&"message_update"));
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_queue_modes_can_be_changed_after_construction() {
     let registration = register_faux_provider(None);
     let agent = Agent::new(AgentOptions::new(registration.get_model()));
