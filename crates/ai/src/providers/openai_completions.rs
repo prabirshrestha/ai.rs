@@ -1563,6 +1563,36 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_uses_pi_cache_retention_for_direct_openai_requests() {
+        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
+        let mut model = model();
+        model.base_url = "https://api.openai.com/v1".to_string();
+        let compat = get_compat(&model);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                session_id: Some("session-env".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &compat,
+            resolve_cache_retention(options.base.cache_retention),
+        );
+
+        assert_eq!(payload["prompt_cache_key"], json!("session-env"));
+        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
+    }
+
+    #[test]
     fn chat_payload_omits_prompt_cache_fields_when_retention_is_none() {
         let mut model = model();
         model.base_url = "https://api.openai.com/v1".to_string();

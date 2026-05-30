@@ -17,6 +17,9 @@ pub mod stream;
 pub mod types;
 pub mod utils;
 
+#[cfg(test)]
+pub(crate) mod test_env;
+
 pub use agent::{Agent, AgentListenerId, AgentOptions, AgentState};
 pub use agent_error::{AgentError, AgentResult};
 pub use agent_loop::{
