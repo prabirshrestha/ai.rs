@@ -649,6 +649,52 @@ async fn agent_get_api_key_falls_back_to_static_api_key() {
 }
 
 #[tokio::test]
+async fn agent_get_api_key_empty_string_falls_back_to_static_api_key() {
+    let registration = register_faux_provider(None);
+    let observed_api_keys = Arc::new(Mutex::new(Vec::new()));
+    let mut options = AgentOptions::new(registration.get_model());
+    options.options = ai::SimpleStreamOptions {
+        stream: ai::StreamOptions {
+            api_key: Some("static-key".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    options.get_api_key = Some(Arc::new(|_provider| {
+        Box::pin(async { Some(String::new()) })
+    }));
+    options.stream_fn = Some(Arc::new({
+        let observed_api_keys = Arc::clone(&observed_api_keys);
+        move |model, _context, options| {
+            let observed_api_keys = Arc::clone(&observed_api_keys);
+            Box::pin(async move {
+                observed_api_keys.lock().await.push(options.stream.api_key);
+                let mut message = faux_assistant_message("ok", None);
+                message.api = model.api;
+                message.provider = model.provider;
+                message.model = model.id;
+                let (mut sender, stream) = ai::AssistantMessageEventStream::channel();
+                sender.push(ai::AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                });
+                Ok(stream)
+            })
+        }
+    }));
+    let agent = Agent::new(options);
+
+    agent.prompt_text("hello", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        *observed_api_keys.lock().await,
+        vec![Some("static-key".to_string())]
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_get_api_key_resolves_for_each_llm_turn() {
     let registration = register_faux_provider(None);
     let observed_api_keys = Arc::new(Mutex::new(Vec::new()));
