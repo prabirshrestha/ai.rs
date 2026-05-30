@@ -5,8 +5,14 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ring::{digest, rand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::get_models;
@@ -15,7 +21,12 @@ use crate::{Error, Result};
 
 const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const ANTHROPIC_CALLBACK_PORT: u16 = 53692;
+const ANTHROPIC_CALLBACK_PATH: &str = "/callback";
+const ANTHROPIC_REDIRECT_URI: &str = "http://localhost:53692/callback";
+const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const OAUTH_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
@@ -52,16 +63,42 @@ pub struct OAuthDeviceCodeInfo {
     pub expires_in_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAuthInfo {
+    pub url: String,
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthSelectOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthSelectPrompt {
+    pub message: String,
+    pub options: Vec<OAuthSelectOption>,
+}
+
 pub type OAuthPromptFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 pub type OAuthPromptCallback = Arc<dyn Fn(OAuthPrompt) -> OAuthPromptFuture + Send + Sync>;
+pub type OAuthAuthCallback = Arc<dyn Fn(OAuthAuthInfo) + Send + Sync>;
 pub type OAuthDeviceCodeCallback = Arc<dyn Fn(OAuthDeviceCodeInfo) + Send + Sync>;
 pub type OAuthProgressCallback = Arc<dyn Fn(String) + Send + Sync>;
+pub type OAuthManualCodeInputFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+pub type OAuthManualCodeInputCallback = Arc<dyn Fn() -> OAuthManualCodeInputFuture + Send + Sync>;
+pub type OAuthSelectFuture = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send>>;
+pub type OAuthSelectCallback = Arc<dyn Fn(OAuthSelectPrompt) -> OAuthSelectFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct OAuthLoginCallbacks {
+    pub on_auth: Option<OAuthAuthCallback>,
     pub on_device_code: OAuthDeviceCodeCallback,
     pub on_prompt: OAuthPromptCallback,
     pub on_progress: Option<OAuthProgressCallback>,
+    pub on_manual_code_input: Option<OAuthManualCodeInputCallback>,
+    pub on_select: Option<OAuthSelectCallback>,
     pub cancellation_token: Option<CancellationToken>,
 }
 
@@ -174,6 +211,10 @@ impl AnthropicOAuthProvider {
         "Anthropic (Claude Pro/Max)"
     }
 
+    pub async fn login(self, callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+        login_anthropic(callbacks).await
+    }
+
     pub async fn refresh_token(self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
         refresh_anthropic_token(&credentials.refresh).await
     }
@@ -201,11 +242,8 @@ impl OAuthProviderInterface for AnthropicOAuthProvider {
         true
     }
 
-    async fn login(&self, _callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
-        Err(Error::Provider(
-            "Anthropic OAuth login is not available in this Rust port yet; use exchange_anthropic_authorization_code"
-                .to_string(),
-        ))
+    async fn login(&self, callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+        login_anthropic(callbacks).await
     }
 
     async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
@@ -494,6 +532,104 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     Ok(credentials)
 }
 
+pub async fn login_anthropic(callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
+    let Some(on_auth) = callbacks.on_auth.clone() else {
+        return Err(Error::Provider(
+            "Anthropic OAuth login requires an on_auth callback".to_string(),
+        ));
+    };
+    if callbacks
+        .cancellation_token
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        return Err(Error::Provider(CANCEL_MESSAGE.to_string()));
+    }
+
+    let pkce = generate_pkce()?;
+    let callback_server = start_anthropic_callback_server(
+        pkce.verifier.clone(),
+        callbacks.cancellation_token.clone(),
+    )
+    .await?;
+    let AnthropicCallbackServer {
+        receiver,
+        shutdown,
+        task,
+    } = callback_server;
+
+    let auth_url = anthropic_authorization_url(&pkce)?;
+    on_auth(OAuthAuthInfo {
+        url: auth_url,
+        instructions: Some(
+            "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here."
+                .to_string(),
+        ),
+    });
+
+    let result = async {
+        let mut authorization =
+            if let Some(on_manual_code_input) = callbacks.on_manual_code_input.clone() {
+                let manual_input = on_manual_code_input();
+                tokio::pin!(manual_input);
+                tokio::select! {
+                    result = receiver => result.ok().flatten(),
+                    input = &mut manual_input => {
+                        Some(parse_authorization_input(&input?))
+                    }
+                }
+            } else {
+                receiver.await.ok().flatten()
+            };
+
+        if authorization
+            .as_ref()
+            .and_then(|input| input.code.as_ref())
+            .is_none()
+        {
+            let input = (callbacks.on_prompt)(OAuthPrompt {
+                message: "Paste the authorization code or full redirect URL:".to_string(),
+                placeholder: Some(ANTHROPIC_REDIRECT_URI.to_string()),
+                allow_empty: false,
+            })
+            .await?;
+            authorization = Some(parse_authorization_input(&input));
+        }
+
+        let authorization = authorization
+            .ok_or_else(|| Error::Provider("Missing authorization code".to_string()))?;
+        if authorization
+            .state
+            .as_deref()
+            .is_some_and(|state| state != pkce.verifier)
+        {
+            return Err(Error::Provider("OAuth state mismatch".to_string()));
+        }
+        let code = authorization
+            .code
+            .ok_or_else(|| Error::Provider("Missing authorization code".to_string()))?;
+        let state = authorization.state.unwrap_or_else(|| pkce.verifier.clone());
+
+        if callbacks
+            .cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(Error::Provider(CANCEL_MESSAGE.to_string()));
+        }
+        if let Some(on_progress) = &callbacks.on_progress {
+            on_progress("Exchanging authorization code for tokens...".to_string());
+        }
+        exchange_anthropic_authorization_code(&code, &state, &pkce.verifier, ANTHROPIC_REDIRECT_URI)
+            .await
+    }
+    .await;
+
+    shutdown.cancel();
+    let _ = task.await;
+    result
+}
+
 pub async fn exchange_anthropic_authorization_code(
     code: &str,
     state: &str,
@@ -535,6 +671,315 @@ pub fn modify_github_copilot_models(
             model
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct Pkce {
+    verifier: String,
+    challenge: String,
+}
+
+fn generate_pkce() -> Result<Pkce> {
+    let rng = rand::SystemRandom::new();
+    let mut verifier_bytes = [0_u8; 32];
+    rand::SecureRandom::fill(&rng, &mut verifier_bytes)
+        .map_err(|_| Error::Provider("Failed to generate PKCE verifier".to_string()))?;
+    let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let challenge_hash = digest::digest(&digest::SHA256, verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(challenge_hash.as_ref());
+    Ok(Pkce {
+        verifier,
+        challenge,
+    })
+}
+
+fn anthropic_authorization_url(pkce: &Pkce) -> Result<String> {
+    let mut url = reqwest::Url::parse(ANTHROPIC_AUTHORIZE_URL)
+        .map_err(|error| Error::Provider(format!("Invalid Anthropic authorize URL: {error}")))?;
+    url.query_pairs_mut()
+        .append_pair("code", "true")
+        .append_pair("client_id", ANTHROPIC_CLIENT_ID)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
+        .append_pair("scope", ANTHROPIC_SCOPES)
+        .append_pair("code_challenge", &pkce.challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &pkce.verifier);
+    Ok(url.to_string())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AuthorizationInput {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+fn parse_authorization_input(input: &str) -> AuthorizationInput {
+    let value = input.trim();
+    if value.is_empty() {
+        return AuthorizationInput::default();
+    }
+
+    if let Ok(url) = reqwest::Url::parse(value) {
+        return AuthorizationInput {
+            code: url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "code").then(|| value.into_owned())),
+            state: url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "state").then(|| value.into_owned())),
+        };
+    }
+
+    if let Some((code, state)) = value.split_once('#') {
+        return AuthorizationInput {
+            code: (!code.is_empty()).then(|| code.to_string()),
+            state: (!state.is_empty()).then(|| state.to_string()),
+        };
+    }
+
+    if value.contains("code=") {
+        return AuthorizationInput {
+            code: query_param(value, "code"),
+            state: query_param(value, "state"),
+        };
+    }
+
+    AuthorizationInput {
+        code: Some(value.to_string()),
+        state: None,
+    }
+}
+
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+struct AnthropicCallbackServer {
+    receiver: oneshot::Receiver<Option<AuthorizationInput>>,
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn start_anthropic_callback_server(
+    expected_state: String,
+    external_cancellation: Option<CancellationToken>,
+) -> Result<AnthropicCallbackServer> {
+    let host = std::env::var("PI_OAUTH_CALLBACK_HOST")
+        .ok()
+        .filter(|host| !host.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let listener = TcpListener::bind((host.as_str(), ANTHROPIC_CALLBACK_PORT)).await?;
+    let (sender, receiver) = oneshot::channel();
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move {
+        run_anthropic_callback_server(
+            listener,
+            expected_state,
+            sender,
+            task_shutdown,
+            external_cancellation,
+        )
+        .await;
+    });
+
+    Ok(AnthropicCallbackServer {
+        receiver,
+        shutdown,
+        task,
+    })
+}
+
+async fn run_anthropic_callback_server(
+    listener: TcpListener,
+    expected_state: String,
+    sender: oneshot::Sender<Option<AuthorizationInput>>,
+    shutdown: CancellationToken,
+    external_cancellation: Option<CancellationToken>,
+) {
+    let mut sender = Some(sender);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = async {
+                if let Some(token) = &external_cancellation {
+                    token.cancelled().await;
+                } else {
+                    futures::future::pending::<()>().await;
+                }
+            } => {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(None);
+                }
+                break;
+            }
+            accepted = listener.accept() => {
+                let Ok((mut stream, _addr)) = accepted else {
+                    continue;
+                };
+                let result = handle_anthropic_callback_request(&mut stream, &expected_state).await;
+                if let Some(input) = result {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(Some(input));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn handle_anthropic_callback_request(
+    stream: &mut tokio::net::TcpStream,
+    expected_state: &str,
+) -> Option<AuthorizationInput> {
+    let mut buffer = vec![0_u8; 8192];
+    let Ok(bytes_read) = stream.read(&mut buffer).await else {
+        return None;
+    };
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let request_target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let url = reqwest::Url::parse(&format!("http://localhost{request_target}")).ok();
+    let Some(url) = url else {
+        let _ = write_oauth_response(
+            stream,
+            400,
+            oauth_error_html("Invalid callback request.", None),
+        )
+        .await;
+        return None;
+    };
+
+    if url.path() != ANTHROPIC_CALLBACK_PATH {
+        let _ = write_oauth_response(
+            stream,
+            404,
+            oauth_error_html("Callback route not found.", None),
+        )
+        .await;
+        return None;
+    }
+    if let Some(error) = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "error").then(|| value.into_owned()))
+    {
+        let _ = write_oauth_response(
+            stream,
+            400,
+            oauth_error_html(
+                "Anthropic authentication did not complete.",
+                Some(&format!("Error: {error}")),
+            ),
+        )
+        .await;
+        return None;
+    }
+
+    let code = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "code").then(|| value.into_owned()));
+    let state = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()));
+    let Some(code) = code else {
+        let _ = write_oauth_response(
+            stream,
+            400,
+            oauth_error_html("Missing code or state parameter.", None),
+        )
+        .await;
+        return None;
+    };
+    let Some(state) = state else {
+        let _ = write_oauth_response(
+            stream,
+            400,
+            oauth_error_html("Missing code or state parameter.", None),
+        )
+        .await;
+        return None;
+    };
+    if state != expected_state {
+        let _ = write_oauth_response(stream, 400, oauth_error_html("State mismatch.", None)).await;
+        return None;
+    }
+
+    let _ = write_oauth_response(
+        stream,
+        200,
+        oauth_success_html("Anthropic authentication completed. You can close this window."),
+    )
+    .await;
+    Some(AuthorizationInput {
+        code: Some(code),
+        state: Some(state),
+    })
+}
+
+async fn write_oauth_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: String,
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "Internal Server Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await
+}
+
+fn oauth_success_html(message: &str) -> String {
+    oauth_page(
+        "Authentication successful",
+        "Authentication successful",
+        message,
+        None,
+    )
+}
+
+fn oauth_error_html(message: &str, details: Option<&str>) -> String {
+    oauth_page(
+        "Authentication failed",
+        "Authentication failed",
+        message,
+        details,
+    )
+}
+
+fn oauth_page(title: &str, heading: &str, message: &str, details: Option<&str>) -> String {
+    let details_html = details
+        .map(|details| format!("<div class=\"details\">{}</div>", escape_html(details)))
+        .unwrap_or_default();
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title></head><body><main><h1>{}</h1><p>{}</p>{}</main></body></html>",
+        escape_html(title),
+        escape_html(heading),
+        escape_html(message),
+        details_html
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
@@ -1008,6 +1453,95 @@ mod tests {
     }
 
     #[test]
+    fn parses_anthropic_authorization_inputs() {
+        assert_eq!(parse_authorization_input(""), AuthorizationInput::default());
+        assert_eq!(
+            parse_authorization_input("http://localhost:53692/callback?code=abc&state=verifier"),
+            AuthorizationInput {
+                code: Some("abc".to_string()),
+                state: Some("verifier".to_string())
+            }
+        );
+        assert_eq!(
+            parse_authorization_input("abc#verifier"),
+            AuthorizationInput {
+                code: Some("abc".to_string()),
+                state: Some("verifier".to_string())
+            }
+        );
+        assert_eq!(
+            parse_authorization_input("code=abc&state=verifier"),
+            AuthorizationInput {
+                code: Some("abc".to_string()),
+                state: Some("verifier".to_string())
+            }
+        );
+        assert_eq!(
+            parse_authorization_input("abc"),
+            AuthorizationInput {
+                code: Some("abc".to_string()),
+                state: None
+            }
+        );
+    }
+
+    #[test]
+    fn generates_anthropic_pkce_authorization_url() {
+        let pkce = generate_pkce().expect("pkce");
+        assert!(!pkce.verifier.contains('='));
+        assert!(!pkce.challenge.contains('='));
+
+        let url = anthropic_authorization_url(&pkce).expect("auth url");
+        let parsed = reqwest::Url::parse(&url).expect("parsed url");
+        let query = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            parsed.as_str().split('?').next(),
+            Some(ANTHROPIC_AUTHORIZE_URL)
+        );
+        assert_eq!(
+            query.get("client_id").map(String::as_str),
+            Some(ANTHROPIC_CLIENT_ID)
+        );
+        assert_eq!(
+            query.get("redirect_uri").map(String::as_str),
+            Some(ANTHROPIC_REDIRECT_URI)
+        );
+        assert_eq!(
+            query.get("code_challenge").map(String::as_str),
+            Some(pkce.challenge.as_str())
+        );
+        assert_eq!(
+            query.get("state").map(String::as_str),
+            Some(pkce.verifier.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_login_requires_auth_callback() {
+        let callbacks = OAuthLoginCallbacks {
+            on_auth: None,
+            on_device_code: Arc::new(|_| {}),
+            on_prompt: Arc::new(|_| Box::pin(async { Ok("unused".to_string()) })),
+            on_progress: None,
+            on_manual_code_input: None,
+            on_select: None,
+            cancellation_token: None,
+        };
+
+        let error = anthropic_oauth_provider()
+            .login(callbacks)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider error: Anthropic OAuth login requires an on_auth callback"
+        );
+    }
+
+    #[test]
     fn normalizes_enterprise_domains() {
         assert_eq!(normalize_domain(""), None);
         assert_eq!(
@@ -1251,6 +1785,7 @@ mod tests {
     async fn login_callback_prompt_can_be_constructed() {
         let seen_prompt = Arc::new(Mutex::new(None));
         let callbacks = OAuthLoginCallbacks {
+            on_auth: None,
             on_device_code: Arc::new(|_| {}),
             on_prompt: {
                 let seen_prompt = Arc::clone(&seen_prompt);
@@ -1260,6 +1795,8 @@ mod tests {
                 })
             },
             on_progress: None,
+            on_manual_code_input: None,
+            on_select: None,
             cancellation_token: None,
         };
 

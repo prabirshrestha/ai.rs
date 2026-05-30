@@ -8,10 +8,11 @@ use ai::{
     create_assistant_message_event_stream, get_api_provider, get_api_providers, get_oauth_api_key,
     get_oauth_provider, get_oauth_provider_info_list, get_openai_completions_compat,
     get_openai_responses_compat, has_copilot_vision_input, infer_copilot_initiator,
-    register_builtin_api_providers, register_oauth_provider, repair_json, reset_api_providers,
-    reset_oauth_providers, stream_anthropic, stream_openai_completions, stream_openai_responses,
-    stream_simple_anthropic, stream_simple_openai_completions, stream_simple_openai_responses,
-    unregister_oauth_provider, validate_tool_arguments, validate_tool_call,
+    login_anthropic, register_builtin_api_providers, register_oauth_provider, repair_json,
+    reset_api_providers, reset_oauth_providers, stream_anthropic, stream_openai_completions,
+    stream_openai_responses, stream_simple_anthropic, stream_simple_openai_completions,
+    stream_simple_openai_responses, unregister_oauth_provider, validate_tool_arguments,
+    validate_tool_call,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -183,6 +184,18 @@ fn json_and_validation_helpers_are_exported() {
 
 #[tokio::test]
 async fn oauth_registry_helpers_are_exported() {
+    let _auth_info = ai::OAuthAuthInfo {
+        url: "https://example.com/auth".to_string(),
+        instructions: Some("Open in browser".to_string()),
+    };
+    let _select_prompt = ai::OAuthSelectPrompt {
+        message: "Choose provider".to_string(),
+        options: vec![ai::OAuthSelectOption {
+            id: "github-copilot".to_string(),
+            label: "GitHub Copilot".to_string(),
+        }],
+    };
+
     let provider = get_oauth_provider("github-copilot").expect("copilot provider");
     assert_eq!(provider.id(), "github-copilot");
     assert_eq!(
@@ -209,6 +222,7 @@ async fn oauth_registry_helpers_are_exported() {
     let _register: fn(ai::OAuthProvider) = register_oauth_provider;
     let _unregister: fn(&str) = unregister_oauth_provider;
     let _reset: fn() = reset_oauth_providers;
+    let _login_anthropic = login_anthropic;
 }
 
 fn oauth_credentials(access: &str) -> ai::OAuthCredentials {
