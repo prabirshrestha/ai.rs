@@ -1,7 +1,11 @@
 use ai::{
-    Agent, AgentOptions, Context, Message, Model, ModelCost, ModelInput, ModelThinkingLevel,
-    SimpleStreamOptions, StopReason, StreamOptions, complete_simple,
+    Agent, AgentOptions, AgentTool, AgentToolResult, Context, Message, Model, ModelCost,
+    ModelInput, ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Tool,
+    ToolResultContent, complete_simple,
 };
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 const LOCAL_BASE_URL: &str = "http://localhost:4141/v1";
 const DEFAULT_CHAT_COMPLETIONS_MODEL: &str = "gpt-5.2";
@@ -33,6 +37,40 @@ fn local_options(reasoning: Option<ModelThinkingLevel>) -> SimpleStreamOptions {
         reasoning,
         thinking_budgets: None,
         tool_choice: None,
+    }
+}
+
+struct LocalEchoTool;
+
+#[async_trait]
+impl AgentTool for LocalEchoTool {
+    fn definition(&self) -> Tool {
+        Tool {
+            name: "echo_check".to_string(),
+            description: "Returns the local tool check marker.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    fn label(&self) -> &str {
+        "Echo check"
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        _args: Value,
+        _cancellation_token: Option<CancellationToken>,
+        _on_update: Option<ai::AgentToolUpdateCallback>,
+    ) -> ai::AgentResult<AgentToolResult> {
+        let mut result = AgentToolResult::text("local-tool-ok");
+        result.terminate = true;
+        Ok(result)
     }
 }
 
@@ -219,5 +257,54 @@ async fn local_agent_openai_chat_completions_streaming() -> ai::AgentResult<()> 
         !message.content.is_empty(),
         "expected at least one content block"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_agent_openai_chat_completions_tool_call() -> ai::AgentResult<()> {
+    if skip_unless_available("local_agent_openai_chat_completions_tool_call").await {
+        return Ok(());
+    }
+
+    let chat_model = std::env::var("PI_LOCAL_CHAT_COMPLETIONS_MODEL")
+        .unwrap_or_else(|_| DEFAULT_CHAT_COMPLETIONS_MODEL.to_string());
+
+    let mut options = AgentOptions::new(local_model(
+        "openai-completions",
+        &chat_model,
+        chat_model.starts_with("gpt-5"),
+    ));
+    options.initial_state.system_prompt = Some("Use tools when they are selected.".to_string());
+    options.initial_state.tools = vec![std::sync::Arc::new(LocalEchoTool)];
+    options.options = local_options(
+        chat_model
+            .starts_with("gpt-5")
+            .then_some(ModelThinkingLevel::Low),
+    );
+    options.options.tool_choice = Some(json!({
+        "type": "function",
+        "function": { "name": "echo_check" }
+    }));
+    let agent = Agent::new(options);
+
+    agent
+        .prompt_text("Call the selected tool once.", Vec::new())
+        .await?;
+
+    let state = agent.state().await;
+    let tool_result = state
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "echo_check" => Some(result),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected echo_check tool result, got {:#?}", state.messages));
+
+    assert!(!tool_result.is_error, "{tool_result:#?}");
+    assert!(tool_result.content.iter().any(|content| matches!(
+        content,
+        ToolResultContent::Text(text) if text.text == "local-tool-ok"
+    )));
     Ok(())
 }
