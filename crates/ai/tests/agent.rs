@@ -588,6 +588,73 @@ async fn parallel_tool_execution_prepares_tool_calls_sequentially() {
 }
 
 #[tokio::test]
+async fn abort_during_tool_preflight_stops_remaining_tool_preflight() {
+    let registration = register_faux_provider(None);
+    registration.set_responses([tool_use_response(vec![
+        faux_tool_call(
+            "echo",
+            json!({ "value": "first" }),
+            Some("tool-1".to_string()),
+        ),
+        faux_tool_call(
+            "echo",
+            json!({ "value": "second" }),
+            Some("tool-2".to_string()),
+        ),
+    ])]);
+
+    let before_count = Arc::new(AtomicUsize::new(0));
+    let mut config = AgentLoopConfig::new(registration.get_model());
+    config.before_tool_call = Some(Arc::new({
+        let before_count = Arc::clone(&before_count);
+        move |_context: BeforeToolCallContext, token: Option<CancellationToken>| {
+            let before_count = Arc::clone(&before_count);
+            Box::pin(async move {
+                before_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(token) = token {
+                    token.cancel();
+                }
+                Ok::<Option<BeforeToolCallResult>, AgentError>(None)
+            })
+        }
+    }));
+    config.should_stop_after_turn = Some(Arc::new(|_context| Box::pin(async { true })));
+
+    let messages = run_agent_loop(
+        vec![Message::user_text("run tools")],
+        AgentContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool::default())],
+        },
+        config,
+        quiet_sink(),
+        Some(CancellationToken::new()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(before_count.load(Ordering::SeqCst), 1);
+    let tool_results = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_results.len(), 1);
+    assert_eq!(tool_results[0].tool_call_id, "tool-1");
+    assert!(tool_results[0].is_error);
+    assert_eq!(
+        tool_results[0].content[0],
+        ai::ToolResultContent::text("Operation aborted")
+    );
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn parallel_tool_execution_end_events_follow_completion_order() {
     let registration = register_faux_provider(None);
     registration.set_responses([

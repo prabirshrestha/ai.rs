@@ -1621,6 +1621,51 @@ mod tests {
     }
 
     #[test]
+    fn chat_payload_omits_default_max_token_fields() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("max_tokens").is_none());
+        assert!(payload.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_payload_sends_explicit_max_tokens_with_compat_field() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            base: StreamOptions {
+                max_tokens: Some(1234),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("max_tokens").is_none());
+        assert_eq!(payload["max_completion_tokens"], json!(1234));
+    }
+
+    #[test]
     fn chat_headers_set_and_omit_session_affinity_by_cache_retention() {
         let mut model = model();
         model.base_url = "https://proxy.example.com/v1".to_string();

@@ -1359,6 +1359,49 @@ mod tests {
     }
 
     #[test]
+    fn response_payload_omits_default_max_output_tokens() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn response_payload_sends_explicit_max_output_tokens() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                max_tokens: Some(1234),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["max_output_tokens"], json!(1234));
+    }
+
+    #[test]
     fn response_headers_set_and_omit_cache_affinity_by_cache_retention() {
         let model = model();
         let context = Context {

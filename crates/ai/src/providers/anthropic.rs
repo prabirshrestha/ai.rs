@@ -1465,6 +1465,66 @@ mod tests {
         assert_eq!(payload["output_config"], json!({ "effort": "xhigh" }));
     }
 
+    #[test]
+    fn cache_control_retention_uses_long_ttl_only_when_supported() {
+        let model = anthropic_model("claude-haiku-4-5");
+        assert_eq!(
+            cache_control(&model, CacheRetention::Short, get_anthropic_compat(&model),),
+            Some(json!({ "type": "ephemeral" }))
+        );
+        assert_eq!(
+            cache_control(&model, CacheRetention::Long, get_anthropic_compat(&model)),
+            Some(json!({ "type": "ephemeral", "ttl": "1h" }))
+        );
+        assert_eq!(
+            cache_control(&model, CacheRetention::None, get_anthropic_compat(&model)),
+            None
+        );
+
+        let mut unsupported = model.clone();
+        unsupported
+            .compat
+            .anthropic_messages
+            .supports_long_cache_retention = Some(false);
+        assert_eq!(
+            cache_control(
+                &unsupported,
+                CacheRetention::Long,
+                get_anthropic_compat(&unsupported),
+            ),
+            Some(json!({ "type": "ephemeral" }))
+        );
+    }
+
+    #[test]
+    fn payload_applies_cache_control_to_system_and_last_user_text() {
+        let model = anthropic_model("claude-haiku-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                system_prompt: Some("You are helpful.".to_string()),
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions::default(),
+            false,
+            Some(json!({ "type": "ephemeral" })),
+        );
+
+        assert_eq!(
+            payload["system"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][0],
+            json!({
+                "type": "text",
+                "text": "hello",
+                "cache_control": { "type": "ephemeral" }
+            })
+        );
+    }
+
     fn lookup_tool() -> Tool {
         Tool {
             name: "lookup".to_string(),
