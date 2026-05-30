@@ -175,6 +175,38 @@ impl Agent {
         self.state.lock().await.clone()
     }
 
+    pub async fn set_system_prompt(&self, system_prompt: Option<String>) {
+        self.state.lock().await.system_prompt = system_prompt;
+    }
+
+    pub async fn set_model(&self, model: Model) {
+        self.state.lock().await.model = model;
+    }
+
+    pub async fn set_reasoning_level(&self, reasoning_level: Option<crate::ModelThinkingLevel>) {
+        self.state.lock().await.reasoning_level = reasoning_level;
+    }
+
+    pub async fn set_tools(&self, tools: Vec<DynAgentTool>) {
+        self.state.lock().await.tools = tools;
+    }
+
+    pub async fn clear_tools(&self) {
+        self.state.lock().await.tools.clear();
+    }
+
+    pub async fn set_messages(&self, messages: Vec<AgentMessage>) {
+        self.state.lock().await.messages = messages;
+    }
+
+    pub async fn push_message(&self, message: AgentMessage) {
+        self.state.lock().await.messages.push(message);
+    }
+
+    pub async fn clear_messages(&self) {
+        self.state.lock().await.messages.clear();
+    }
+
     pub async fn subscribe(&self, listener: AgentEventSink) -> AgentListenerId {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().await.push((id, listener));

@@ -143,6 +143,55 @@ async fn agent_exposes_active_cancellation_token() {
 }
 
 #[tokio::test]
+async fn agent_state_mutators_update_runtime_configuration() {
+    let registration = register_faux_provider(None);
+    let agent = Agent::new(AgentOptions::new(registration.get_model()));
+
+    agent
+        .set_system_prompt(Some("Custom prompt".to_string()))
+        .await;
+    assert_eq!(
+        agent.state().await.system_prompt.as_deref(),
+        Some("Custom prompt")
+    );
+
+    let mut next_model = registration.get_model();
+    next_model.id = "next-model".to_string();
+    agent.set_model(next_model).await;
+    assert_eq!(agent.state().await.model.id, "next-model");
+
+    agent
+        .set_reasoning_level(Some(ai::ModelThinkingLevel::High))
+        .await;
+    assert_eq!(
+        agent.state().await.reasoning_level,
+        Some(ai::ModelThinkingLevel::High)
+    );
+
+    let tools = vec![Arc::new(EchoTool::default()) as Arc<dyn AgentTool>];
+    agent.set_tools(tools.clone()).await;
+    assert_eq!(agent.state().await.tools.len(), 1);
+    drop(tools);
+    assert_eq!(agent.state().await.tools.len(), 1);
+    agent.clear_tools().await;
+    assert!(agent.state().await.tools.is_empty());
+
+    let first = Message::user_text("hello");
+    agent.set_messages(vec![first.clone()]).await;
+    assert_eq!(agent.state().await.messages, vec![first]);
+
+    let second = Message::user_text("again");
+    agent.push_message(second.clone()).await;
+    assert_eq!(agent.state().await.messages.len(), 2);
+    assert_eq!(agent.state().await.messages[1], second);
+
+    agent.clear_messages().await;
+    assert!(agent.state().await.messages.is_empty());
+
+    registration.unregister();
+}
+
+#[tokio::test]
 async fn agent_continue_run_processes_queued_follow_up_after_assistant_tail() {
     let registration = register_faux_provider(None);
     registration.set_responses([faux_assistant_message("processed", None)]);
