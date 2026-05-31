@@ -149,23 +149,15 @@ fn api_registry_and_builtin_provider_helpers_are_exported() {
     assert!(get_api_provider("openai-completions").is_some());
     assert!(get_api_provider("openai-responses").is_some());
     assert!(get_api_provider("anthropic-messages").is_some());
-    assert!(
-        get_api_providers()
-            .iter()
-            .any(|provider| provider.api == "openai-completions")
-    );
-    let focused_order = get_api_providers()
+    assert!(get_api_provider("mistral-conversations").is_none());
+    assert!(get_api_provider("azure-openai-responses").is_none());
+    assert!(get_api_provider("openai-codex-responses").is_none());
+    let api_order = get_api_providers()
         .into_iter()
         .map(|provider| provider.api)
-        .filter(|api| {
-            matches!(
-                api.as_str(),
-                "anthropic-messages" | "openai-completions" | "openai-responses"
-            )
-        })
         .collect::<Vec<_>>();
     assert_eq!(
-        focused_order,
+        api_order,
         [
             "anthropic-messages",
             "openai-completions",

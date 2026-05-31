@@ -10,6 +10,11 @@ const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 6] = [
     ModelThinkingLevel::High,
     ModelThinkingLevel::Xhigh,
 ];
+const SUPPORTED_MODEL_APIS: [&str; 3] = [
+    "anthropic-messages",
+    "openai-completions",
+    "openai-responses",
+];
 
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (model.cost.input / 1_000_000.0) * usage.input as f64;
@@ -179,21 +184,24 @@ fn builtin_models() -> ModelRegistry {
         .as_object()
         .expect("generated model registry should be an object")
         .iter()
-        .map(|(provider, models)| {
+        .filter_map(|(provider, models)| {
             let models = models
                 .as_object()
                 .expect("generated provider models should be an object")
                 .values()
                 .cloned()
-                .map(|model| {
-                    serde_json::from_value(model)
-                        .expect("generated model registry should deserialize")
+                .filter_map(|model| {
+                    let model: Model = serde_json::from_value(model)
+                        .expect("generated model registry should deserialize");
+                    SUPPORTED_MODEL_APIS
+                        .contains(&model.api.as_str())
+                        .then_some(model)
                 })
-                .collect();
-            ProviderModels {
+                .collect::<Vec<_>>();
+            (!models.is_empty()).then(|| ProviderModels {
                 provider: provider.clone(),
                 models,
-            }
+            })
         })
         .collect();
     ModelRegistry { providers }
@@ -206,14 +214,14 @@ mod tests {
     #[test]
     fn generated_registry_matches_upstream_catalog_size() {
         let registry = builtin_models();
-        assert_eq!(registry.providers.len(), 32);
+        assert_eq!(registry.providers.len(), 26);
         assert_eq!(
             registry
                 .providers
                 .iter()
                 .map(|provider| provider.models.len())
                 .sum::<usize>(),
-            931
+            733
         );
     }
 
@@ -245,16 +253,16 @@ mod tests {
         assert_eq!(
             &providers[..10],
             [
-                "amazon-bedrock",
                 "anthropic",
-                "azure-openai-responses",
                 "cerebras",
                 "cloudflare-ai-gateway",
                 "cloudflare-workers-ai",
                 "deepseek",
                 "fireworks",
                 "github-copilot",
-                "google",
+                "groq",
+                "huggingface",
+                "kimi-coding",
             ]
         );
     }
@@ -351,7 +359,7 @@ mod tests {
         assert!(!get_supported_thinking_levels(&sonnet45).contains(&ModelThinkingLevel::Xhigh));
 
         for model_id in ["gpt-5.4", "gpt-5.5"] {
-            let model = get_model("openai-codex", model_id).expect(model_id);
+            let model = get_model("openai", model_id).expect(model_id);
             assert!(get_supported_thinking_levels(&model).contains(&ModelThinkingLevel::Xhigh));
         }
 

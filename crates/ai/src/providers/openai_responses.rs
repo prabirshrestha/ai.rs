@@ -26,12 +26,7 @@ use crate::utils::sse;
 use crate::utils::transform_messages::transform_messages;
 use crate::{Error, Result};
 
-const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &[
-    "openai",
-    "openai-codex",
-    "opencode",
-    "azure-openai-responses",
-];
+const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai"];
 
 #[derive(Clone, Default)]
 pub struct OpenAIResponsesOptions {
@@ -3266,7 +3261,7 @@ mod tests {
 
     #[test]
     fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
-        let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
+        let model = model();
         let assistant = AssistantMessage {
             content: vec![
                 AssistantContent::Thinking(ThinkingContent {
@@ -3296,12 +3291,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let input = convert_responses_messages(
-            &model,
-            &context,
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
-            true,
-        );
+        let input =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
         let message_ids = input
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
@@ -3339,7 +3330,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            &["openai"].into_iter().collect(),
             true,
         );
 
@@ -3370,7 +3361,7 @@ mod tests {
                 messages: vec![Message::Assistant(assistant)],
                 ..Default::default()
             },
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            &["openai"].into_iter().collect(),
             true,
         );
 
@@ -3404,7 +3395,7 @@ mod tests {
                 messages: vec![Message::Assistant(assistant)],
                 ..Default::default()
             },
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            &["openai"].into_iter().collect(),
             true,
         );
 
@@ -3443,12 +3434,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let input = convert_responses_messages(
-            &model,
-            &context,
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
-            true,
-        );
+        let input =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
 
         assert_eq!(input.len(), 2);
         assert!(input.iter().all(|item| {
@@ -3501,7 +3488,7 @@ mod tests {
         let input = convert_responses_messages(
             &target_model,
             &context,
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
+            &["openai"].into_iter().collect(),
             true,
         );
         let function_call = input
@@ -3520,7 +3507,7 @@ mod tests {
 
     #[test]
     fn hashes_foreign_tool_item_ids_for_responses_models() {
-        let model = crate::get_model("openai-codex", "gpt-5.5").expect("gpt-5.5");
+        let model = model();
         let assistant = AssistantMessage {
             content: vec![AssistantContent::ToolCall(ToolCall {
                 id: COPILOT_RAW_TOOL_CALL_ID.to_string(),
@@ -3557,12 +3544,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let input = convert_responses_messages(
-            &model,
-            &context,
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
-            true,
-        );
+        let input =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
         let function_call = input
             .iter()
             .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -3632,12 +3615,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let input = convert_responses_messages(
-            &model,
-            &context,
-            &["openai", "openai-codex", "opencode"].into_iter().collect(),
-            true,
-        );
+        let input =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
         let function_call_index = input
             .iter()
             .position(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))

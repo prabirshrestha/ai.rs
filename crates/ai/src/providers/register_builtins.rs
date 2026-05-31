@@ -1,10 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::api_registry::{self, ApiProvider};
-use crate::providers::{
-    anthropic, azure_openai_responses, mistral, openai_codex_responses, openai_completions,
-    openai_responses,
-};
+use crate::providers::{anthropic, openai_completions, openai_responses};
 use crate::types::{Context, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions};
 use crate::{AssistantMessageEventStream, Result};
 use serde_json::Value;
@@ -74,37 +71,6 @@ pub fn register_builtins() {
 
     api_registry::register_api_provider(
         ApiProvider {
-            api: "mistral-conversations".to_string(),
-            stream: api_registry::wrap_stream(
-                "mistral-conversations",
-                |model, context, options| {
-                    Ok(mistral::stream_mistral(
-                        model,
-                        context,
-                        mistral::MistralOptions {
-                            base: options,
-                            tool_choice: None,
-                            prompt_mode: None,
-                            reasoning_effort: None,
-                        },
-                    ))
-                },
-            ),
-            stream_simple: api_registry::wrap_stream_simple(
-                "mistral-conversations",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
-                    Ok(mistral::stream_simple_mistral(model, context, options))
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
             api: "openai-responses".to_string(),
             stream: api_registry::wrap_stream("openai-responses", |model, context, options| {
                 Ok(openai_responses::stream_openai_responses(
@@ -122,72 +88,6 @@ pub fn register_builtins() {
                     Ok(openai_responses::stream_simple_openai_responses(
                         model, context, options,
                     ))
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "azure-openai-responses".to_string(),
-            stream: api_registry::wrap_stream(
-                "azure-openai-responses",
-                |model, context, options| {
-                    Ok(azure_openai_responses::stream_azure_openai_responses(
-                        model,
-                        context,
-                        azure_openai_responses_options_from_stream_options(options),
-                    ))
-                },
-            ),
-            stream_simple: api_registry::wrap_stream_simple(
-                "azure-openai-responses",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
-                    Ok(
-                        azure_openai_responses::stream_simple_azure_openai_responses(
-                            model, context, options,
-                        ),
-                    )
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "openai-codex-responses".to_string(),
-            stream: api_registry::wrap_stream(
-                "openai-codex-responses",
-                |model, context, options| {
-                    Ok(openai_codex_responses::stream_openai_codex_responses(
-                        model,
-                        context,
-                        openai_codex_responses::OpenAICodexResponsesOptions {
-                            base: options,
-                            reasoning_effort: None,
-                            reasoning_summary: None,
-                            service_tier: None,
-                            text_verbosity: None,
-                        },
-                    ))
-                },
-            ),
-            stream_simple: api_registry::wrap_stream_simple(
-                "openai-codex-responses",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
-                    Ok(
-                        openai_codex_responses::stream_simple_openai_codex_responses(
-                            model, context, options,
-                        ),
-                    )
                 },
             ),
         },
@@ -219,20 +119,6 @@ fn openai_responses_options_from_stream_options(
         reasoning_effort,
         reasoning_summary,
         service_tier,
-        ..Default::default()
-    }
-}
-
-fn azure_openai_responses_options_from_stream_options(
-    options: StreamOptions,
-) -> azure_openai_responses::AzureOpenAIResponsesOptions {
-    let reasoning_effort = openai_reasoning_effort(&options);
-    let reasoning_summary = provider_option(&options, &["reasoningSummary", "reasoning_summary"])
-        .and_then(reasoning_summary_option);
-    azure_openai_responses::AzureOpenAIResponsesOptions {
-        base: options,
-        reasoning_effort,
-        reasoning_summary,
         ..Default::default()
     }
 }
@@ -285,7 +171,7 @@ fn provider_u32(options: &StreamOptions, names: &[&str]) -> Option<u32> {
 
 fn openai_reasoning_effort(options: &StreamOptions) -> Option<ModelThinkingLevel> {
     provider_string(options, &["reasoningEffort", "reasoning_effort"])
-        .and_then(|value| ModelThinkingLevel::from_str(&value))
+        .and_then(|value| ModelThinkingLevel::parse(&value))
         .filter(|effort| *effort != ModelThinkingLevel::Off)
 }
 

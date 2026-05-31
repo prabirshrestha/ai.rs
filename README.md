@@ -1,304 +1,199 @@
 # ai
 
-Simple to use AI library for Rust with OpenAI compatible providers and graph-based workflow execution.
+Rust port of the focused `pi` AI package surface.
 
-*This library is work in progress, and the API is subject to change.*
+This crate intentionally keeps the active provider API surface narrow:
 
-## Table of Contents
-- [Using the Library](#using-the-library)
-- [Cargo Features](#cargo-features)
-- [Examples](#examples)
-  - [Chat Completion API](#chat-completion-api)
-  - [Embeddings API](#embeddings-api)
-  - [Graph](#graph)
-- [Clients](#clients)
-  - [OpenAI](#openai)
-    - [Gemini API via OpenAI](#gemini-api-via-openai)
-  - [Azure OpenAI](#azure-openai)
-  - [Ollama](#ollama)
-- [License](#license)
+- OpenAI Chat Completions: `openai-completions`
+- OpenAI Responses: `openai-responses`
+- Anthropic Messages: `anthropic-messages`
 
-# Using the library
+GitHub Copilot is supported as an OAuth-backed provider through the OpenAI and
+Anthropic-compatible routes above. The agent and agent-loop runtime live in this
+same `ai` crate; there is no separate agent crate and no TypeScript harness in
+this port.
 
-Add [ai](https://crates.io/crates/ai) as a dependency along with `tokio`. For
-streaming add `futures` crate, for `CancellationToken` support add `tokio-util`.
-This library directly uses `reqwest` for http client when making requests to the
-servers.
+The crate is still work in progress and the API may change.
 
-```
+## Install
+
+```sh
 cargo add ai
 ```
 
-For comprehensive usage documentation in your projects, download the CLAUDE.md guide:
+The crate uses Tokio streams and `reqwest` internally. Applications normally use
+Tokio as their async runtime.
 
-```bash
-# Using wget
-wget https://raw.githubusercontent.com/prabirshrestha/ai.rs/refs/heads/main/examples/CLAUDE.md
+## Environment Keys
 
-# Using curl
-curl -O https://raw.githubusercontent.com/prabirshrestha/ai.rs/refs/heads/main/examples/CLAUDE.md
-```
+The built-in environment lookup is scoped to the focused providers:
 
-# Cargo Features
+| Provider | Environment variables |
+| --- | --- |
+| `openai` | `OPENAI_API_KEY` |
+| `anthropic` | `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` |
+| `github-copilot` | `COPILOT_GITHUB_TOKEN` |
 
-| Feature               | Description                               | Default |
-|-----------------------|-------------------------------------------|---------|
-| `openai_client`       | Enable OpenAI client                      | ✅      |
-| `azure_openai_client` | Enable Azure OpenAI client                | ✅      |
-| `ollama_client`       | Enable Ollama client                      |         |
-| `native_tls`          | Enable native TLS for reqwest http client |         |
-| `rustls_tls`          | Enable rustls TLS for reqwest http client | ✅      |
+You can also pass an explicit API key in `StreamOptions`.
 
-# Examples
-
-| Example Name                      | Description                                                               |
-|-----------------------------------|---------------------------------------------------------------------------|
-| azure_openai_chat_completions                         | Basic chat completions using Azure OpenAI API         |
-| chat_completions_streaming                            | Chat completions streaming example                    |
-| chat_completions_streaming_with_cancellation_token    | Chat completions streaming with cancellation token    |
-| chat_completions_tool_calling                         | Tool/Function calling example                         |
-| chat_console                                          | Console chat example                                  |
-| clients_dynamic_runtime                               | Dynamic runtime client selection                      |
-| graph_example                                         | Graph workflow execution with conditional logic       |
-| openai_chat_completions                               | Basic chat completions using OpenAI API               |
-| openai_embeddings                                     | Text embeddings with OpenAI API                       |
-| react_agent                                           | ReAct agent with reasoning and action capabilities    |
-
-## Chat Completion API
+## Chat Completions
 
 ```rust
-use ai::{
-    chat_completions::{ChatCompletion, ChatCompletionMessage, ChatCompletionRequestBuilder},
-    Result,
-};
+use ai::{complete_simple, Context, Message, SimpleStreamOptions};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let openai = ai::clients::openai::Client::from_url("ollama", "http://localhost:11434/v1")?;
-    // let openai = ai::clients::openai::Client::from_env()?;
-    // let openai = ai::clients::openai::Client::new("api_key")?;
+async fn main() -> ai::Result<()> {
+    let model = ai::get_model("openai", "gpt-4o-mini").expect("model");
+    let message = complete_simple(
+        model,
+        Context {
+            system_prompt: Some("Reply in one short sentence.".to_string()),
+            messages: vec![Message::user_text("Say hello.")],
+            tools: Vec::new(),
+        },
+        Some(SimpleStreamOptions::default()),
+    )
+    .await?;
 
-    let request = ChatCompletionRequestBuilder::default()
-        .model("gemma3")
-        .messages(vec![
-            ChatCompletionMessage::System("You are a helpful assistant".into()),
-            ChatCompletionMessage::User("Tell me a joke.".into()),
-        ])
-        .build()?;
-
-    let response = openai.chat_completions(&request).await?;
-
-    println!("{}", &response.choices[0].message.content.as_ref().unwrap());
-
+    println!("{message:?}");
     Ok(())
 }
 ```
 
-## Embeddings API
+## Responses
 
 ```rust
-use ai::{
-    embeddings::{Embeddings, EmbeddingsRequestBuilder},
-    Result,
-};
+use ai::{complete_simple, Context, Message, Model, ModelThinkingLevel, SimpleStreamOptions};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let openai = ai::clients::openai::Client::from_env()?;
+async fn main() -> ai::Result<()> {
+    let mut options = SimpleStreamOptions::default();
+    options.reasoning = Some(ModelThinkingLevel::Low);
 
-    let request = EmbeddingsRequestBuilder::default()
-        .model("text-embedding-3-small")
-        .input(vec!["Hello, world!".to_string()])
-        .build()?;
-
-    // Get standard float embeddings
-    let response = openai.create_embeddings(&request).await?;
-
-    println!("Embedding dimensions: {}", response.data[0].embedding.len());
-
-    // Get base64 encoded embeddings
-    let base64_response = openai.create_base64_embeddings(&request).await?;
-
-    println!("Base64 embedding: {}", base64_response.data[0].embedding);
-
-    Ok(())
-}
-```
-
-Using tuples for messages. Unrecognized `role` will cause panic.
-
-```rust
-let request = &ChatCompletionRequestBuilder::default()
-    .model("gpt-4o-mini".to_string())
-    .messages(vec![
-        ("system", "You are a helpful assistant.").into(),
-        ("user", "Tell me a joke").into(),
-    ])
-    .build()?;
-```
-
-## Graph
-
-Build and execute complex workflows with conditional logic and async node execution.
-
-```rust
-use ai::graph::{Graph, START, END};
-use std::collections::HashMap;
-
-#[derive(Clone, Debug)]
-struct State {
-    message: String,
-    count: i32,
-    quality_score: i32,
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let graph = Graph::new()
-        .add_node("generate_content", |mut state: State| async move {
-            state.message = format!("Generated content: {}", state.message);
-            state.quality_score = 6;
-            println!("Generate: {}", state.message);
-            Ok(state)
-        })
-        .add_node("improve_content", |mut state: State| async move {
-            state.message = format!("Improved: {}", state.message);
-            state.quality_score += 3;
-            state.count += 1;
-            println!("Improve: {} (quality: {})", state.message, state.quality_score);
-            Ok(state)
-        })
-        .add_node("polish_content", |mut state: State| async move {
-            state.message = format!("Polished: {}", state.message);
-            state.quality_score = 10;
-            println!("Polish: {} (final quality: {})", state.message, state.quality_score);
-            Ok(state)
-        })
-        .add_edge(START, "generate_content")
-        .add_conditional_edges(
-            "generate_content",
-            |state: State| async move {
-                if state.quality_score < 8 {
-                    "improve".to_string()
-                } else {
-                    "polish".to_string()
-                }
-            },
-            {
-                let mut mapping = HashMap::new();
-                mapping.insert("improve", "improve_content");
-                mapping.insert("polish", "polish_content");
-                mapping
-            },
-        )
-        .add_edge("improve_content", "polish_content")
-        .add_edge("polish_content", END);
-
-    let compiled_graph = graph.compile()?;
-
-    let initial_state = State {
-        message: "Hello World".to_string(),
-        count: 0,
-        quality_score: 0,
+    let model = Model {
+        id: "gpt-5.5".to_string(),
+        name: "GPT 5.5".to_string(),
+        api: "openai-responses".to_string(),
+        provider: "openai".to_string(),
+        base_url: "https://api.openai.com/v1".to_string(),
+        reasoning: true,
+        ..Default::default()
     };
 
-    let result = compiled_graph.execute(initial_state).await?;
-    println!("Final result: {:?}", result);
+    let message = complete_simple(
+        model,
+        Context {
+            messages: vec![Message::user_text("Summarize Rust ownership.")],
+            ..Default::default()
+        },
+        Some(options),
+    )
+    .await?;
 
+    println!("{message:?}");
     Ok(())
 }
 ```
 
-The graph can be visualized using Mermaid syntax. Use `draw_mermaid()` to generate the diagram:
-
-```mermaid
-flowchart TD
-    __start__([START])
-    __end__([END])
-    improve_content[improve_content]
-    generate_content[generate_content]
-    polish_content[polish_content]
-    __start__ --> generate_content
-    improve_content --> polish_content
-    polish_content --> __end__
-    generate_content -->|improve| improve_content
-    generate_content -->|polish| polish_content
-    classDef startEnd fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    class __start__,__end__ startEnd
-```
-
-Visit [mermaid.live](https://mermaid.live) to see a live preview of your graph diagrams.
-
-# Clients
-
-## OpenAI
-
-```sh
-cargo add ai --features=openai_client
-```
+## Anthropic
 
 ```rust
-let openai = ai::clients::openai::Client::new("open_api_key")?;
-let openai = ai::clients::openai::Client::from_url("open_api_key", "http://api.openai.com/v1")?;
-let openai = ai::clients::openai::Client::from_env()?;
-```
+use ai::{complete_simple, Context, Message, Model, SimpleStreamOptions};
 
-### Gemini API via OpenAI
+#[tokio::main]
+async fn main() -> ai::Result<()> {
+    let model = Model {
+        id: "claude-sonnet-4-5".to_string(),
+        name: "Claude Sonnet".to_string(),
+        api: "anthropic-messages".to_string(),
+        provider: "anthropic".to_string(),
+        base_url: "https://api.anthropic.com".to_string(),
+        ..Default::default()
+    };
 
-Set `http1_title_case_headers` for Gemini API.
-
-```rust
-let gemini = ai::clients::openai::ClientBuilder::default()
-    .http_client(
-        reqwest::Client::builder()
-            .http1_title_case_headers()
-            .build()?,
+    let message = complete_simple(
+        model,
+        Context {
+            messages: vec![Message::user_text("Write a short status update.")],
+            ..Default::default()
+        },
+        Some(SimpleStreamOptions::default()),
     )
-    .api_key("gemini_api_key".into())
-    .base_url("https://generativelanguage.googleapis.com/v1beta/openai".into())
-    .build()?;
+    .await?;
+
+    println!("{message:?}");
+    Ok(())
+}
 ```
 
-## Azure OpenAI
+## GitHub Copilot
 
-```
-cargo add ai --features=azure_openai_client
-```
+Copilot OAuth is available through `login_github_copilot`,
+`refresh_github_copilot_token`, and the OAuth registry helpers. After login, the
+Copilot access token is used as the API key for models whose provider is
+`github-copilot`.
 
-```rust
-let azure_openai = ai::clients::azure_openai::ClientBuilder::default()
-    .auth(ai::clients::azure_openai::Auth::BearerToken("token".into()))
-    // .auth(ai::clients::azure_openai::Auth::ApiKey(
-    //     std::env::var(ai::clients::azure_openai::AZURE_OPENAI_API_KEY_ENV_VAR)
-    //         .map_err(|e| Error::EnvVarError(ai::clients::azure_openai::AZURE_OPENAI_API_KEY_ENV_VAR.to_string(), e))?
-    //         .into(),
-    // ))
-    .api_version("2024-02-15-preview")
-    .base_url("https://resourcename.openai.azure.com")
-    .build()?;
-```
+Copilot dynamic request headers are shared by the OpenAI Chat Completions,
+OpenAI Responses, and Anthropic routes. The helper functions are public:
 
-Pass the `deployment_id` as `model` of the `ChatCompletionRequest`.
+- `build_copilot_dynamic_headers`
+- `infer_copilot_initiator`
+- `has_copilot_vision_input`
+- `get_github_copilot_base_url`
 
-Use the following command to get bearer token.
+## Agent Runtime
+
+The agent API is part of this crate:
+
+- `Agent`
+- `AgentOptions`
+- `agent_loop`
+- `agent_loop_continue`
+- `run_agent_loop`
+- `run_agent_loop_continue`
+
+Tools implement `AgentTool`; the loop supports sequential or parallel tool
+execution, cancellation, `before_tool_call`, `after_tool_call`,
+`should_stop_after_turn`, and `prepare_next_turn` hooks.
+
+## Scope
+
+Included in this port:
+
+- OpenAI Chat Completions provider behavior
+- OpenAI Responses provider behavior
+- Anthropic Messages provider behavior
+- GitHub Copilot dynamic headers and OAuth flow
+- Anthropic OAuth flow
+- Agent and agent-loop runtime inside the `ai` crate
+
+Not included in the active built-in provider surface:
+
+- Mistral Conversations
+- Google Generative AI or Google Vertex
+- Azure OpenAI Responses
+- OpenAI Codex Responses
+- Bedrock or other broad provider-specific APIs
+- TypeScript agent harness
+- Separate Rust agent crate
+
+The generated model catalog is loaded from upstream metadata, then filtered to
+models that use the three API routes listed above.
+
+## Verification
 
 ```sh
-az account get-access-token --resource https://cognitiveservices.azure.com
+cargo fmt -p ai --check
+cargo test -p ai --quiet
 ```
 
-## Ollama
-
-Suggest using openai client instead of ollama for maximum compatibility.
+Optional local integration tests use an OpenAI-compatible server at
+`http://localhost:4141/v1`:
 
 ```sh
-cargo add ai --features=ollama_client
+PI_REQUIRE_LOCAL_4141=1 cargo test -p ai --test local_4141 --quiet
 ```
 
-```rust
-let ollama = ai::clients::ollama::Client::new()?;
-let ollama = ai::clients::ollama::Client::from_url("http://localhost:11434")?;
-```
-
-# LICENSE
+## License
 
 MIT

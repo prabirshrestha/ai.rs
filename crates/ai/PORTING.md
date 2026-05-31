@@ -2,7 +2,7 @@
 
 This crate ports the focused `@earendil-works/pi-ai` and `@earendil-works/pi-agent`
 surfaces into Rust. The comparison target for this checkpoint is
-`earendil-works/pi` commit `dbb9911a`.
+`earendil-works/pi` commit `3911d6f5`.
 
 ## Scope
 
@@ -21,6 +21,8 @@ Excluded by current scope:
 - A separate Rust agent crate.
 - Broad provider parity outside the focused provider set, except where shared
   model catalogs, registries, or handoff behavior require support code.
+- Built-in stream providers for Mistral, Google, Azure OpenAI Responses,
+  OpenAI Codex Responses, Bedrock, or other non-focused provider APIs.
 
 ## Port Parity
 
@@ -43,6 +45,9 @@ The agent loop preserves the TypeScript lifecycle model:
 
 The OAuth registry is intentionally focused on the current provider set:
 `anthropic` and `github-copilot`.
+
+The built-in stream registry is intentionally focused on:
+`anthropic-messages`, `openai-completions`, and `openai-responses`.
 
 ## Rust Adaptations
 
@@ -68,7 +73,8 @@ Current verification gates:
 - `cargo clippy -p ai --all-targets -- -D warnings`
 - `cargo test -p ai --quiet`
 - `PI_REQUIRE_LOCAL_4141=1 cargo test -p ai --test local_4141 --quiet`
-- Catalog parity against `/tmp/pi/packages/ai` generated catalogs.
+- Filtered catalog parity against `/tmp/pi/packages/ai` generated catalogs for
+  models using the focused API routes.
 - `git diff --check`
 
 The local `4141` integration tests currently cover:

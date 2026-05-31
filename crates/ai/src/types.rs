@@ -16,28 +16,16 @@ pub type Provider = String;
 #[serde(rename_all = "kebab-case")]
 pub enum KnownApi {
     OpenaiCompletions,
-    MistralConversations,
     OpenaiResponses,
-    AzureOpenaiResponses,
-    OpenaiCodexResponses,
     AnthropicMessages,
-    BedrockConverseStream,
-    GoogleGenerativeAi,
-    GoogleVertex,
 }
 
 impl KnownApi {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenaiCompletions => "openai-completions",
-            Self::MistralConversations => "mistral-conversations",
             Self::OpenaiResponses => "openai-responses",
-            Self::AzureOpenaiResponses => "azure-openai-responses",
-            Self::OpenaiCodexResponses => "openai-codex-responses",
             Self::AnthropicMessages => "anthropic-messages",
-            Self::BedrockConverseStream => "bedrock-converse-stream",
-            Self::GoogleGenerativeAi => "google-generative-ai",
-            Self::GoogleVertex => "google-vertex",
         }
     }
 }
@@ -81,7 +69,7 @@ impl ModelThinkingLevel {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "off" => Some(Self::Off),
             "minimal" => Some(Self::Minimal),

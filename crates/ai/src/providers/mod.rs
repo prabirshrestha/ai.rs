@@ -1,12 +1,8 @@
 pub mod anthropic;
-pub mod azure_openai_responses;
 pub mod cloudflare;
 pub mod faux;
 pub mod github_copilot_headers;
-pub mod google_shared;
 pub mod images;
-pub mod mistral;
-pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_prompt_cache;
 pub mod openai_responses;
