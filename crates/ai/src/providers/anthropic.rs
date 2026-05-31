@@ -89,12 +89,11 @@ impl Default for AnthropicOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ResolvedAnthropicCompat {
+struct ResolvedAnthropicCompat {
     pub supports_eager_tool_input_streaming: bool,
     pub supports_long_cache_retention: bool,
     pub send_session_affinity_headers: bool,
     pub supports_cache_control_on_tools: bool,
-    pub allow_empty_signature: bool,
 }
 
 pub fn stream_simple_anthropic(
@@ -596,7 +595,7 @@ async fn run_stream(
     Ok(())
 }
 
-pub fn build_anthropic_payload(
+fn build_anthropic_payload(
     model: &Model,
     context: &Context,
     options: &AnthropicOptions,
@@ -712,7 +711,7 @@ pub fn build_anthropic_payload(
     payload
 }
 
-pub fn convert_messages(
+fn convert_messages(
     messages: &[crate::types::Message],
     model: &Model,
     is_oauth_token: bool,
@@ -965,7 +964,6 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         supports_cache_control_on_tools: compat
             .supports_cache_control_on_tools
             .unwrap_or(!is_fireworks),
-        allow_empty_signature: compat.allow_empty_signature.unwrap_or(false),
     }
 }
 

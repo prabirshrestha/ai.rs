@@ -598,7 +598,7 @@ fn finish_open_blocks(
     }
 }
 
-pub fn build_chat_completions_payload(
+fn build_chat_completions_payload(
     model: &Model,
     context: &Context,
     options: &OpenAICompletionsOptions,
@@ -1103,7 +1103,7 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
     }
 }
 
-pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
+fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     let provider = model.provider.as_str();
     let base_url = model.base_url.as_str();
     let is_zai = provider == "zai" || base_url.contains("api.z.ai");
@@ -1168,7 +1168,7 @@ pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     }
 }
 
-pub fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
+fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     let detected = detect_compat(model);
     let compat = &model.compat.openai_completions;
     ResolvedOpenAICompletionsCompat {

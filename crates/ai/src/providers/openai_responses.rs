@@ -36,7 +36,7 @@ pub struct OpenAIResponsesOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ResolvedOpenAIResponsesCompat {
+struct ResolvedOpenAIResponsesCompat {
     pub send_session_id_header: bool,
     pub supports_long_cache_retention: bool,
 }
@@ -692,7 +692,8 @@ async fn run_stream(
     Ok(())
 }
 
-pub fn build_responses_payload(
+#[cfg(test)]
+fn build_responses_payload(
     model: &Model,
     context: &Context,
     options: &OpenAIResponsesOptions,
@@ -794,7 +795,8 @@ fn try_build_responses_payload(
     Ok(payload)
 }
 
-pub fn convert_responses_messages(
+#[cfg(test)]
+fn convert_responses_messages(
     model: &Model,
     context: &Context,
     allowed_tool_call_providers: &HashSet<&str>,
@@ -995,7 +997,7 @@ fn try_convert_responses_messages(
     Ok(messages)
 }
 
-pub fn convert_responses_tools(tools: &[Tool], strict: Option<bool>) -> Vec<Value> {
+fn convert_responses_tools(tools: &[Tool], strict: Option<bool>) -> Vec<Value> {
     let strict = strict.unwrap_or(false);
     tools
         .iter()
@@ -1114,7 +1116,7 @@ fn map_status(status: Option<&str>) -> std::result::Result<StopReason, String> {
     }
 }
 
-pub fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
+fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
     ResolvedOpenAIResponsesCompat {
         send_session_id_header: model
             .compat
