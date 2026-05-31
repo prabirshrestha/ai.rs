@@ -506,11 +506,14 @@ registration.unregister();
 ### Providers and Models
 
 Built-in model metadata is loaded from the generated upstream model catalog and
-filtered by the active API surface. That keeps models whose transport is
-`openai-completions`, `openai-responses`, or `anthropic-messages`, including
-OpenAI/Anthropic-compatible providers such as GitHub Copilot, OpenRouter, Groq,
-Z.AI, Xiaomi, and OpenCode Go. Cloudflare providers are excluded until their
-provider-specific APIs are ported.
+filtered to the active provider scope: `openai`, `anthropic`, and
+`github-copilot`. Built-in models use only the active stream APIs:
+`openai-completions`, `openai-responses`, and `anthropic-messages`.
+
+Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
+Responses, and other broad provider-specific APIs are not part of the active
+built-in provider surface in this port. PRs to add support for additional
+providers are welcome.
 
 ### Querying Providers and Models
 
@@ -634,7 +637,7 @@ Explicit API keys in `StreamOptions` take precedence over environment lookup.
 use ai::{find_env_keys, get_env_api_key};
 
 let key = get_env_api_key("openai");
-let keys = find_env_keys();
+let keys = find_env_keys("openai");
 ```
 
 ## OAuth Providers
@@ -679,6 +682,7 @@ cargo fmt --all --check
 cargo check -p ai --all-targets
 cargo clippy -p ai --all-targets -- -D warnings
 cargo test -p ai
+cargo test --workspace
 ```
 
 Useful narrower test commands:

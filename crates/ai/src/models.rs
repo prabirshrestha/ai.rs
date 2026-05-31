@@ -15,7 +15,7 @@ const SUPPORTED_MODEL_APIS: [&str; 3] = [
     "openai-completions",
     "openai-responses",
 ];
-const UNSUPPORTED_MODEL_PROVIDERS: [&str; 2] = ["cloudflare-ai-gateway", "cloudflare-workers-ai"];
+const SUPPORTED_MODEL_PROVIDERS: [&str; 3] = ["anthropic", "github-copilot", "openai"];
 
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (model.cost.input / 1_000_000.0) * usage.input as f64;
@@ -185,7 +185,7 @@ fn builtin_models() -> ModelRegistry {
         .as_object()
         .expect("generated model registry should be an object")
         .iter()
-        .filter(|(provider, _)| !UNSUPPORTED_MODEL_PROVIDERS.contains(&provider.as_str()))
+        .filter(|(provider, _)| SUPPORTED_MODEL_PROVIDERS.contains(&provider.as_str()))
         .filter_map(|(provider, models)| {
             let models = models
                 .as_object()
@@ -214,22 +214,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_registry_matches_catalog_size() {
+    fn generated_registry_exposes_focused_provider_set() {
         let registry = builtin_models();
-        assert!(
-            !registry
-                .get_providers()
-                .contains(&"cloudflare-ai-gateway".to_string())
-        );
-        assert!(
-            !registry
-                .get_providers()
-                .contains(&"cloudflare-workers-ai".to_string())
-        );
-        assert!(
-            registry
-                .get_providers()
-                .contains(&"github-copilot".to_string())
+        assert_eq!(
+            registry.get_providers(),
+            ["anthropic", "github-copilot", "openai"]
         );
     }
 
@@ -247,9 +236,6 @@ mod tests {
             opus.compat.anthropic_messages.force_adaptive_thinking,
             Some(true)
         );
-        let step =
-            get_model("openrouter", "stepfun/step-3.7-flash").expect("stepfun/step-3.7-flash");
-        assert_eq!(step.max_tokens, 256_000);
         assert!(get_providers().contains(&"anthropic".to_string()));
     }
 
@@ -258,21 +244,7 @@ mod tests {
         let registry = builtin_models();
         let providers = registry.get_providers();
 
-        assert_eq!(
-            &providers[..10],
-            [
-                "anthropic",
-                "cerebras",
-                "deepseek",
-                "fireworks",
-                "github-copilot",
-                "groq",
-                "huggingface",
-                "kimi-coding",
-                "minimax",
-                "minimax-cn",
-            ]
-        );
+        assert_eq!(providers, ["anthropic", "github-copilot", "openai"]);
     }
 
     #[test]
@@ -381,60 +353,10 @@ mod tests {
             ]
         );
 
-        let openrouter_gpt55_pro =
-            get_model("openrouter", "openai/gpt-5.5-pro").expect("openai/gpt-5.5-pro");
-        assert_eq!(
-            get_supported_thinking_levels(&openrouter_gpt55_pro),
-            vec![
-                ModelThinkingLevel::Medium,
-                ModelThinkingLevel::High,
-                ModelThinkingLevel::Xhigh,
-            ]
-        );
-
-        for (provider, model_id, expected) in [
-            (
-                "deepseek",
-                "deepseek-v4-flash",
-                vec![
-                    ModelThinkingLevel::Off,
-                    ModelThinkingLevel::High,
-                    ModelThinkingLevel::Xhigh,
-                ],
-            ),
-            (
-                "opencode-go",
-                "deepseek-v4-flash",
-                vec![
-                    ModelThinkingLevel::Off,
-                    ModelThinkingLevel::High,
-                    ModelThinkingLevel::Xhigh,
-                ],
-            ),
-            (
-                "opencode-go",
-                "kimi-k2.6",
-                vec![ModelThinkingLevel::Off, ModelThinkingLevel::High],
-            ),
-            ("opencode", "grok-build-0.1", vec![ModelThinkingLevel::High]),
-            (
-                "openrouter",
-                "deepseek/deepseek-v4-flash",
-                vec![
-                    ModelThinkingLevel::Off,
-                    ModelThinkingLevel::High,
-                    ModelThinkingLevel::Xhigh,
-                ],
-            ),
-        ] {
-            let model = get_model(provider, model_id).expect(model_id);
-            assert_eq!(get_supported_thinking_levels(&model), expected);
-        }
-
-        let openrouter_opus46 = get_model("openrouter", "anthropic/claude-opus-4.6")
-            .expect("anthropic/claude-opus-4.6");
+        let copilot_opus46 =
+            get_model("github-copilot", "claude-opus-4.6").expect("claude-opus-4.6");
         assert!(
-            get_supported_thinking_levels(&openrouter_opus46).contains(&ModelThinkingLevel::Xhigh)
+            get_supported_thinking_levels(&copilot_opus46).contains(&ModelThinkingLevel::Xhigh)
         );
     }
 
@@ -450,9 +372,10 @@ mod tests {
         flagged.sort();
 
         for expected in [
+            "anthropic/claude-opus-4-6",
             "anthropic/claude-opus-4-8",
-            "opencode/claude-opus-4-8",
-            "vercel-ai-gateway/anthropic/claude-opus-4.8",
+            "github-copilot/claude-opus-4.6",
+            "github-copilot/claude-opus-4.8",
         ] {
             assert!(flagged.contains(&expected.to_string()), "{expected}");
         }

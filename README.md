@@ -26,8 +26,10 @@ The active provider API surface is intentionally narrow:
 - Anthropic Messages: `anthropic-messages`
 - GitHub Copilot OAuth and dynamic headers over compatible routes
 
-Cloudflare support is not included in this Rust port. PRs to add support for
-additional provider-specific APIs are welcome.
+Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
+Responses, and other broad provider-specific APIs are not part of the active
+built-in provider surface in this port. PRs to add support for additional
+providers are welcome.
 
 The TypeScript coding-agent harness, CLI, and TUI from
 [`pi`](https://github.com/earendil-works/pi) are not included. The agent loop is
@@ -40,6 +42,7 @@ cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p ai
+cargo test --workspace
 ```
 
 Useful narrower test commands:

@@ -3719,7 +3719,9 @@ mod tests {
 
     #[tokio::test]
     async fn opencode_go_reasoning_deltas_use_reasoning_content_signature() {
-        let mut chat_model = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        let mut chat_model = model();
+        chat_model.id = "kimi-k2.6".to_string();
+        chat_model.provider = "opencode-go".to_string();
         chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
             "id": "chatcmpl-opencode-go-reasoning",
             "choices": [{
@@ -3865,23 +3867,13 @@ mod tests {
     }
 
     #[test]
-    fn zai_tool_stream_metadata_matches_supported_builtin_models() {
-        let supported = crate::get_model("zai", "glm-4.7").expect("glm-4.7");
-        let unsupported = crate::get_model("zai", "glm-4.5-air").expect("glm-4.5-air");
-
-        assert_eq!(
-            supported.compat.openai_completions.zai_tool_stream,
-            Some(true)
-        );
-        assert_ne!(
-            unsupported.compat.openai_completions.zai_tool_stream,
-            Some(true)
-        );
-    }
-
-    #[test]
     fn groq_qwen_reasoning_levels_map_to_default_reasoning_effort() {
-        let model = crate::get_model("groq", "qwen/qwen3-32b").expect("qwen/qwen3-32b");
+        let mut model = model();
+        model.id = "qwen/qwen3-32b".to_string();
+        model.provider = "groq".to_string();
+        model
+            .thinking_level_map
+            .insert("high".to_string(), Some("default".to_string()));
         let payload = build_chat_completions_payload(
             &model,
             &Context {
@@ -3901,7 +3893,9 @@ mod tests {
 
     #[test]
     fn groq_models_without_level_mapping_keep_reasoning_effort() {
-        let model = crate::get_model("groq", "openai/gpt-oss-20b").expect("openai/gpt-oss-20b");
+        let mut model = model();
+        model.id = "openai/gpt-oss-20b".to_string();
+        model.provider = "groq".to_string();
         let payload = build_chat_completions_payload(
             &model,
             &Context {
@@ -3921,7 +3915,15 @@ mod tests {
 
     #[test]
     fn deepseek_thinking_payload_respects_reasoning_effort_compat() {
-        let opencode_go = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        let mut opencode_go = model();
+        opencode_go.id = "kimi-k2.6".to_string();
+        opencode_go.provider = "opencode-go".to_string();
+        opencode_go.compat.openai_completions.thinking_format =
+            Some(OpenAIThinkingFormat::Deepseek);
+        opencode_go
+            .compat
+            .openai_completions
+            .supports_reasoning_effort = Some(false);
         let opencode_compat = get_compat(&opencode_go);
         let opencode_disabled = build_chat_completions_payload(
             &opencode_go,
@@ -3952,7 +3954,11 @@ mod tests {
         assert_eq!(opencode_enabled["thinking"], json!({ "type": "enabled" }));
         assert!(opencode_enabled.get("reasoning_effort").is_none());
 
-        let xiaomi = crate::get_model("xiaomi", "mimo-v2.5-pro").expect("mimo-v2.5-pro");
+        let mut xiaomi = model();
+        xiaomi.id = "mimo-v2.5-pro".to_string();
+        xiaomi.provider = "xiaomi".to_string();
+        xiaomi.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Deepseek);
+        xiaomi.compat.openai_completions.supports_reasoning_effort = Some(true);
         let xiaomi_compat = get_compat(&xiaomi);
         let xiaomi_payload = build_chat_completions_payload(
             &xiaomi,
@@ -3974,10 +3980,11 @@ mod tests {
 
     #[test]
     fn openai_thinking_payload_respects_reasoning_effort_compat() {
-        let opencode = crate::get_model("opencode", "grok-build-0.1").expect("grok-build-0.1");
-        let compat = get_compat(&opencode);
+        let mut model = model();
+        model.compat.openai_completions.supports_reasoning_effort = Some(false);
+        let compat = get_compat(&model);
         let payload = build_chat_completions_payload(
-            &opencode,
+            &model,
             &Context {
                 messages: vec![Message::user_text("hello")],
                 ..Default::default()
@@ -4011,31 +4018,37 @@ mod tests {
 
     #[test]
     fn xiaomi_mimo_metadata_requires_reasoning_content_replay() {
-        for provider in [
-            "xiaomi",
-            "xiaomi-token-plan-cn",
-            "xiaomi-token-plan-ams",
-            "xiaomi-token-plan-sgp",
-        ] {
-            let model = crate::get_model(provider, "mimo-v2.5-pro").expect("mimo-v2.5-pro");
-            let compat = get_compat(&model);
+        let mut model = model();
+        model.id = "mimo-v2.5-pro".to_string();
+        model.provider = "xiaomi".to_string();
+        model
+            .compat
+            .openai_completions
+            .requires_reasoning_content_on_assistant_messages = Some(true);
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Deepseek);
+        let compat = get_compat(&model);
 
-            assert!(compat.requires_reasoning_content_on_assistant_messages);
-            assert_eq!(compat.thinking_format, OpenAIThinkingFormat::Deepseek);
-            assert!(model.compat.openai_completions.max_tokens_field.is_none());
-            assert!(
-                model
-                    .compat
-                    .openai_completions
-                    .supports_developer_role
-                    .is_none()
-            );
-        }
+        assert!(compat.requires_reasoning_content_on_assistant_messages);
+        assert_eq!(compat.thinking_format, OpenAIThinkingFormat::Deepseek);
+        assert!(model.compat.openai_completions.max_tokens_field.is_none());
+        assert!(
+            model
+                .compat
+                .openai_completions
+                .supports_developer_role
+                .is_none()
+        );
     }
 
     #[test]
     fn xiaomi_mimo_tool_call_replay_includes_empty_reasoning_content() {
-        let model = crate::get_model("xiaomi", "mimo-v2.5-pro").expect("mimo-v2.5-pro");
+        let mut model = model();
+        model.id = "mimo-v2.5-pro".to_string();
+        model.provider = "xiaomi".to_string();
+        model
+            .compat
+            .openai_completions
+            .requires_reasoning_content_on_assistant_messages = Some(true);
         let compat = get_compat(&model);
         let assistant = assistant_message(
             vec![AssistantContent::ToolCall(ToolCall {
@@ -4073,7 +4086,9 @@ mod tests {
 
     #[test]
     fn opencode_go_replays_reasoning_as_reasoning_content() {
-        let model = crate::get_model("opencode-go", "kimi-k2.6").expect("kimi-k2.6");
+        let mut model = model();
+        model.id = "kimi-k2.6".to_string();
+        model.provider = "opencode-go".to_string();
         let compat = get_compat(&model);
         let assistant = assistant_message(
             vec![
