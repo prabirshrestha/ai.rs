@@ -31,9 +31,9 @@ fn default_agent_model() -> Model {
 
 #[derive(Clone)]
 pub struct AgentState {
-    pub system_prompt: Option<String>,
+    pub system_prompt: String,
     pub model: Model,
-    pub reasoning_level: Option<crate::ModelThinkingLevel>,
+    pub reasoning_level: crate::ModelThinkingLevel,
     pub tools: Vec<DynAgentTool>,
     pub messages: Vec<AgentMessage>,
     pub is_streaming: bool,
@@ -45,9 +45,9 @@ pub struct AgentState {
 impl AgentState {
     pub fn new(model: Model) -> Self {
         Self {
-            system_prompt: None,
+            system_prompt: String::new(),
             model,
-            reasoning_level: None,
+            reasoning_level: crate::ModelThinkingLevel::Off,
             tools: Vec::new(),
             messages: Vec::new(),
             is_streaming: false,
@@ -193,15 +193,15 @@ impl Agent {
         self.state.lock().await.clone()
     }
 
-    pub async fn set_system_prompt(&self, system_prompt: Option<String>) {
-        self.state.lock().await.system_prompt = system_prompt;
+    pub async fn set_system_prompt(&self, system_prompt: impl Into<String>) {
+        self.state.lock().await.system_prompt = system_prompt.into();
     }
 
     pub async fn set_model(&self, model: Model) {
         self.state.lock().await.model = model;
     }
 
-    pub async fn set_reasoning_level(&self, reasoning_level: Option<crate::ModelThinkingLevel>) {
+    pub async fn set_reasoning_level(&self, reasoning_level: crate::ModelThinkingLevel) {
         self.state.lock().await.reasoning_level = reasoning_level;
     }
 
@@ -527,7 +527,7 @@ impl Agent {
     async fn create_context_snapshot(&self) -> AgentContext {
         let state = self.state.lock().await;
         AgentContext {
-            system_prompt: state.system_prompt.clone(),
+            system_prompt: Some(state.system_prompt.clone()),
             messages: state.messages.clone(),
             tools: state.tools.clone(),
         }
@@ -539,10 +539,8 @@ impl Agent {
             (state.model.clone(), state.reasoning_level)
         };
         let mut options = self.base_options.lock().await.clone();
-        if let Some(reasoning_level) = reasoning_level {
-            options.reasoning =
-                (reasoning_level != crate::ModelThinkingLevel::Off).then_some(reasoning_level);
-        }
+        options.reasoning =
+            (reasoning_level != crate::ModelThinkingLevel::Off).then_some(reasoning_level);
         options.stream.session_id = self.session_id.lock().await.clone();
 
         let steering_queue = self.steering_queue.clone();
@@ -727,12 +725,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_default_state_matches_upstream_shape() {
+        let agent = Agent::default();
+        let state = agent.state().await;
+
+        assert_eq!(state.system_prompt, "");
+        assert_eq!(state.model.id, "unknown");
+        assert_eq!(state.reasoning_level, crate::ModelThinkingLevel::Off);
+        assert!(state.tools.is_empty());
+        assert!(state.messages.is_empty());
+        assert!(!state.is_streaming);
+        assert!(state.streaming_message.is_none());
+        assert!(state.pending_tool_calls.is_empty());
+        assert!(state.error_message.is_none());
+    }
+
+    #[tokio::test]
     async fn agent_handles_basic_text_prompt_like_upstream() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("4", None)]);
         let agent = Agent::new(AgentOptions {
             initial_state: AgentState {
-                system_prompt: Some("You are a helpful assistant.".to_string()),
+                system_prompt: "You are a helpful assistant.".to_string(),
                 model: registration.get_model(),
                 ..AgentState::default()
             },
@@ -775,10 +789,9 @@ mod tests {
         ]);
         let agent = Arc::new(Agent::new(AgentOptions {
             initial_state: AgentState {
-                system_prompt: Some(
+                system_prompt:
                     "You are a helpful assistant. Always use the calculator tool for math."
                         .to_string(),
-                ),
                 model: registration.get_model(),
                 tools: vec![Arc::new(CalculateTool)],
                 ..AgentState::default()
