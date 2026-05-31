@@ -1537,6 +1537,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streams_thinking_text_and_partial_tool_call_deltas() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message(
+            vec![
+                faux_thinking("thinking text"),
+                faux_text("answer text"),
+                faux_tool_call(
+                    "echo",
+                    json!({ "text": "hi", "count": 12 }),
+                    Some("tool-1".to_string()),
+                ),
+            ],
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            }),
+        )]);
+
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                None,
+            )
+            .expect("faux stream"),
+        )
+        .await;
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::ThinkingStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::ThinkingDelta { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::TextStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::TextDelta { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::ToolCallStart { .. }))
+        );
+        let tool_call_deltas = events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(tool_call_deltas.len() > 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_call_deltas.join("")).expect("tool call json"),
+            json!({ "text": "hi", "count": 12 })
+        );
+
+        registration.unregister();
+    }
+
+    #[tokio::test]
     async fn streams_multiple_tool_calls_in_one_message() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message(
@@ -1587,54 +1660,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_explicit_assistant_error_and_aborted_messages_as_terminal_errors() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([
-            faux_assistant_message(
-                "failed",
-                Some(FauxAssistantMessageOptions {
-                    stop_reason: Some(StopReason::Error),
-                    error_message: Some("explicit failure".to_string()),
-                    ..Default::default()
-                }),
-            ),
-            faux_assistant_message(
-                "aborted",
-                Some(FauxAssistantMessageOptions {
-                    stop_reason: Some(StopReason::Aborted),
-                    error_message: Some("explicit abort".to_string()),
-                    ..Default::default()
-                }),
-            ),
-        ]);
+    async fn streams_an_explicit_assistant_error_message_as_a_terminal_error() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSize {
+                min: Some(2),
+                max: Some(2),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            "partial",
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::Error),
+                error_message: Some("upstream failed".to_string()),
+                ..Default::default()
+            }),
+        )]);
 
-        for (expected_reason, expected_message) in [
-            (StopReason::Error, "explicit failure"),
-            (StopReason::Aborted, "explicit abort"),
-        ] {
-            let events = collect_events(
-                stream(
-                    registration.get_model(),
-                    Context {
-                        messages: vec![Message::user_text("hi")],
-                        ..Context::default()
-                    },
-                    None,
-                )
-                .expect("faux stream"),
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                None,
             )
-            .await;
-            let Some(AssistantMessageEvent::Error {
-                reason,
-                error: message,
-            }) = events.last()
-            else {
-                panic!("expected terminal error");
-            };
-            assert_eq!(*reason, expected_reason);
-            assert_eq!(message.stop_reason, expected_reason);
-            assert_eq!(message.error_message.as_deref(), Some(expected_message));
-        }
+            .expect("faux stream"),
+        )
+        .await;
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event {
+                    AssistantMessageEvent::Start { .. } => "start",
+                    AssistantMessageEvent::TextStart { .. } => "text_start",
+                    AssistantMessageEvent::TextDelta { .. } => "text_delta",
+                    AssistantMessageEvent::TextEnd { .. } => "text_end",
+                    AssistantMessageEvent::Error { .. } => "error",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>(),
+            vec!["start", "text_start", "text_delta", "text_end", "error"]
+        );
+        let Some(AssistantMessageEvent::Error {
+            reason,
+            error: message,
+        }) = events.last()
+        else {
+            panic!("expected terminal error");
+        };
+        assert_eq!(*reason, StopReason::Error);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(message.error_message.as_deref(), Some("upstream failed"));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn streams_an_explicit_assistant_aborted_message_as_a_terminal_error() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSize {
+                min: Some(2),
+                max: Some(2),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            "partial",
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::Aborted),
+                error_message: Some("Request was aborted".to_string()),
+                ..Default::default()
+            }),
+        )]);
+
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                None,
+            )
+            .expect("faux stream"),
+        )
+        .await;
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event {
+                    AssistantMessageEvent::Start { .. } => "start",
+                    AssistantMessageEvent::TextStart { .. } => "text_start",
+                    AssistantMessageEvent::TextDelta { .. } => "text_delta",
+                    AssistantMessageEvent::TextEnd { .. } => "text_end",
+                    AssistantMessageEvent::Error { .. } => "error",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>(),
+            vec!["start", "text_start", "text_delta", "text_end", "error"]
+        );
+        let Some(AssistantMessageEvent::Error {
+            reason,
+            error: message,
+        }) = events.last()
+        else {
+            panic!("expected terminal error");
+        };
+        assert_eq!(*reason, StopReason::Aborted);
+        assert_eq!(message.stop_reason, StopReason::Aborted);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Request was aborted")
+        );
         registration.unregister();
     }
 

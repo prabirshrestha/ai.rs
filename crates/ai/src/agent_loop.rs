@@ -2108,8 +2108,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_stop_after_the_current_turn_and_after_a_tool_batch_when_every_tool_result_sets_terminate_true()
-     {
+    async fn should_stop_after_the_current_turn_when_should_stop_after_turn_returns_true() {
+        let mut config = AgentLoopConfig::new(Model {
+            id: "test-model".to_string(),
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            ..Default::default()
+        });
+        let steering_polls = Arc::new(AtomicUsize::new(0));
+        config.get_steering_messages = Some(Arc::new({
+            let steering_polls = Arc::clone(&steering_polls);
+            move || {
+                let steering_polls = Arc::clone(&steering_polls);
+                async move {
+                    steering_polls.fetch_add(1, Ordering::SeqCst);
+                    Vec::new()
+                }
+                .boxed()
+            }
+        }));
+        let follow_up_polls = Arc::new(AtomicUsize::new(0));
+        config.get_follow_up_messages = Some(Arc::new({
+            let follow_up_polls = Arc::clone(&follow_up_polls);
+            move || {
+                let follow_up_polls = Arc::clone(&follow_up_polls);
+                async move {
+                    follow_up_polls.fetch_add(1, Ordering::SeqCst);
+                    vec![user_text("follow up")]
+                }
+                .boxed()
+            }
+        }));
+        let callback_roles = Arc::new(StdMutex::new(Vec::new()));
+        config.should_stop_after_turn = Some(Arc::new({
+            let callback_roles = Arc::clone(&callback_roles);
+            move |context| {
+                let callback_roles = Arc::clone(&callback_roles);
+                async move {
+                    *callback_roles.lock().unwrap() = context
+                        .context
+                        .messages
+                        .iter()
+                        .map(|message| match message {
+                            Message::User(_) => "user".to_string(),
+                            Message::Assistant(_) => "assistant".to_string(),
+                            Message::ToolResult(_) => "toolResult".to_string(),
+                            Message::Custom(_) => "custom".to_string(),
+                        })
+                        .collect();
+                    true
+                }
+                .boxed()
+            }
+        }));
+        let (events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("stop after turn")],
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            config,
+            emit,
+            None,
+            Some(immediate_stream_fn("stopped")),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(steering_polls.load(Ordering::SeqCst), 1);
+        assert_eq!(follow_up_polls.load(Ordering::SeqCst), 0);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| user_text_value(message) == Some("follow up"))
+        );
+        assert_eq!(
+            *callback_roles.lock().unwrap(),
+            vec!["user".to_string(), "assistant".to_string()]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| match event {
+                    AgentEvent::AgentStart => "agent_start",
+                    AgentEvent::TurnStart => "turn_start",
+                    AgentEvent::MessageStart { .. } => "message_start",
+                    AgentEvent::MessageUpdate { .. } => "message_update",
+                    AgentEvent::MessageEnd { .. } => "message_end",
+                    AgentEvent::TurnEnd { .. } => "turn_end",
+                    AgentEvent::AgentEnd { .. } => "agent_end",
+                    AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                    AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+                    AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                })
+                .collect::<Vec<_>>(),
+            [
+                "agent_start",
+                "turn_start",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "turn_end",
+                "agent_end",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_stop_after_a_tool_batch_when_every_tool_result_sets_terminate_true() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -2156,48 +2268,6 @@ mod tests {
             1
         );
         registration.unregister();
-
-        let mut config = AgentLoopConfig::new(Model {
-            id: "test-model".to_string(),
-            api: "test".to_string(),
-            provider: "test".to_string(),
-            ..Default::default()
-        });
-        let follow_up_polls = Arc::new(AtomicUsize::new(0));
-        config.get_follow_up_messages = Some(Arc::new({
-            let follow_up_polls = Arc::clone(&follow_up_polls);
-            move || {
-                let follow_up_polls = Arc::clone(&follow_up_polls);
-                async move {
-                    follow_up_polls.fetch_add(1, Ordering::SeqCst);
-                    vec![user_text("follow up")]
-                }
-                .boxed()
-            }
-        }));
-        config.should_stop_after_turn = Some(Arc::new(|_context| async { true }.boxed()));
-        let (_events, emit) = collect_events();
-        let messages = run_agent_loop(
-            vec![user_text("stop after turn")],
-            AgentContext {
-                system_prompt: Some(String::new()),
-                messages: Vec::new(),
-                tools: Vec::new(),
-            },
-            config,
-            emit,
-            None,
-            Some(immediate_stream_fn("stopped")),
-        )
-        .await
-        .expect("loop succeeds");
-
-        assert_eq!(follow_up_polls.load(Ordering::SeqCst), 0);
-        assert!(
-            !messages
-                .iter()
-                .any(|message| user_text_value(message) == Some("follow up"))
-        );
     }
 
     #[tokio::test]
@@ -2316,7 +2386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_loop_continue_validation_and_existing_context_events() {
+    async fn agent_loop_continue_should_throw_when_context_has_no_messages() {
         let (_events, emit) = collect_events();
         let empty_result = run_agent_loop_continue(
             AgentContext {
@@ -2334,7 +2404,10 @@ mod tests {
             empty_result,
             Err(crate::AgentError::NoMessagesToContinue)
         ));
+    }
 
+    #[tokio::test]
+    async fn agent_loop_continue_should_throw_when_context_last_message_is_assistant() {
         let (_events, emit) = collect_events();
         let assistant_result = run_agent_loop_continue(
             AgentContext {
@@ -2355,7 +2428,10 @@ mod tests {
             assistant_result,
             Err(crate::AgentError::CannotContinueFromAssistant)
         ));
+    }
 
+    #[tokio::test]
+    async fn agent_loop_continue_should_continue_without_emitting_existing_user_events() {
         let (events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {
@@ -2382,7 +2458,10 @@ mod tests {
                     if user_text_value(message) == Some("existing")
             )
         }));
+    }
 
+    #[tokio::test]
+    async fn agent_loop_continue_should_allow_custom_message_types_as_last_message() {
         let (_events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {
