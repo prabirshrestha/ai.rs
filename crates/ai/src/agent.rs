@@ -638,21 +638,25 @@ impl Default for Agent {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::FutureExt;
     use serde_json::{Value, json};
 
-    use super::AgentState;
-    use crate::agent_types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
+    use super::{AgentState, StreamFn};
+    use crate::agent_types::{AgentTool, AgentToolResult, AgentToolUpdateCallback, user_message};
+    use crate::event_stream::create_assistant_message_event_stream;
     use crate::providers::faux::{
         FauxAssistantMessageOptions, faux_assistant_message, faux_text, faux_tool_call,
         register_faux_provider,
     };
     use crate::{
-        Agent, AgentEvent, AgentOptions, AssistantContent, ImageContent, Message, StopReason, Tool,
-        ToolResultContent,
+        Agent, AgentError, AgentEvent, AgentOptions, AssistantContent, AssistantMessage,
+        AssistantMessageEvent, ImageContent, Message, Model, ModelThinkingLevel, StopReason,
+        TextContent, Tool, ToolResultContent,
     };
 
     fn text_from_message(message: &Message) -> String {
@@ -724,6 +728,78 @@ mod tests {
         }
     }
 
+    fn assistant_text_message(model: &Model, text: impl Into<String>) -> AssistantMessage {
+        let mut message = AssistantMessage::empty_for(model);
+        message.content = vec![AssistantContent::Text(TextContent {
+            text: text.into(),
+            text_signature: None,
+        })];
+        message
+    }
+
+    fn immediate_stream_fn(text: impl Into<String>) -> StreamFn {
+        let text = Arc::new(text.into());
+        Arc::new(move |model, _context, _options| {
+            let text = Arc::clone(&text);
+            async move {
+                let (mut sender, stream) = create_assistant_message_event_stream();
+                let message = assistant_text_message(&model, text.as_str());
+                sender.push(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                });
+                Ok(stream)
+            }
+            .boxed()
+        })
+    }
+
+    fn counted_stream_fn(counter: Arc<AtomicUsize>) -> StreamFn {
+        Arc::new(move |model, _context, _options| {
+            let counter = Arc::clone(&counter);
+            async move {
+                let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let (mut sender, stream) = create_assistant_message_event_stream();
+                let message = assistant_text_message(&model, format!("Processed {count}"));
+                sender.push(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                });
+                Ok(stream)
+            }
+            .boxed()
+        })
+    }
+
+    fn abortable_stream_fn() -> StreamFn {
+        Arc::new(|model, _context, options| {
+            async move {
+                let (mut sender, stream) = create_assistant_message_event_stream();
+                let token = options.stream.cancellation_token.clone();
+                tokio::spawn(async move {
+                    sender.push(AssistantMessageEvent::Start {
+                        partial: assistant_text_message(&model, ""),
+                    });
+                    loop {
+                        if token.as_ref().is_some_and(|token| token.is_cancelled()) {
+                            let mut message = assistant_text_message(&model, "Aborted");
+                            message.stop_reason = StopReason::Aborted;
+                            message.error_message = Some("Aborted".to_string());
+                            sender.push(AssistantMessageEvent::Error {
+                                reason: StopReason::Aborted,
+                                error: message,
+                            });
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                });
+                Ok(stream)
+            }
+            .boxed()
+        })
+    }
+
     #[tokio::test]
     async fn agent_default_state_matches_upstream_shape() {
         let agent = Agent::default();
@@ -738,6 +814,272 @@ mod tests {
         assert!(state.streaming_message.is_none());
         assert!(state.pending_tool_calls.is_empty());
         assert!(state.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_custom_initial_state_and_mutators_match_upstream() {
+        let model = Model {
+            id: "custom-model".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant.".to_string(),
+                model: model.clone(),
+                reasoning_level: ModelThinkingLevel::Low,
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        let state = agent.state().await;
+        assert_eq!(state.system_prompt, "You are a helpful assistant.");
+        assert_eq!(state.model, model);
+        assert_eq!(state.reasoning_level, ModelThinkingLevel::Low);
+
+        agent.set_system_prompt("Custom prompt").await;
+        agent
+            .set_model(Model {
+                id: "new-model".to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                ..Default::default()
+            })
+            .await;
+        agent.set_reasoning_level(ModelThinkingLevel::High).await;
+        agent.set_messages(vec![Message::user_text("Hello")]).await;
+        agent.push_message(Message::user_text("Next")).await;
+
+        let state = agent.state().await;
+        assert_eq!(state.system_prompt, "Custom prompt");
+        assert_eq!(state.model.id, "new-model");
+        assert_eq!(state.reasoning_level, ModelThinkingLevel::High);
+        assert_eq!(state.messages.len(), 2);
+
+        agent.clear_messages().await;
+        assert!(agent.state().await.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn async_subscribers_settle_before_prompt_and_idle_like_upstream() {
+        let agent = Arc::new(Agent::new(AgentOptions {
+            stream_fn: Some(immediate_stream_fn("ok")),
+            ..AgentOptions::default()
+        }));
+        let barrier = Arc::new(tokio::sync::Notify::new());
+        let listener_finished = Arc::new(StdMutex::new(false));
+
+        agent
+            .subscribe(Arc::new({
+                let barrier = Arc::clone(&barrier);
+                let listener_finished = Arc::clone(&listener_finished);
+                move |event, _token| {
+                    let barrier = Arc::clone(&barrier);
+                    let listener_finished = Arc::clone(&listener_finished);
+                    async move {
+                        if matches!(event, AgentEvent::AgentEnd { .. }) {
+                            barrier.notified().await;
+                            *listener_finished.lock().unwrap() = true;
+                        }
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        let prompt = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { agent.prompt_text("hello", Vec::new()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!prompt.is_finished());
+        assert!(!*listener_finished.lock().unwrap());
+        assert!(agent.state().await.is_streaming);
+
+        let idle = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { agent.wait_for_idle().await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!idle.is_finished());
+
+        barrier.notify_waiters();
+        prompt.await.unwrap().expect("prompt succeeds");
+        idle.await.unwrap();
+
+        assert!(*listener_finished.lock().unwrap());
+        assert!(!agent.state().await.is_streaming);
+    }
+
+    #[tokio::test]
+    async fn subscribers_receive_active_cancellation_token_like_upstream() {
+        let agent = Arc::new(Agent::new(AgentOptions {
+            stream_fn: Some(abortable_stream_fn()),
+            ..AgentOptions::default()
+        }));
+        let received_token = Arc::new(StdMutex::new(None));
+
+        agent
+            .subscribe(Arc::new({
+                let received_token = Arc::clone(&received_token);
+                move |event, token| {
+                    let received_token = Arc::clone(&received_token);
+                    async move {
+                        if matches!(event, AgentEvent::AgentStart) {
+                            *received_token.lock().unwrap() = Some(token);
+                        }
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        let prompt = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { agent.prompt_text("hello", Vec::new()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let token = received_token
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("listener saw token");
+        assert!(!token.is_cancelled());
+
+        agent.abort().await;
+        prompt.await.unwrap().expect("aborted run settles");
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn already_processing_errors_match_upstream_paths() {
+        let agent = Arc::new(Agent::new(AgentOptions {
+            stream_fn: Some(abortable_stream_fn()),
+            ..AgentOptions::default()
+        }));
+        let first_prompt = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { agent.prompt_text("First message", Vec::new()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(agent.state().await.is_streaming);
+
+        assert!(matches!(
+            agent.prompt_text("Second message", Vec::new()).await,
+            Err(AgentError::AlreadyProcessing)
+        ));
+        assert!(matches!(
+            agent.continue_run().await,
+            Err(AgentError::AlreadyProcessing)
+        ));
+
+        agent.abort().await;
+        first_prompt.await.unwrap().expect("aborted run settles");
+    }
+
+    #[tokio::test]
+    async fn continue_uses_queued_messages_from_assistant_tail_like_upstream() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                messages: vec![
+                    Message::user_text("Initial"),
+                    Message::Assistant(assistant_text_message(
+                        &AgentState::default().model,
+                        "Initial response",
+                    )),
+                ],
+                ..AgentState::default()
+            },
+            stream_fn: Some(counted_stream_fn(Arc::clone(&counter))),
+            ..AgentOptions::default()
+        });
+
+        agent
+            .follow_up(user_message("Queued follow-up", Vec::new()))
+            .await;
+        agent.continue_run().await.expect("follow-up continues");
+        let state = agent.state().await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(state.messages.iter().any(|message| {
+            matches!(message, Message::User(user) if matches!(&user.content, crate::UserMessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, crate::UserContent::Text(text) if text.text == "Queued follow-up"))))
+        }));
+
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                messages: vec![
+                    Message::user_text("Initial"),
+                    Message::Assistant(assistant_text_message(
+                        &AgentState::default().model,
+                        "Initial response",
+                    )),
+                ],
+                ..AgentState::default()
+            },
+            stream_fn: Some(counted_stream_fn(Arc::clone(&counter))),
+            ..AgentOptions::default()
+        });
+        agent.steer(user_message("Steering 1", Vec::new())).await;
+        agent.steer(user_message("Steering 2", Vec::new())).await;
+        agent.continue_run().await.expect("steering continues");
+
+        let state = agent.state().await;
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        let recent_roles = state
+            .messages
+            .iter()
+            .rev()
+            .take(4)
+            .map(|message| match message {
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+                Message::ToolResult(_) => "toolResult",
+                Message::Custom(_) => "custom",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recent_roles, vec!["assistant", "user", "assistant", "user"]);
+    }
+
+    #[tokio::test]
+    async fn forwards_session_id_to_stream_fn_options_like_upstream() {
+        let received_session_id = Arc::new(StdMutex::new(None));
+        let stream_fn: StreamFn = Arc::new({
+            let received_session_id = Arc::clone(&received_session_id);
+            move |model, _context, options| {
+                let received_session_id = Arc::clone(&received_session_id);
+                async move {
+                    *received_session_id.lock().unwrap() = options.stream.session_id.clone();
+                    let (mut sender, stream) = create_assistant_message_event_stream();
+                    let message = assistant_text_message(&model, "ok");
+                    sender.push(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    });
+                    Ok(stream)
+                }
+                .boxed()
+            }
+        });
+        let agent = Agent::new(AgentOptions {
+            session_id: Some("session-abc".to_string()),
+            stream_fn: Some(stream_fn),
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text("hello", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        assert_eq!(
+            *received_session_id.lock().unwrap(),
+            Some("session-abc".to_string())
+        );
     }
 
     #[tokio::test]
