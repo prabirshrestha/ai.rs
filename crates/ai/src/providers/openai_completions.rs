@@ -86,12 +86,7 @@ pub fn stream_simple_openai_completions(
 }
 
 fn simple_tool_choice(options: &SimpleStreamOptions) -> Option<Value> {
-    options
-        .stream
-        .provider_options
-        .get("toolChoice")
-        .or_else(|| options.stream.provider_options.get("tool_choice"))
-        .cloned()
+    options.stream.provider_options.get("toolChoice").cloned()
 }
 
 pub fn stream_openai_completions(
@@ -1459,6 +1454,31 @@ mod tests {
             max_tokens: 4096,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn simple_tool_choice_uses_upstream_camel_case_name() {
+        let camel = SimpleStreamOptions {
+            stream: StreamOptions {
+                provider_options: [("toolChoice".to_string(), json!("required"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(simple_tool_choice(&camel), Some(json!("required")));
+
+        let snake = SimpleStreamOptions {
+            stream: StreamOptions {
+                provider_options: [("tool_choice".to_string(), json!("required"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(simple_tool_choice(&snake), None);
     }
 
     fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {

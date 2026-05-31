@@ -111,7 +111,7 @@ fn ensure_simple_api_key(model: &Model, options: &SimpleStreamOptions) -> Result
 fn openai_completions_options_from_stream_options(
     options: StreamOptions,
 ) -> openai_completions::OpenAICompletionsOptions {
-    let tool_choice = provider_option(&options, &["toolChoice", "tool_choice"]).cloned();
+    let tool_choice = provider_option(&options, &["toolChoice"]).cloned();
     let reasoning_effort = openai_reasoning_effort(&options);
     openai_completions::OpenAICompletionsOptions {
         base: options,
@@ -124,9 +124,9 @@ fn openai_responses_options_from_stream_options(
     options: StreamOptions,
 ) -> openai_responses::OpenAIResponsesOptions {
     let reasoning_effort = openai_reasoning_effort(&options);
-    let reasoning_summary = provider_option(&options, &["reasoningSummary", "reasoning_summary"])
-        .and_then(reasoning_summary_option);
-    let service_tier = provider_string(&options, &["serviceTier", "service_tier"]);
+    let reasoning_summary =
+        provider_option(&options, &["reasoningSummary"]).and_then(reasoning_summary_option);
+    let service_tier = provider_string(&options, &["serviceTier"]);
     openai_responses::OpenAIResponsesOptions {
         base: options,
         reasoning_effort,
@@ -137,17 +137,12 @@ fn openai_responses_options_from_stream_options(
 }
 
 fn anthropic_options_from_stream_options(options: StreamOptions) -> anthropic::AnthropicOptions {
-    let thinking_enabled = provider_bool(&options, &["thinkingEnabled", "thinking_enabled"]);
-    let thinking_budget_tokens = provider_u32(
-        &options,
-        &["thinkingBudgetTokens", "thinking_budget_tokens"],
-    );
+    let thinking_enabled = provider_bool(&options, &["thinkingEnabled"]);
+    let thinking_budget_tokens = provider_u32(&options, &["thinkingBudgetTokens"]);
     let effort = provider_anthropic_effort(&options, &["effort"]);
-    let thinking_display =
-        provider_anthropic_thinking_display(&options, &["thinkingDisplay", "thinking_display"]);
-    let interleaved_thinking =
-        provider_bool(&options, &["interleavedThinking", "interleaved_thinking"]).unwrap_or(true);
-    let tool_choice = provider_option(&options, &["toolChoice", "tool_choice"]).cloned();
+    let thinking_display = provider_anthropic_thinking_display(&options, &["thinkingDisplay"]);
+    let interleaved_thinking = provider_bool(&options, &["interleavedThinking"]).unwrap_or(true);
+    let tool_choice = provider_option(&options, &["toolChoice"]).cloned();
     anthropic::AnthropicOptions {
         base: options,
         client: None,
@@ -183,7 +178,7 @@ fn provider_u32(options: &StreamOptions, names: &[&str]) -> Option<u32> {
 }
 
 fn openai_reasoning_effort(options: &StreamOptions) -> Option<ModelThinkingLevel> {
-    provider_string(options, &["reasoningEffort", "reasoning_effort"])
+    provider_string(options, &["reasoningEffort"])
         .and_then(|value| ModelThinkingLevel::parse(&value))
         .filter(|effort| *effort != ModelThinkingLevel::Off)
 }
@@ -242,6 +237,41 @@ mod tests {
 
         assert_eq!(converted.tool_choice, Some(json!("required")));
         assert_eq!(converted.reasoning_effort, Some(ModelThinkingLevel::High));
+    }
+
+    #[test]
+    fn generic_provider_options_use_upstream_camel_case_names() {
+        let options = StreamOptions {
+            provider_options: [
+                ("tool_choice".to_string(), json!("required")),
+                ("reasoning_effort".to_string(), json!("high")),
+                ("reasoning_summary".to_string(), json!("concise")),
+                ("service_tier".to_string(), json!("flex")),
+                ("thinking_enabled".to_string(), json!(true)),
+                ("thinking_budget_tokens".to_string(), json!(4096)),
+                ("thinking_display".to_string(), json!("omitted")),
+                ("interleaved_thinking".to_string(), json!(false)),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let completions = openai_completions_options_from_stream_options(options.clone());
+        assert_eq!(completions.tool_choice, None);
+        assert_eq!(completions.reasoning_effort, None);
+
+        let responses = openai_responses_options_from_stream_options(options.clone());
+        assert_eq!(responses.reasoning_effort, None);
+        assert_eq!(responses.reasoning_summary, None);
+        assert_eq!(responses.service_tier, None);
+
+        let anthropic = anthropic_options_from_stream_options(options);
+        assert_eq!(anthropic.thinking_enabled, None);
+        assert_eq!(anthropic.thinking_budget_tokens, None);
+        assert_eq!(anthropic.thinking_display, None);
+        assert!(anthropic.interleaved_thinking);
+        assert_eq!(anthropic.tool_choice, None);
     }
 
     #[test]
