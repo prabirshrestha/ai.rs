@@ -432,7 +432,14 @@ fields in `StreamOptions::provider_options` using the upstream camelCase names,
 such as OpenAI Chat Completions `toolChoice`, OpenAI Responses `serviceTier`,
 or Anthropic `thinkingDisplay`.
 
-Provider modules also expose typed provider options for direct provider calls:
+The crate root also exports the scoped direct provider stream functions,
+matching upstream `register-builtins` exports:
+
+- `stream_openai_completions` / `stream_simple_openai_completions`
+- `stream_openai_responses` / `stream_simple_openai_responses`
+- `stream_anthropic` / `stream_simple_anthropic`
+
+Provider modules expose typed provider options for direct provider calls:
 
 - `providers::openai_completions::OpenAICompletionsOptions`
 - `providers::openai_responses::OpenAIResponsesOptions`
