@@ -40,7 +40,8 @@ pub fn extract_diagnostic_error(error: &(dyn std::error::Error + 'static)) -> Di
     }
 }
 
-pub fn diagnostic_error_from_message(message: impl Into<String>) -> DiagnosticErrorInfo {
+#[cfg(test)]
+fn diagnostic_error_from_message(message: impl Into<String>) -> DiagnosticErrorInfo {
     DiagnosticErrorInfo {
         name: Some("ThrownValue".to_string()),
         message: message.into(),

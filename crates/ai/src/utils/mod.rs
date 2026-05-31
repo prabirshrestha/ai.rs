@@ -1,11 +1,11 @@
 pub mod diagnostics;
 pub mod hash;
 pub mod headers;
-pub mod http;
+pub(crate) mod http;
 pub mod json;
 pub mod overflow;
 pub mod sanitize;
-pub mod sse;
-pub mod time;
+pub(crate) mod sse;
+pub(crate) mod time;
 pub mod transform_messages;
 pub mod validation;
