@@ -68,7 +68,6 @@ pub fn stream_simple_openai_responses(
             reasoning_effort,
             reasoning_summary: None,
             service_tier: None,
-            ..Default::default()
         },
     )
 }

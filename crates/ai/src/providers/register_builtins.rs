@@ -132,7 +132,6 @@ fn openai_responses_options_from_stream_options(
         reasoning_effort,
         reasoning_summary,
         service_tier,
-        ..Default::default()
     }
 }
 
