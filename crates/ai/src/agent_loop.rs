@@ -1523,6 +1523,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_handle_tool_calls_and_results() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "hello" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(echo_tool(Arc::clone(&executed)))],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo something")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*executed.lock().unwrap(), ["hello"]);
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecutionStart { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionEnd {
+                is_error: false,
+                ..
+            }
+        )));
+        registration.unregister();
+    }
+
+    #[tokio::test]
     async fn should_execute_mutated_before_tool_call_args_without_revalidation() {
         let registration = register_faux_provider(None);
         registration.set_responses([
@@ -1572,7 +1625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_emit_tool_end_in_completion_order_and_persist_results_in_source_order() {
+    async fn should_emit_tool_execution_end_completion_order_and_persist_source_order() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1819,7 +1872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_force_sequential_when_tool_mode_sequential_with_default_parallel_config() {
+    async fn should_force_sequential_when_tool_has_execution_mode_sequential() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1881,7 +1934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_force_sequential_when_any_tool_mode_is_sequential() {
+    async fn should_force_sequential_when_one_tool_has_execution_mode_sequential() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(

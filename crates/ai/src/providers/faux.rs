@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registers_custom_provider_and_estimates_usage() {
+    async fn registers_a_custom_provider_and_estimates_usage() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("hello world", None)]);
 
@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_multiple_models_and_model_aware_factories() {
+    async fn supports_multiple_models_with_per_model_reasoning_and_model_aware_factories() {
         let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
             models: vec![
                 FauxModelDefinition {
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consumes_queued_responses_and_errors_when_exhausted() {
+    async fn consumes_queued_responses_in_order_and_errors_when_exhausted() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message("first", None),
@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emits_error_when_response_factory_fails() {
+    async fn emits_an_error_when_a_response_factory_throws() {
         let registration = register_faux_provider(None);
         registration.set_responses([FauxResponseStep::factory(
             |_context, _options, _state, _model| async move {
@@ -1467,7 +1467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_exact_event_order_for_fixed_size_chunks() {
+    async fn streams_an_exact_event_order_for_fixed_size_chunks() {
         let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
             token_size: Some(FauxTokenSize {
                 min: Some(1),
@@ -1985,7 +1985,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unregisters_provider() {
+    async fn unregisters_the_provider() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("hello", None)]);
         let api = registration.api.clone();
