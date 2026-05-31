@@ -267,4 +267,24 @@ mod tests {
             "No API provider registered for api: missing-api-provider-test"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_simple_returns_missing_api_key_before_provider_dispatch() {
+        let _guard = ENV_LOCK.lock().await;
+        let openai = SavedEnv::capture("OPENAI_API_KEY");
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        crate::providers::register_builtins::register_builtin_api_providers();
+
+        let error = match stream_simple(test_model("openai-responses"), Context::default(), None) {
+            Ok(_) => panic!("expected missing API key error"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(&error, Error::MissingApiKey(provider) if provider == "openai"));
+        assert_eq!(error.to_string(), "No API key for provider: openai");
+
+        openai.restore();
+    }
 }

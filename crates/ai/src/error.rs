@@ -14,7 +14,7 @@ pub enum Error {
     #[error("invalid header value for {0}: {1}")]
     InvalidHeaderValue(String, reqwest::header::InvalidHeaderValue),
 
-    #[error("missing API key for provider: {0}")]
+    #[error("No API key for provider: {0}")]
     MissingApiKey(String),
 
     #[error("unsupported api: {0}")]
