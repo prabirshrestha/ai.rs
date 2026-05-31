@@ -18,6 +18,7 @@ calling, because tool calling is essential for agentic workflows.
 
 - [Supported Providers](#supported-providers)
 - [Port Scope](#port-scope)
+  - [Upstream File Mapping](#upstream-file-mapping)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Agent Loop](#agent-loop)
@@ -104,6 +105,40 @@ uses TypeScript casts for provider-specific escape hatches, this crate exposes
 the equivalent through typed options where possible and
 `StreamOptions::provider_options` where the upstream behavior is intentionally
 loose.
+
+### Upstream File Mapping
+
+| Upstream `pi` file | Rust file | Notes |
+| --- | --- | --- |
+| `packages/ai/src/index.ts` | [`src/lib.rs`](src/lib.rs) | Crate root re-exports the scoped Rust API. Image-generation exports and broad provider-specific exports are intentionally omitted. |
+| `packages/ai/src/types.ts` | [`src/types.rs`](src/types.rs) | Message, context, model, tool, usage, event, and compatibility types. Image input/tool-result image content is included; image generation types are out of scope. |
+| `packages/ai/src/stream.ts` | [`src/stream.rs`](src/stream.rs) | `stream`, `complete`, `stream_simple`, and `complete_simple`. |
+| `packages/ai/src/api-registry.ts` | [`src/api_registry.rs`](src/api_registry.rs) | API provider registry and dispatch wrappers. |
+| `packages/ai/src/env-api-keys.ts` | [`src/env_api_keys.rs`](src/env_api_keys.rs) | Environment API key lookup for active providers. |
+| `packages/ai/src/models.ts` | [`src/models.rs`](src/models.rs) | Model lookup, cost calculation, thinking-level helpers, and scoped generated metadata. |
+| `packages/ai/src/session-resources.ts` | [`src/session_resources.rs`](src/session_resources.rs) | Session cleanup registry. |
+| `packages/ai/src/oauth.ts` and `packages/ai/src/utils/oauth/**` | [`src/oauth.rs`](src/oauth.rs) | Anthropic and GitHub Copilot OAuth helpers in scope. OpenAI Codex OAuth is out of scope. |
+| `packages/ai/src/providers/faux.ts` | [`src/providers/faux.rs`](src/providers/faux.rs) | Deterministic faux provider for tests and agent-loop examples. |
+| `packages/ai/src/providers/anthropic.ts` | [`src/providers/anthropic.rs`](src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
+| `packages/ai/src/providers/openai-completions.ts` | [`src/providers/openai_completions.rs`](src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
+| `packages/ai/src/providers/openai-responses.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming. |
+| `packages/ai/src/providers/register-builtins.ts` | [`src/providers/register_builtins.rs`](src/providers/register_builtins.rs) | Registers `anthropic-messages`, `openai-completions`, and `openai-responses`. |
+| `packages/ai/src/providers/simple-options.ts` | [`src/providers/simple_options.rs`](src/providers/simple_options.rs) | Common simple-option mapping helpers. |
+| `packages/ai/src/providers/transform-messages.ts` | [`src/providers/transform_messages.rs`](src/providers/transform_messages.rs) | Cross-provider message normalization. |
+| `packages/ai/src/providers/github-copilot-headers.ts` | [`src/providers/github_copilot_headers.rs`](src/providers/github_copilot_headers.rs) | GitHub Copilot dynamic headers. |
+| `packages/ai/src/providers/openai-prompt-cache.ts` | [`src/providers/openai_prompt_cache.rs`](src/providers/openai_prompt_cache.rs) | Prompt cache key helper. |
+| `packages/ai/src/utils/diagnostics.ts` | [`src/utils/diagnostics.rs`](src/utils/diagnostics.rs) | Assistant diagnostics helpers. |
+| `packages/ai/src/utils/event-stream.ts` | [`src/utils/event_stream.rs`](src/utils/event_stream.rs) | Assistant event stream implementation. The root `event_stream` module re-exports this path. |
+| `packages/ai/src/utils/hash.ts` | [`src/utils/hash.rs`](src/utils/hash.rs) | Short hash helper. |
+| `packages/ai/src/utils/headers.ts` | [`src/utils/headers.rs`](src/utils/headers.rs) | Header normalization helper. |
+| `packages/ai/src/utils/json-parse.ts` | [`src/utils/json_parse.rs`](src/utils/json_parse.rs) | Streaming JSON parsing and repair helpers. |
+| `packages/ai/src/utils/overflow.ts` | [`src/utils/overflow.rs`](src/utils/overflow.rs) | Context overflow detection. |
+| `packages/ai/src/utils/sanitize-unicode.ts` | [`src/utils/sanitize_unicode.rs`](src/utils/sanitize_unicode.rs) | Unicode surrogate sanitization. |
+| `packages/ai/src/utils/validation.ts` | [`src/utils/validation.rs`](src/utils/validation.rs) | Tool-call argument validation. |
+| `packages/agent/src/types.ts` | [`src/agent_types.rs`](src/agent_types.rs) | Core agent types, tool traits, loop config, and agent events. |
+| `packages/agent/src/agent-loop.ts` | [`src/agent_loop.rs`](src/agent_loop.rs) | Direct agent loop. |
+| `packages/agent/src/agent.ts` | [`src/agent.rs`](src/agent.rs) | Stateful `Agent` wrapper. |
+| `packages/agent/src/harness/**` | Not included | The full TypeScript harness is outside this port's active scope. |
 
 ## Installation
 
