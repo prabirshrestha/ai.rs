@@ -241,8 +241,11 @@ Core loop hooks track upstream `pi` semantics:
 - `after_tool_call` can replace content/details/error state and can set
   `terminate`; a tool batch terminates only when every finalized result has
   `terminate = true`.
-- `prepare_next_turn` can replace the next context, model, or reasoning level
-  before steering/follow-up polling starts another provider request.
+- On `AgentLoopConfig`, `prepare_next_turn` can replace the next context,
+  model, or reasoning level before steering/follow-up polling starts another
+  provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
+  `Agent.prepareNextTurn`: it receives only the active cancellation token and
+  can return the same turn update.
 
 ## Tools
 

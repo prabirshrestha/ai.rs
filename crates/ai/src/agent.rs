@@ -12,12 +12,21 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::agent_types::{
     AfterToolCallFn, AgentContext, AgentEvent, AgentEventListener, AgentEventSink, AgentLoopConfig,
-    AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn, PrepareNextTurnFn,
-    QueueMode, StreamFn, ToolExecutionMode, TransformContextFn, user_message,
+    AgentLoopTurnUpdate, AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn,
+    PrepareNextTurnContext, PrepareNextTurnFn, QueueMode, StreamFn, ToolExecutionMode,
+    TransformContextFn, user_message,
 };
 use crate::{AgentError, AgentResult};
 
 pub type AgentListenerId = u64;
+pub type AgentPrepareNextTurnFn = Arc<
+    dyn Fn(
+            Option<CancellationToken>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<AgentLoopTurnUpdate>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 fn default_agent_model() -> Model {
     Model {
@@ -71,7 +80,7 @@ pub struct AgentOptions {
     pub transform_context: Option<TransformContextFn>,
     pub stream_fn: Option<StreamFn>,
     pub get_api_key: Option<GetApiKeyFn>,
-    pub prepare_next_turn: Option<PrepareNextTurnFn>,
+    pub prepare_next_turn: Option<AgentPrepareNextTurnFn>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
     pub session_id: Option<String>,
@@ -156,7 +165,7 @@ pub struct Agent {
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
     get_api_key: Option<GetApiKeyFn>,
-    prepare_next_turn: Option<PrepareNextTurnFn>,
+    prepare_next_turn: Option<AgentPrepareNextTurnFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
     session_id: Arc<Mutex<Option<String>>>,
@@ -553,7 +562,13 @@ impl Agent {
             transform_context: self.transform_context.clone(),
             get_api_key: self.get_api_key.clone(),
             should_stop_after_turn: None,
-            prepare_next_turn: self.prepare_next_turn.clone(),
+            prepare_next_turn: self.prepare_next_turn.clone().map(|prepare_next_turn| {
+                Arc::new(
+                    move |_context: PrepareNextTurnContext, token: Option<CancellationToken>| {
+                        prepare_next_turn(token)
+                    },
+                ) as PrepareNextTurnFn
+            }),
             get_steering_messages: Some(Arc::new(move || {
                 let steering_queue = steering_queue.clone();
                 let skip_initial_steering_poll = skip_initial_steering_poll.clone();
@@ -1272,6 +1287,40 @@ mod tests {
             *received_session_id.lock().unwrap(),
             Some("session-abc".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_next_turn_receives_active_abort_signal() {
+        let called = Arc::new(AtomicUsize::new(0));
+        let saw_token = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(AgentOptions {
+            prepare_next_turn: Some(Arc::new({
+                let called = Arc::clone(&called);
+                let saw_token = Arc::clone(&saw_token);
+                move |token| {
+                    let called = Arc::clone(&called);
+                    let saw_token = Arc::clone(&saw_token);
+                    async move {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        if token.is_some() {
+                            saw_token.fetch_add(1, Ordering::SeqCst);
+                        }
+                        None
+                    }
+                    .boxed()
+                }
+            })),
+            stream_fn: Some(immediate_stream_fn("done")),
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text("hello", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+        assert_eq!(saw_token.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
