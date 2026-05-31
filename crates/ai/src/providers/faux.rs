@@ -943,6 +943,18 @@ mod tests {
         events
     }
 
+    fn assistant_text(message: &AssistantMessage) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn registers_custom_provider_and_estimates_usage() {
         let registration = register_faux_provider(None);
@@ -1221,6 +1233,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supports_async_response_factories_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([FauxResponseStep::factory(
+            |context, options, state, model| async move {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                assert_eq!(context.messages.len(), 1);
+                assert_eq!(options.api_key.as_deref(), Some("factory-key"));
+                assert_eq!(state.call_count(), 1);
+                Ok(faux_assistant_message(
+                    format!("{}:{}", model.id, state.call_count()),
+                    None,
+                ))
+            },
+        )]);
+
+        let response = complete(
+            registration.get_model(),
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Context::default()
+            },
+            Some(StreamOptions {
+                api_key: Some("factory-key".to_string()),
+                ..StreamOptions::default()
+            }),
+        )
+        .await
+        .expect("factory response");
+
+        assert_eq!(assistant_text(&response), "faux-1:1");
+        registration.unregister();
+    }
+
+    #[tokio::test]
     async fn estimates_prompt_and_output_tokens_from_serialized_context() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("done", None)]);
@@ -1310,6 +1356,46 @@ mod tests {
         let second = complete(registration.get_model(), context, Some(options))
             .await
             .expect("second response");
+
+        assert_eq!(first.usage.cache_read, 0);
+        assert_eq!(first.usage.cache_write, 0);
+        assert_eq!(second.usage.cache_read, 0);
+        assert_eq!(second.usage.cache_write, 0);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn does_not_share_cache_across_requests_without_session_id_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message("first", None),
+            faux_assistant_message("second", None),
+        ]);
+        let context = Context {
+            messages: vec![Message::user_text("hello")],
+            ..Context::default()
+        };
+
+        let first = complete(
+            registration.get_model(),
+            context.clone(),
+            Some(StreamOptions {
+                cache_retention: Some(CacheRetention::Short),
+                ..StreamOptions::default()
+            }),
+        )
+        .await
+        .expect("first response");
+        let second = complete(
+            registration.get_model(),
+            context,
+            Some(StreamOptions {
+                cache_retention: Some(CacheRetention::Short),
+                ..StreamOptions::default()
+            }),
+        )
+        .await
+        .expect("second response");
 
         assert_eq!(first.usage.cache_read, 0);
         assert_eq!(first.usage.cache_write, 0);
@@ -1451,6 +1537,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streams_multiple_tool_calls_in_one_message_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message(
+            vec![
+                faux_tool_call("first_tool", json!({ "a": 1 }), Some("tool-1".to_string())),
+                faux_tool_call("second_tool", json!({ "b": 2 }), Some("tool-2".to_string())),
+            ],
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            }),
+        )]);
+
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                None,
+            )
+            .expect("faux stream"),
+        )
+        .await;
+
+        let ended_tools = events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
+                    Some((tool_call.id.as_str(), tool_call.name.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ended_tools,
+            [("tool-1", "first_tool"), ("tool-2", "second_tool")]
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done {
+                reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn explicit_error_and_aborted_messages_stream_as_terminal_errors_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                "failed",
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::Error),
+                    error_message: Some("explicit failure".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message(
+                "aborted",
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::Aborted),
+                    error_message: Some("explicit abort".to_string()),
+                    ..Default::default()
+                }),
+            ),
+        ]);
+
+        for (expected_reason, expected_message) in [
+            (StopReason::Error, "explicit failure"),
+            (StopReason::Aborted, "explicit abort"),
+        ] {
+            let events = collect_events(
+                stream(
+                    registration.get_model(),
+                    Context {
+                        messages: vec![Message::user_text("hi")],
+                        ..Context::default()
+                    },
+                    None,
+                )
+                .expect("faux stream"),
+            )
+            .await;
+            let Some(AssistantMessageEvent::Error {
+                reason,
+                error: message,
+            }) = events.last()
+            else {
+                panic!("expected terminal error");
+            };
+            assert_eq!(*reason, expected_reason);
+            assert_eq!(message.stop_reason, expected_reason);
+            assert_eq!(message.error_message.as_deref(), Some(expected_message));
+        }
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn supports_aborting_before_first_chunk_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message("hello", None)]);
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                Some(StreamOptions {
+                    cancellation_token: Some(cancellation_token),
+                    ..StreamOptions::default()
+                }),
+            )
+            .expect("faux stream"),
+        )
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            AssistantMessageEvent::Error {
+                reason: StopReason::Aborted,
+                ..
+            }
+        ));
+        registration.unregister();
+    }
+
+    #[tokio::test]
     async fn supports_aborting_mid_text_stream_when_paced() {
         let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
             tokens_per_second: Some(100.0),
@@ -1504,6 +1726,121 @@ mod tests {
                 .any(|event| matches!(event, AssistantMessageEvent::TextEnd { .. }))
         );
 
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn supports_aborting_mid_thinking_stream_when_paced_like_upstream() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            tokens_per_second: Some(100.0),
+            token_size: Some(FauxTokenSize {
+                min: Some(3),
+                max: Some(3),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            faux_thinking("abcdefghijklmnopqrstuvwxyz"),
+            None,
+        )]);
+
+        let cancellation_token = CancellationToken::new();
+        let mut stream = stream(
+            registration.get_model(),
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Context::default()
+            },
+            Some(StreamOptions {
+                cancellation_token: Some(cancellation_token.clone()),
+                ..StreamOptions::default()
+            }),
+        )
+        .expect("faux stream");
+        let mut thinking_delta_count = 0;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            if matches!(event, AssistantMessageEvent::ThinkingDelta { .. }) {
+                thinking_delta_count += 1;
+                cancellation_token.cancel();
+            }
+            events.push(event);
+        }
+
+        assert_eq!(thinking_delta_count, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AssistantMessageEvent::Error {
+                reason: StopReason::Aborted,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::ThinkingEnd { .. }))
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn supports_aborting_mid_toolcall_stream_when_paced_like_upstream() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            tokens_per_second: Some(100.0),
+            token_size: Some(FauxTokenSize {
+                min: Some(3),
+                max: Some(3),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            faux_tool_call(
+                "echo",
+                json!({ "value": "abcdefghijklmnopqrstuvwxyz" }),
+                Some("tool-1".to_string()),
+            ),
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            }),
+        )]);
+
+        let cancellation_token = CancellationToken::new();
+        let mut stream = stream(
+            registration.get_model(),
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Context::default()
+            },
+            Some(StreamOptions {
+                cancellation_token: Some(cancellation_token.clone()),
+                ..StreamOptions::default()
+            }),
+        )
+        .expect("faux stream");
+        let mut tool_delta_count = 0;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            if matches!(event, AssistantMessageEvent::ToolCallDelta { .. }) {
+                tool_delta_count += 1;
+                cancellation_token.cancel();
+            }
+            events.push(event);
+        }
+
+        assert_eq!(tool_delta_count, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AssistantMessageEvent::Error {
+                reason: StopReason::Aborted,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::ToolCallEnd { .. }))
+        );
         registration.unregister();
     }
 
