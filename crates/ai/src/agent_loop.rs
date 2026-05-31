@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parallel_tool_end_events_complete_order_but_results_source_order() {
+    async fn should_emit_tool_end_in_completion_order_and_persist_results_in_source_order() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -2386,7 +2386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_loop_continue_should_throw_when_context_has_no_messages() {
+    async fn should_throw_when_context_has_no_messages() {
         let (_events, emit) = collect_events();
         let empty_result = run_agent_loop_continue(
             AgentContext {
@@ -2407,7 +2407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_loop_continue_should_throw_when_context_last_message_is_assistant() {
+    async fn should_throw_when_context_last_message_is_assistant() {
         let (_events, emit) = collect_events();
         let assistant_result = run_agent_loop_continue(
             AgentContext {
@@ -2431,7 +2431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_loop_continue_should_continue_without_emitting_existing_user_events() {
+    async fn should_continue_from_existing_context_without_emitting_user_message_events() {
         let (events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {
@@ -2461,7 +2461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_loop_continue_should_allow_custom_message_types_as_last_message() {
+    async fn should_allow_custom_message_types_as_last_message_caller_responsibility() {
         let (_events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {

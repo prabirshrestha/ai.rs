@@ -868,6 +868,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_subscribe_to_events() {
+        let agent = Agent::default();
+        let event_count = Arc::new(AtomicUsize::new(0));
+
+        let listener = agent
+            .subscribe(Arc::new({
+                let event_count = Arc::clone(&event_count);
+                move |_event, _token| {
+                    let event_count = Arc::clone(&event_count);
+                    async move {
+                        event_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        agent.set_system_prompt("Test prompt").await;
+        assert_eq!(event_count.load(Ordering::SeqCst), 0);
+        assert_eq!(agent.state().await.system_prompt, "Test prompt");
+
+        assert!(agent.unsubscribe(listener).await);
+        agent.set_system_prompt("Another prompt").await;
+        assert_eq!(event_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn should_support_steering_message_queue() {
+        let agent = Agent::default();
+        let message = user_message("Steering message", Vec::new());
+
+        agent.steer(message.clone()).await;
+
+        assert!(!agent.state().await.messages.contains(&message));
+        assert!(agent.has_queued_messages().await);
+    }
+
+    #[tokio::test]
+    async fn should_support_follow_up_message_queue() {
+        let agent = Agent::default();
+        let message = user_message("Follow-up message", Vec::new());
+
+        agent.follow_up(message.clone()).await;
+
+        assert!(!agent.state().await.messages.contains(&message));
+        assert!(agent.has_queued_messages().await);
+    }
+
+    #[tokio::test]
+    async fn should_handle_abort_controller() {
+        let agent = Agent::default();
+
+        agent.abort().await;
+
+        assert!(agent.cancellation_token().await.is_none());
+    }
+
+    #[tokio::test]
     async fn should_await_async_subscribers_before_prompt_resolves() {
         let agent = Arc::new(Agent::new(AgentOptions {
             stream_fn: Some(immediate_stream_fn("ok")),
