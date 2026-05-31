@@ -1819,8 +1819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_force_sequential_execution_when_a_tool_has_execution_mode_sequential_even_with_default_parallel_config()
-     {
+    async fn should_force_sequential_when_tool_mode_sequential_with_default_parallel_config() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1882,8 +1881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_force_sequential_execution_when_one_of_multiple_tools_has_execution_mode_sequential()
-     {
+    async fn should_force_sequential_when_any_tool_mode_is_sequential() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
