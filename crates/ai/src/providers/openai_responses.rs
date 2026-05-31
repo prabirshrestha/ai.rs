@@ -25,7 +25,7 @@ use crate::utils::sse;
 use crate::utils::transform_messages::transform_messages;
 use crate::{Error, Result};
 
-const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai"];
+const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex", "opencode"];
 
 #[derive(Clone, Default)]
 pub struct OpenAIResponsesOptions {
@@ -3421,6 +3421,50 @@ mod tests {
             .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
             .expect("function_call_output");
         assert_eq!(function_call_output["call_id"], json!("call_abc"));
+    }
+
+    #[test]
+    fn preserves_responses_tool_item_ids_for_upstream_openai_tool_call_providers() {
+        for provider in ["openai", "openai-codex", "opencode"] {
+            let mut target_model = model();
+            target_model.provider = provider.to_string();
+            let assistant = AssistantMessage {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_abc|fc_existing".to_string(),
+                    name: "double_number".to_string(),
+                    arguments: json!({ "value": 21 }),
+                    thought_signature: None,
+                })],
+                api: target_model.api.clone(),
+                provider: target_model.provider.clone(),
+                model: target_model.id.clone(),
+                response_model: None,
+                response_id: None,
+                diagnostics: Vec::new(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 2,
+            };
+            let context = Context {
+                messages: vec![Message::Assistant(assistant)],
+                ..Default::default()
+            };
+
+            let input = convert_responses_messages(
+                &target_model,
+                &context,
+                &OPENAI_TOOL_CALL_PROVIDERS.iter().copied().collect(),
+                true,
+            );
+            let function_call = input
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                .expect("function_call");
+
+            assert_eq!(function_call["call_id"], json!("call_abc"));
+            assert_eq!(function_call["id"], json!("fc_existing"));
+        }
     }
 
     #[test]
