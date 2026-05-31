@@ -149,7 +149,8 @@ async fn main() -> Result<()> {
         tools: vec![weather_tool],
     };
 
-    let mut events = stream_simple(model.clone(), context.clone(), Some(SimpleStreamOptions::default()));
+    let mut events =
+        stream_simple(model.clone(), context.clone(), Some(SimpleStreamOptions::default()))?;
     while let Some(event) = events.next().await {
         match event {
             AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
