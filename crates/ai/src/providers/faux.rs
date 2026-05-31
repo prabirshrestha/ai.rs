@@ -467,8 +467,12 @@ async fn stream_faux_response(
             .await;
         }
         Err(error) => {
-            let message =
-                create_error_message(error.to_string(), &api, &provider, &request_model.id);
+            let message = create_error_message(
+                faux_error_message(&error),
+                &api,
+                &provider,
+                &request_model.id,
+            );
             sender.push(AssistantMessageEvent::Error {
                 reason: StopReason::Error,
                 error: message,
@@ -865,6 +869,13 @@ fn create_error_message(
     }
 }
 
+fn faux_error_message(error: &Error) -> String {
+    match error {
+        Error::Provider(message) | Error::Validation(message) => message.clone(),
+        _ => error.to_string(),
+    }
+}
+
 fn create_aborted_message(mut partial: AssistantMessage) -> AssistantMessage {
     partial.stop_reason = StopReason::Aborted;
     partial.error_message = Some("Request was aborted".to_string());
@@ -1075,6 +1086,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rewrites_api_provider_and_model_on_returned_messages() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            api: Some("faux:test".to_string()),
+            provider: Some("faux-provider".to_string()),
+            models: vec![FauxModelDefinition {
+                id: "faux-model".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message("hello", None)]);
+
+        let response = complete(
+            registration.get_model(),
+            Context {
+                messages: vec![Message::user_text("hi")],
+                ..Context::default()
+            },
+            None,
+        )
+        .await
+        .expect("faux response");
+
+        assert_eq!(response.api, "faux:test");
+        assert_eq!(response.provider, "faux-provider");
+        assert_eq!(response.model, "faux-model");
+        registration.unregister();
+    }
+
+    #[tokio::test]
     async fn consumes_queued_responses_and_errors_when_exhausted() {
         let registration = register_faux_provider(None);
         registration.set_responses([
@@ -1106,6 +1147,76 @@ mod tests {
         assert_eq!(registration.get_pending_response_count(), 0);
         assert_eq!(registration.state.call_count(), 3);
 
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn replaces_and_appends_queued_responses_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message("first", None)]);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Context::default()
+        };
+
+        let first = complete(registration.get_model(), context.clone(), None)
+            .await
+            .expect("first response");
+        assert_eq!(first.content, vec![faux_text("first")]);
+        assert_eq!(registration.get_pending_response_count(), 0);
+
+        registration.set_responses([faux_assistant_message("second", None)]);
+        assert_eq!(registration.get_pending_response_count(), 1);
+        let second = complete(registration.get_model(), context.clone(), None)
+            .await
+            .expect("second response");
+        assert_eq!(second.content, vec![faux_text("second")]);
+
+        registration.append_responses([
+            faux_assistant_message("third", None),
+            faux_assistant_message("fourth", None),
+        ]);
+        assert_eq!(registration.get_pending_response_count(), 2);
+        let third = complete(registration.get_model(), context.clone(), None)
+            .await
+            .expect("third response");
+        let fourth = complete(registration.get_model(), context, None)
+            .await
+            .expect("fourth response");
+        assert_eq!(third.content, vec![faux_text("third")]);
+        assert_eq!(fourth.content, vec![faux_text("fourth")]);
+        assert_eq!(registration.get_pending_response_count(), 0);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn emits_error_when_response_factory_fails() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([FauxResponseStep::factory(
+            |_context, _options, _state, _model| async move {
+                Err(crate::Error::Provider("boom".to_string()))
+            },
+        )]);
+
+        let events = collect_events(
+            stream(
+                registration.get_model(),
+                Context {
+                    messages: vec![Message::user_text("hi")],
+                    ..Context::default()
+                },
+                None,
+            )
+            .expect("faux stream"),
+        )
+        .await;
+
+        assert_eq!(events.len(), 1);
+        let AssistantMessageEvent::Error { error, .. } = &events[0] else {
+            panic!("expected error event");
+        };
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(error.error_message.as_deref(), Some("boom"));
         registration.unregister();
     }
 
@@ -1169,6 +1280,41 @@ mod tests {
             expected_prompt_tokens + expected_output_tokens
         );
 
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn does_not_simulate_caching_when_cache_retention_is_none() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message("first", None),
+            faux_assistant_message("second", None),
+        ]);
+        let context = Context {
+            messages: vec![Message::user_text("hello")],
+            ..Context::default()
+        };
+        let options = StreamOptions {
+            session_id: Some("session-1".to_string()),
+            cache_retention: Some(CacheRetention::None),
+            ..StreamOptions::default()
+        };
+
+        let first = complete(
+            registration.get_model(),
+            context.clone(),
+            Some(options.clone()),
+        )
+        .await
+        .expect("first response");
+        let second = complete(registration.get_model(), context, Some(options))
+            .await
+            .expect("second response");
+
+        assert_eq!(first.usage.cache_read, 0);
+        assert_eq!(first.usage.cache_write, 0);
+        assert_eq!(second.usage.cache_read, 0);
+        assert_eq!(second.usage.cache_write, 0);
         registration.unregister();
     }
 
