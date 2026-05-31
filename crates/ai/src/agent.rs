@@ -42,7 +42,7 @@ fn default_agent_model() -> Model {
 pub struct AgentState {
     pub system_prompt: String,
     pub model: Model,
-    pub reasoning_level: crate::ModelThinkingLevel,
+    pub thinking_level: crate::ModelThinkingLevel,
     pub tools: Vec<DynAgentTool>,
     pub messages: Vec<AgentMessage>,
     pub is_streaming: bool,
@@ -56,7 +56,7 @@ impl AgentState {
         Self {
             system_prompt: String::new(),
             model,
-            reasoning_level: crate::ModelThinkingLevel::Off,
+            thinking_level: crate::ModelThinkingLevel::Off,
             tools: Vec::new(),
             messages: Vec::new(),
             is_streaming: false,
@@ -210,8 +210,8 @@ impl Agent {
         self.state.lock().await.model = model;
     }
 
-    pub async fn set_reasoning_level(&self, reasoning_level: crate::ModelThinkingLevel) {
-        self.state.lock().await.reasoning_level = reasoning_level;
+    pub async fn set_thinking_level(&self, thinking_level: crate::ModelThinkingLevel) {
+        self.state.lock().await.thinking_level = thinking_level;
     }
 
     pub async fn set_tools(&self, tools: Vec<DynAgentTool>) {
@@ -543,13 +543,13 @@ impl Agent {
     }
 
     async fn create_loop_config(&self, skip_initial_steering_poll: bool) -> AgentLoopConfig {
-        let (model, reasoning_level) = {
+        let (model, thinking_level) = {
             let state = self.state.lock().await;
-            (state.model.clone(), state.reasoning_level)
+            (state.model.clone(), state.thinking_level)
         };
         let mut options = self.base_options.lock().await.clone();
         options.reasoning =
-            (reasoning_level != crate::ModelThinkingLevel::Off).then_some(reasoning_level);
+            (thinking_level != crate::ModelThinkingLevel::Off).then_some(thinking_level);
         options.stream.session_id = self.session_id.lock().await.clone();
 
         let steering_queue = self.steering_queue.clone();
@@ -826,7 +826,7 @@ mod tests {
 
         assert_eq!(state.system_prompt, "");
         assert_eq!(state.model.id, "unknown");
-        assert_eq!(state.reasoning_level, crate::ModelThinkingLevel::Off);
+        assert_eq!(state.thinking_level, crate::ModelThinkingLevel::Off);
         assert!(state.tools.is_empty());
         assert!(state.messages.is_empty());
         assert!(!state.is_streaming);
@@ -847,7 +847,7 @@ mod tests {
             initial_state: AgentState {
                 system_prompt: "You are a helpful assistant.".to_string(),
                 model: model.clone(),
-                reasoning_level: ModelThinkingLevel::Low,
+                thinking_level: ModelThinkingLevel::Low,
                 ..AgentState::default()
             },
             ..AgentOptions::default()
@@ -856,7 +856,7 @@ mod tests {
         let state = agent.state().await;
         assert_eq!(state.system_prompt, "You are a helpful assistant.");
         assert_eq!(state.model, model);
-        assert_eq!(state.reasoning_level, ModelThinkingLevel::Low);
+        assert_eq!(state.thinking_level, ModelThinkingLevel::Low);
     }
 
     #[tokio::test]
@@ -871,14 +871,14 @@ mod tests {
                 ..Default::default()
             })
             .await;
-        agent.set_reasoning_level(ModelThinkingLevel::High).await;
+        agent.set_thinking_level(ModelThinkingLevel::High).await;
         agent.set_messages(vec![Message::user_text("Hello")]).await;
         agent.push_message(Message::user_text("Next")).await;
 
         let state = agent.state().await;
         assert_eq!(state.system_prompt, "Custom prompt");
         assert_eq!(state.model.id, "new-model");
-        assert_eq!(state.reasoning_level, ModelThinkingLevel::High);
+        assert_eq!(state.thinking_level, ModelThinkingLevel::High);
         assert_eq!(state.messages.len(), 2);
 
         agent.clear_messages().await;
@@ -1637,7 +1637,7 @@ mod tests {
             initial_state: AgentState {
                 system_prompt: "You are a helpful assistant.".to_string(),
                 model: registration.get_model(),
-                reasoning_level: ModelThinkingLevel::Low,
+                thinking_level: ModelThinkingLevel::Low,
                 ..AgentState::default()
             },
             ..AgentOptions::default()

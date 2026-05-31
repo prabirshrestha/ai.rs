@@ -208,7 +208,7 @@ pub type PrepareNextTurnContext = ShouldStopAfterTurnContext;
 pub struct AgentLoopTurnUpdate {
     pub context: Option<AgentContext>,
     pub model: Option<Model>,
-    pub reasoning_level: Option<crate::ModelThinkingLevel>,
+    pub thinking_level: Option<crate::ModelThinkingLevel>,
 }
 
 #[derive(Clone)]

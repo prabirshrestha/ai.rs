@@ -291,12 +291,11 @@ async fn run_loop(
                 if let Some(next_model) = update.model {
                     config.model = next_model;
                 }
-                if let Some(reasoning_level) = update.reasoning_level {
-                    config.options.reasoning = if reasoning_level == crate::ModelThinkingLevel::Off
-                    {
+                if let Some(thinking_level) = update.thinking_level {
+                    config.options.reasoning = if thinking_level == crate::ModelThinkingLevel::Off {
                         None
                     } else {
-                        Some(reasoning_level)
+                        Some(thinking_level)
                     };
                 }
             }
@@ -2119,7 +2118,7 @@ mod tests {
                                 tools: Vec::new(),
                             }),
                             model: None,
-                            reasoning_level: None,
+                            thinking_level: None,
                         })
                     } else {
                         None
