@@ -345,14 +345,7 @@ async fn stream_assistant_response(
     if let Some(transform) = &config.transform_context {
         messages = transform(messages, cancellation_token.clone()).await;
     }
-    let llm_messages = if let Some(convert) = &config.convert_to_llm {
-        convert(messages).await
-    } else {
-        messages
-            .into_iter()
-            .filter(|message| message.is_llm_message())
-            .collect()
-    };
+    let llm_messages = (config.convert_to_llm)(messages).await;
 
     let mut llm_context = context.llm_context();
     llm_context.messages = llm_messages;
@@ -1360,7 +1353,7 @@ mod tests {
             provider: "test".to_string(),
             ..Default::default()
         });
-        config.convert_to_llm = Some(Arc::new({
+        config.convert_to_llm = Arc::new({
             let converted_messages = Arc::clone(&converted_messages);
             let custom_seen = Arc::clone(&custom_seen);
             move |messages| {
@@ -1379,7 +1372,7 @@ mod tests {
                 }
                 .boxed()
             }
-        }));
+        });
         let (_events, emit) = collect_events();
 
         run_agent_loop(
@@ -1723,7 +1716,7 @@ mod tests {
             }
         }));
         let converted_seen = Arc::new(StdMutex::new(Vec::new()));
-        config.convert_to_llm = Some(Arc::new({
+        config.convert_to_llm = Arc::new({
             let converted_seen = Arc::clone(&converted_seen);
             move |messages| {
                 let converted_seen = Arc::clone(&converted_seen);
@@ -1741,7 +1734,7 @@ mod tests {
                 }
                 .boxed()
             }
-        }));
+        });
         let streamed_seen = Arc::new(StdMutex::new(Vec::new()));
         let stream_fn: StreamFn = Arc::new({
             let streamed_seen = Arc::clone(&streamed_seen);

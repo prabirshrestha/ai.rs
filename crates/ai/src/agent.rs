@@ -14,7 +14,7 @@ use crate::agent_types::{
     AfterToolCallFn, AgentContext, AgentEvent, AgentEventListener, AgentEventSink, AgentLoopConfig,
     AgentLoopTurnUpdate, AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn,
     PrepareNextTurnContext, PrepareNextTurnFn, QueueMode, StreamFn, ToolExecutionMode,
-    TransformContextFn, user_message,
+    TransformContextFn, default_convert_to_llm, user_message,
 };
 use crate::{AgentError, AgentResult};
 
@@ -558,7 +558,10 @@ impl Agent {
         AgentLoopConfig {
             model,
             options,
-            convert_to_llm: self.convert_to_llm.clone(),
+            convert_to_llm: self
+                .convert_to_llm
+                .clone()
+                .unwrap_or_else(default_convert_to_llm),
             transform_context: self.transform_context.clone(),
             get_api_key: self.get_api_key.clone(),
             should_stop_after_turn: None,

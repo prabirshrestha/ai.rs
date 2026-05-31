@@ -105,6 +105,18 @@ impl AgentContext {
 pub type ConvertToLlmFn = Arc<
     dyn Fn(Vec<AgentMessage>) -> Pin<Box<dyn Future<Output = Vec<Message>> + Send>> + Send + Sync,
 >;
+
+pub(crate) fn default_convert_to_llm() -> ConvertToLlmFn {
+    Arc::new(|messages| {
+        Box::pin(async move {
+            messages
+                .into_iter()
+                .filter(|message| message.is_llm_message())
+                .collect()
+        })
+    })
+}
+
 pub type TransformContextFn = Arc<
     dyn Fn(
             Vec<AgentMessage>,
@@ -151,7 +163,7 @@ pub type AfterToolCallFn = Arc<
 pub struct AgentLoopConfig {
     pub model: Model,
     pub options: SimpleStreamOptions,
-    pub convert_to_llm: Option<ConvertToLlmFn>,
+    pub convert_to_llm: ConvertToLlmFn,
     pub transform_context: Option<TransformContextFn>,
     pub get_api_key: Option<GetApiKeyFn>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
@@ -168,7 +180,7 @@ impl AgentLoopConfig {
         Self {
             model,
             options: SimpleStreamOptions::default(),
-            convert_to_llm: None,
+            convert_to_llm: default_convert_to_llm(),
             transform_context: None,
             get_api_key: None,
             should_stop_after_turn: None,
