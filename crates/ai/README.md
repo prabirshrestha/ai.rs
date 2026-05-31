@@ -466,8 +466,11 @@ registration.unregister();
 ### Providers and Models
 
 Built-in model metadata is loaded from the generated upstream model catalog and
-filtered to the focused built-in providers: `openai`, `anthropic`, and
-`github-copilot`.
+filtered by the active API surface. That keeps models whose transport is
+`openai-completions`, `openai-responses`, or `anthropic-messages`, including
+OpenAI/Anthropic-compatible providers such as GitHub Copilot, OpenRouter, Groq,
+Z.AI, Xiaomi, and OpenCode Go. Cloudflare providers are excluded until their
+provider-specific APIs are ported.
 
 ### Querying Providers and Models
 

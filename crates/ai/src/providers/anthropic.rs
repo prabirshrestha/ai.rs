@@ -131,7 +131,6 @@ pub fn stream_simple_anthropic(
         return immediate_error(model, &format!("No API key for provider: {provider}"));
     };
     let base = build_base_options(&model, &options, api_key);
-    let tool_choice = options.tool_choice.clone();
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
         return stream_anthropic(
@@ -140,7 +139,6 @@ pub fn stream_simple_anthropic(
             AnthropicOptions {
                 base,
                 thinking_enabled: Some(false),
-                tool_choice,
                 ..Default::default()
             },
         );
@@ -154,7 +152,6 @@ pub fn stream_simple_anthropic(
                 base,
                 thinking_enabled: Some(true),
                 effort: Some(map_thinking_level_to_effort(&model, reasoning)),
-                tool_choice,
                 ..Default::default()
             },
         );
@@ -175,7 +172,6 @@ pub fn stream_simple_anthropic(
             base: adjusted_base,
             thinking_enabled: Some(true),
             thinking_budget_tokens: Some(adjusted.thinking_budget),
-            tool_choice,
             ..Default::default()
         },
     )

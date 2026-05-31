@@ -642,3 +642,246 @@ impl Default for Agent {
         Self::new(AgentOptions::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use async_trait::async_trait;
+    use futures::FutureExt;
+    use serde_json::{Value, json};
+
+    use super::AgentState;
+    use crate::agent_types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
+    use crate::providers::faux::{
+        FauxAssistantMessageOptions, faux_assistant_message, faux_text, faux_tool_call,
+        register_faux_provider,
+    };
+    use crate::{
+        Agent, AgentEvent, AgentOptions, AssistantContent, ImageContent, Message, StopReason, Tool,
+        ToolResultContent,
+    };
+
+    fn text_from_message(message: &Message) -> String {
+        match message {
+            Message::Assistant(assistant) => assistant
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    AssistantContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Message::ToolResult(tool_result) => tool_result
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    ToolResultContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    }
+
+    struct CalculateTool;
+
+    #[async_trait]
+    impl AgentTool for CalculateTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "calculate".to_string(),
+                description: "Evaluate a simple multiplication expression.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "expression": { "type": "string" }
+                    },
+                    "required": ["expression"]
+                }),
+            }
+        }
+
+        fn label(&self) -> &str {
+            "Calculate"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            args: Value,
+            _cancellation_token: Option<tokio_util::sync::CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            let expression = args
+                .get("expression")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let value = match expression {
+                "123 * 456" => 56_088,
+                other => {
+                    return Ok(AgentToolResult::text(format!(
+                        "Unsupported expression: {other}"
+                    )));
+                }
+            };
+            Ok(AgentToolResult::text(format!("{expression} = {value}")))
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_handles_basic_text_prompt_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message("4", None)]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: Some("You are a helpful assistant.".to_string()),
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text("What is 2+2? Answer with just the number.", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        assert_eq!(state.messages.len(), 2);
+        assert!(matches!(state.messages.first(), Some(Message::User(_))));
+        assert!(matches!(state.messages.get(1), Some(Message::Assistant(_))));
+        assert!(text_from_message(&state.messages[1]).contains('4'));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn agent_executes_tools_and_tracks_pending_tool_calls_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_text("Let me calculate that."),
+                    faux_tool_call(
+                        "calculate",
+                        json!({ "expression": "123 * 456" }),
+                        Some("calc-1".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("The result is 56088.", None),
+        ]);
+        let agent = Arc::new(Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: Some(
+                    "You are a helpful assistant. Always use the calculator tool for math."
+                        .to_string(),
+                ),
+                model: registration.get_model(),
+                tools: vec![Arc::new(CalculateTool)],
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        }));
+
+        let pending_during_events = Arc::new(StdMutex::new(Vec::new()));
+        agent
+            .subscribe(Arc::new({
+                let pending_during_events = Arc::clone(&pending_during_events);
+                let agent = Arc::clone(&agent);
+                move |event, _token| {
+                    let pending_during_events = Arc::clone(&pending_during_events);
+                    let agent = Arc::clone(&agent);
+                    async move {
+                        if matches!(
+                            event,
+                            AgentEvent::ToolExecutionStart { .. }
+                                | AgentEvent::ToolExecutionEnd { .. }
+                        ) {
+                            let state = agent.state().await;
+                            pending_during_events.lock().unwrap().push((
+                                match event {
+                                    AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                                    AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                                    _ => unreachable!(),
+                                },
+                                state.pending_tool_calls.iter().cloned().collect::<Vec<_>>(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        agent
+            .prompt_text("Calculate 123 * 456 using the calculator tool.", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        let tool_result = state
+            .messages
+            .iter()
+            .find(|message| matches!(message, Message::ToolResult(_)))
+            .expect("tool result message");
+        assert!(text_from_message(tool_result).contains("123 * 456 = 56088"));
+        assert!(text_from_message(state.messages.last().unwrap()).contains("56088"));
+        assert!(state.pending_tool_calls.is_empty());
+        assert_eq!(
+            *pending_during_events.lock().unwrap(),
+            vec![
+                ("tool_execution_start", vec!["calc-1".to_string()]),
+                ("tool_execution_end", Vec::<String>::new()),
+            ]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn prompt_text_preserves_chat_image_input() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message("seen", None)]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text(
+                "Describe this",
+                vec![ImageContent {
+                    data: "abc".to_string(),
+                    mime_type: "image/png".to_string(),
+                }],
+            )
+            .await
+            .expect("prompt succeeds");
+
+        let state = agent.state().await;
+        let Message::User(user) = &state.messages[0] else {
+            panic!("expected user message");
+        };
+        let crate::UserMessageContent::Parts(parts) = &user.content else {
+            panic!("expected multipart user content");
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, crate::UserContent::Image(_)))
+        );
+        registration.unregister();
+    }
+}

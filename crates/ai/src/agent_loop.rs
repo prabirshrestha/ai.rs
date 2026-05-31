@@ -10,8 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent_types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentMessage,
-    AgentToolResult, BeforeToolCallContext, DynAgentTool, MutableToolArgs, ToolExecutionMode,
-    assistant_tool_calls,
+    AgentToolResult, BeforeToolCallContext, DynAgentTool, ToolExecutionMode, assistant_tool_calls,
 };
 use crate::{AgentError, AgentResult};
 
@@ -724,14 +723,11 @@ async fn prepare_tool_call(
     };
 
     if let Some(before_tool_call) = &config.before_tool_call {
-        let mutable_args = MutableToolArgs::new(prepared_args.clone());
-        let mut explicit_args = None;
         match before_tool_call(
             BeforeToolCallContext {
                 assistant_message: assistant.clone(),
                 tool_call: tool_call.clone(),
                 args: prepared_args.clone(),
-                mutable_args: mutable_args.clone(),
                 context: context.clone(),
             },
             cancellation_token.clone(),
@@ -756,7 +752,6 @@ async fn prepare_tool_call(
                         tool_call, reason,
                     )));
                 }
-                explicit_args = before_result.args;
             }
             Ok(None) => {}
             Err(error) => {
@@ -766,26 +761,6 @@ async fn prepare_tool_call(
                 )));
             }
         }
-        prepared_args = if let Some(args) = explicit_args {
-            args
-        } else {
-            mutable_args.get().await
-        };
-
-        let mut prepared_tool_call = tool_call.clone();
-        prepared_tool_call.arguments = prepared_args;
-        prepared_args = match crate::utils::validation::validate_tool_arguments(
-            &tool.definition(),
-            &prepared_tool_call,
-        ) {
-            Ok(args) => args,
-            Err(error) => {
-                return Ok(PreparedToolCallOutcome::Immediate(finalized_error(
-                    tool_call,
-                    error.to_string(),
-                )));
-            }
-        };
     }
 
     if cancellation_token

@@ -9,7 +9,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::AgentResult;
@@ -149,27 +148,6 @@ pub type AfterToolCallFn = Arc<
 >;
 
 #[derive(Clone)]
-pub struct MutableToolArgs {
-    inner: Arc<TokioMutex<Value>>,
-}
-
-impl MutableToolArgs {
-    pub fn new(args: Value) -> Self {
-        Self {
-            inner: Arc::new(TokioMutex::new(args)),
-        }
-    }
-
-    pub async fn get(&self) -> Value {
-        self.inner.lock().await.clone()
-    }
-
-    pub async fn set(&self, args: Value) {
-        *self.inner.lock().await = args;
-    }
-}
-
-#[derive(Clone)]
 pub struct AgentLoopConfig {
     pub model: Model,
     pub options: SimpleStreamOptions,
@@ -226,7 +204,6 @@ pub struct BeforeToolCallContext {
     pub assistant_message: AssistantMessage,
     pub tool_call: crate::ToolCall,
     pub args: Value,
-    pub mutable_args: MutableToolArgs,
     pub context: AgentContext,
 }
 
@@ -234,7 +211,6 @@ pub struct BeforeToolCallContext {
 pub struct BeforeToolCallResult {
     pub block: bool,
     pub reason: Option<String>,
-    pub args: Option<Value>,
 }
 
 #[derive(Clone)]

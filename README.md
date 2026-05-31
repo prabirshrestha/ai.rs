@@ -16,7 +16,8 @@ The active provider API surface is intentionally narrow:
 - Anthropic Messages: `anthropic-messages`
 - GitHub Copilot OAuth and dynamic headers over compatible routes
 
-Cloudflare support is not included in this Rust port.
+Cloudflare support is not included in this Rust port. PRs to add support for
+additional provider-specific APIs are welcome.
 
 The TypeScript coding-agent harness, CLI, and TUI from
 [`pi`](https://github.com/earendil-works/pi) are not included. The agent loop is
