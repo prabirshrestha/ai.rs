@@ -1624,8 +1624,9 @@ mod tests {
         registration.unregister();
     }
 
+    #[rustfmt::skip]
     #[tokio::test]
-    async fn should_emit_tool_execution_end_completion_order_and_persist_source_order() {
+    async fn should_emit_tool_execution_end_in_completion_order_but_persist_tool_results_in_source_order() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1871,8 +1872,9 @@ mod tests {
         registration.unregister();
     }
 
+    #[rustfmt::skip]
     #[tokio::test]
-    async fn should_force_sequential_when_tool_has_execution_mode_sequential() {
+    async fn should_force_sequential_execution_when_a_tool_has_execution_mode_sequential_even_with_default_parallel_config() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1933,8 +1935,9 @@ mod tests {
         registration.unregister();
     }
 
+    #[rustfmt::skip]
     #[tokio::test]
-    async fn should_force_sequential_when_one_tool_has_execution_mode_sequential() {
+    async fn should_force_sequential_execution_when_one_of_multiple_tools_has_execution_mode_sequential() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
