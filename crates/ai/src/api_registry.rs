@@ -108,7 +108,7 @@ pub fn clear_api_providers() {
     registry().write().expect("api registry poisoned").clear();
 }
 
-pub fn wrap_stream<F>(api: &'static str, stream: F) -> ApiStreamFunction
+pub(crate) fn wrap_stream<F>(api: &'static str, stream: F) -> ApiStreamFunction
 where
     F: Fn(Model, Context, StreamOptions) -> Result<AssistantMessageEventStream>
         + Send
@@ -123,7 +123,7 @@ where
     })
 }
 
-pub fn wrap_stream_simple<F>(api: &'static str, stream: F) -> ApiStreamSimpleFunction
+pub(crate) fn wrap_stream_simple<F>(api: &'static str, stream: F) -> ApiStreamSimpleFunction
 where
     F: Fn(Model, Context, SimpleStreamOptions) -> Result<AssistantMessageEventStream>
         + Send
