@@ -11,6 +11,7 @@ use crate::providers::github_copilot_headers::{
 };
 use crate::providers::openai_prompt_cache::clamp_openai_prompt_cache_key;
 use crate::providers::simple_options::build_base_options;
+use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheControlFormat, CacheRetention,
     Context, ImageContent, MaxTokensField, Model, ModelInput, ModelThinkingLevel,
@@ -21,7 +22,6 @@ use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
-use crate::utils::transform_messages::transform_messages;
 use crate::{Error, Result};
 
 #[derive(Clone, Default)]

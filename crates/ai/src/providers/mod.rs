@@ -6,3 +6,4 @@ pub mod openai_prompt_cache;
 pub mod openai_responses;
 pub mod register_builtins;
 pub mod simple_options;
+pub mod transform_messages;

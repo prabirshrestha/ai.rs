@@ -7,5 +7,4 @@ pub mod overflow;
 pub mod sanitize;
 pub(crate) mod sse;
 pub(crate) mod time;
-pub mod transform_messages;
 pub mod validation;

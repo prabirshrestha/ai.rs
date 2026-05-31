@@ -11,6 +11,7 @@ use crate::providers::github_copilot_headers::{
 use crate::providers::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
 };
+use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model,
     ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
@@ -20,7 +21,6 @@ use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
 use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
-use crate::utils::transform_messages::transform_messages;
 use crate::{Error, Result};
 
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
