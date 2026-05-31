@@ -1776,6 +1776,73 @@ mod tests {
         assert_eq!(value, "token");
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn device_code_poll_polls_immediately_and_increases_interval_after_slow_down() {
+        let poll_times = Arc::new(Mutex::new(Vec::new()));
+        let start = tokio::time::Instant::now();
+        let poll = {
+            let poll_times = Arc::clone(&poll_times);
+            tokio::spawn(async move {
+                poll_oauth_device_code_flow(Some(1), Some(60), None, move || {
+                    let poll_times = Arc::clone(&poll_times);
+                    async move {
+                        let mut poll_times = poll_times.lock().expect("poll times lock poisoned");
+                        poll_times.push(tokio::time::Instant::now().duration_since(start));
+                        Ok(match poll_times.len() {
+                            1 => OAuthDeviceCodePollResult::Pending,
+                            2 => OAuthDeviceCodePollResult::SlowDown,
+                            3 => OAuthDeviceCodePollResult::Complete("token"),
+                            _ => OAuthDeviceCodePollResult::Failed(
+                                "unexpected extra access token poll".to_string(),
+                            ),
+                        })
+                    }
+                })
+                .await
+            })
+        };
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![Duration::from_millis(0)]
+        );
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            poll_times.lock().expect("poll times lock poisoned").len(),
+            1
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![Duration::from_millis(0), Duration::from_millis(1000)]
+        );
+
+        tokio::time::advance(Duration::from_millis(5999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            poll_times.lock().expect("poll times lock poisoned").len(),
+            2
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let value = poll.await.expect("poll task joins").expect("poll succeeds");
+
+        assert_eq!(value, "token");
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![
+                Duration::from_millis(0),
+                Duration::from_millis(1000),
+                Duration::from_millis(7000),
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn device_code_poll_returns_failed_message() {
         let error = poll_oauth_device_code_flow::<(), _, _>(None, Some(1), None, || async {
