@@ -1,4 +1,5 @@
 pub mod diagnostics;
+pub mod event_stream;
 pub mod hash;
 pub mod headers;
 pub(crate) mod http;
