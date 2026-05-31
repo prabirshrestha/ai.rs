@@ -98,29 +98,6 @@ struct ModelRegistry {
 }
 
 impl ModelRegistry {
-    fn register_model(&mut self, provider: String, model: Model) {
-        if let Some(provider_models) = self
-            .providers
-            .iter_mut()
-            .find(|entry| entry.provider == provider)
-        {
-            if let Some(existing) = provider_models
-                .models
-                .iter_mut()
-                .find(|existing| existing.id == model.id)
-            {
-                *existing = model;
-            } else {
-                provider_models.models.push(model);
-            }
-        } else {
-            self.providers.push(ProviderModels {
-                provider,
-                models: vec![model],
-            });
-        }
-    }
-
     fn get_model(&self, provider: &str, model_id: &str) -> Option<Model> {
         self.providers
             .iter()
@@ -148,13 +125,6 @@ impl ModelRegistry {
 fn registry() -> &'static RwLock<ModelRegistry> {
     static REGISTRY: OnceLock<RwLock<ModelRegistry>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(builtin_models()))
-}
-
-pub fn register_model(provider: impl Into<String>, model: Model) {
-    registry()
-        .write()
-        .expect("model registry poisoned")
-        .register_model(provider.into(), model);
 }
 
 pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
@@ -296,38 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn register_model_preserves_insertion_order_and_updates_in_place() {
-        let provider = "ordered-test-provider";
-        let mut first = get_model("openai", "gpt-4o-mini").expect("gpt-4o-mini");
-        first.id = "z-model".to_string();
-        first.provider = provider.to_string();
-        let mut second = first.clone();
-        second.id = "a-model".to_string();
-
-        register_model(provider, first.clone());
-        register_model(provider, second.clone());
-
-        let ids = get_models(provider)
-            .into_iter()
-            .map(|model| model.id)
-            .collect::<Vec<_>>();
-        assert_eq!(ids, ["z-model", "a-model"]);
-
-        first.name = "Updated Z Model".to_string();
-        register_model(provider, first);
-
-        let models = get_models(provider);
-        assert_eq!(
-            models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            ["z-model", "a-model"]
-        );
-        assert_eq!(models[0].name, "Updated Z Model");
-    }
-
-    #[test]
     fn supported_thinking_levels_match_xhigh_metadata() {
         let opus46 = get_model("anthropic", "claude-opus-4-6").expect("claude-opus-4-6");
         assert!(get_supported_thinking_levels(&opus46).contains(&ModelThinkingLevel::Xhigh));
@@ -391,16 +329,5 @@ mod tests {
                 || model_id.contains("sonnet-4.6")),
             "{flagged:?}"
         );
-    }
-
-    #[test]
-    fn register_model_overrides_by_provider_and_id() {
-        let mut model = get_model("openai", "gpt-4o-mini").expect("gpt-4o-mini");
-        model.id = "custom-test-model".to_string();
-        model.provider = "test-provider".to_string();
-        register_model("test-provider", model.clone());
-
-        assert_eq!(get_model("test-provider", "custom-test-model"), Some(model));
-        assert_eq!(get_models("test-provider").len(), 1);
     }
 }

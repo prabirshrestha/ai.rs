@@ -35,7 +35,7 @@ pub use event_stream::{
 };
 pub use models::{
     calculate_cost, clamp_thinking_level, get_model, get_models, get_providers,
-    get_supported_thinking_levels, models_are_equal, register_model,
+    get_supported_thinking_levels, models_are_equal,
 };
 pub use oauth::{
     AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthApiKey, OAuthAuthCallback,
