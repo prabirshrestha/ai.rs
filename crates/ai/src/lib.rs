@@ -58,7 +58,11 @@ pub use providers::faux::{
 };
 pub use providers::openai_completions::OpenAICompletionsOptions;
 pub use providers::openai_responses::OpenAIResponsesOptions;
-pub use providers::register_builtins::{register_builtin_api_providers, reset_api_providers};
+pub use providers::register_builtins::{
+    register_builtin_api_providers, reset_api_providers, stream_anthropic,
+    stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
+    stream_simple_openai_completions, stream_simple_openai_responses,
+};
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
     register_session_resource_cleanup,

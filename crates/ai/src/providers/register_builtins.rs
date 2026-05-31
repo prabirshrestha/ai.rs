@@ -6,7 +6,11 @@ use crate::types::{Context, Model, ModelThinkingLevel, SimpleStreamOptions, Stre
 use crate::{AssistantMessageEventStream, Error, Result};
 use serde_json::Value;
 
-pub fn ensure_builtins_registered() {
+pub use anthropic::{stream_anthropic, stream_simple_anthropic};
+pub use openai_completions::{stream_openai_completions, stream_simple_openai_completions};
+pub use openai_responses::{stream_openai_responses, stream_simple_openai_responses};
+
+pub(crate) fn ensure_builtins_registered() {
     static REGISTERED: OnceLock<()> = OnceLock::new();
     REGISTERED.get_or_init(register_builtins);
 }
@@ -20,7 +24,7 @@ pub fn reset_api_providers() {
     register_builtins();
 }
 
-pub fn register_builtins() {
+fn register_builtins() {
     api_registry::register_api_provider(
         ApiProvider {
             api: "anthropic-messages".to_string(),
