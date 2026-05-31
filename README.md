@@ -9,6 +9,16 @@ The workspace currently contains:
 | --- | --- |
 | [`ai`](crates/ai) | Unified LLM API plus the agent loop runtime for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub Copilot-compatible routing. |
 
+The porting target is 1:1 behavior with the relevant upstream `pi` packages
+where the scoped Rust surface exists:
+
+- [`packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai):
+  chat/responses streaming, model registry behavior, OAuth helpers, faux
+  provider tests, and shared message/context types.
+- [`packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent):
+  the core agent state, queueing APIs, event lifecycle, tool execution, and
+  direct agent loop.
+
 The active provider API surface is intentionally narrow:
 
 - OpenAI Chat Completions: `openai-completions`

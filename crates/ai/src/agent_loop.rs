@@ -957,23 +957,28 @@ async fn emit_tool_result_message(
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use futures::FutureExt;
     use serde_json::{Value, json};
     use tokio_util::sync::CancellationToken;
 
     use super::run_agent_loop;
     use crate::agent_types::{
-        AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentTool, AgentToolResult,
-        AgentToolUpdateCallback, BeforeToolCallContext, BeforeToolCallResult, ToolExecutionMode,
+        AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentLoopTurnUpdate, AgentTool,
+        AgentToolResult, AgentToolUpdateCallback, BeforeToolCallContext, BeforeToolCallResult,
+        StreamFn, ToolExecutionMode,
     };
+    use crate::event_stream::create_assistant_message_event_stream;
     use crate::providers::faux::{
         FauxAssistantMessageOptions, faux_assistant_message, faux_tool_call, register_faux_provider,
     };
     use crate::{
-        Message, StopReason, Tool, ToolResultContent, ToolResultMessage, UserMessageContent,
+        AssistantContent, AssistantMessage, AssistantMessageEvent, Message, Model, StopReason,
+        TextContent, Tool, ToolResultContent, ToolResultMessage, UserMessageContent,
     };
 
     fn collect_events() -> (Arc<StdMutex<Vec<AgentEvent>>>, AgentEventSink) {
@@ -1006,6 +1011,44 @@ mod tests {
         Message::User(crate::UserMessage {
             content: UserMessageContent::Text(text.to_string()),
             timestamp: 0,
+        })
+    }
+
+    fn user_text_value(message: &Message) -> Option<&str> {
+        let Message::User(user) = message else {
+            return None;
+        };
+        match &user.content {
+            UserMessageContent::Text(text) => Some(text.as_str()),
+            UserMessageContent::Parts(parts) => parts.iter().find_map(|part| match part {
+                crate::UserContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+        }
+    }
+
+    fn assistant_text_message(model: &Model, text: impl Into<String>) -> AssistantMessage {
+        let mut message = AssistantMessage::empty_for(model);
+        message.content = vec![AssistantContent::Text(TextContent {
+            text: text.into(),
+            text_signature: None,
+        })];
+        message
+    }
+
+    fn immediate_stream_fn(text: impl Into<String>) -> StreamFn {
+        let text = Arc::new(text.into());
+        Arc::new(move |model, _context, _options| {
+            let text = Arc::clone(&text);
+            async move {
+                let (mut sender, stream) = create_assistant_message_event_stream();
+                sender.push(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: assistant_text_message(&model, text.as_str()),
+                });
+                Ok(stream)
+            }
+            .boxed()
         })
     }
 
@@ -1073,6 +1116,8 @@ mod tests {
     struct EchoTool {
         executed: Arc<StdMutex<Vec<String>>>,
         delay_first: bool,
+        execution_mode: Option<ToolExecutionMode>,
+        terminate: bool,
     }
 
     #[async_trait]
@@ -1095,6 +1140,10 @@ mod tests {
             "Echo"
         }
 
+        fn execution_mode(&self) -> Option<ToolExecutionMode> {
+            self.execution_mode
+        }
+
         async fn execute(
             &self,
             _tool_call_id: &str,
@@ -1111,8 +1160,31 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             self.executed.lock().unwrap().push(value.clone());
-            Ok(AgentToolResult::text(format!("echoed: {value}")))
+            let mut result = AgentToolResult::text(format!("echoed: {value}"));
+            result.terminate = self.terminate;
+            Ok(result)
         }
+    }
+
+    fn echo_tool(executed: Arc<StdMutex<Vec<String>>>) -> EchoTool {
+        EchoTool {
+            executed,
+            delay_first: false,
+            execution_mode: None,
+            terminate: false,
+        }
+    }
+
+    fn tool_result_message_ids(events: &[AgentEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageEnd {
+                    message: Message::ToolResult(tool_result),
+                } => Some(tool_result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     }
 
     #[tokio::test]
@@ -1193,6 +1265,8 @@ mod tests {
             tools: vec![Arc::new(EchoTool {
                 executed: Arc::clone(&executed),
                 delay_first: false,
+                execution_mode: None,
+                terminate: false,
             })],
         };
         let (events, emit) = collect_events();
@@ -1261,6 +1335,8 @@ mod tests {
             tools: vec![Arc::new(EchoTool {
                 executed,
                 delay_first: true,
+                execution_mode: None,
+                terminate: false,
             })],
         };
         let (events, emit) = collect_events();
@@ -1296,5 +1372,434 @@ mod tests {
         assert_eq!(tool_execution_end_ids, ["tool-2", "tool-1"]);
         assert_eq!(tool_result_ids, ["tool-1", "tool-2"]);
         registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn transform_context_runs_before_convert_to_llm_like_upstream() {
+        let mut config = AgentLoopConfig::new(Model {
+            id: "test-model".to_string(),
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            ..Default::default()
+        });
+        let transformed_seen = Arc::new(StdMutex::new(Vec::new()));
+        config.transform_context = Some(Arc::new({
+            let transformed_seen = Arc::clone(&transformed_seen);
+            move |messages, _token| {
+                let transformed_seen = Arc::clone(&transformed_seen);
+                async move {
+                    transformed_seen.lock().unwrap().extend(
+                        messages
+                            .iter()
+                            .filter_map(user_text_value)
+                            .map(str::to_string),
+                    );
+                    vec![user_text("transformed")]
+                }
+                .boxed()
+            }
+        }));
+        let converted_seen = Arc::new(StdMutex::new(Vec::new()));
+        config.convert_to_llm = Some(Arc::new({
+            let converted_seen = Arc::clone(&converted_seen);
+            move |messages| {
+                let converted_seen = Arc::clone(&converted_seen);
+                async move {
+                    converted_seen.lock().unwrap().extend(
+                        messages
+                            .iter()
+                            .filter_map(user_text_value)
+                            .map(str::to_string),
+                    );
+                    messages
+                        .into_iter()
+                        .filter(|message| message.is_llm_message())
+                        .collect()
+                }
+                .boxed()
+            }
+        }));
+        let streamed_seen = Arc::new(StdMutex::new(Vec::new()));
+        let stream_fn: StreamFn = Arc::new({
+            let streamed_seen = Arc::clone(&streamed_seen);
+            move |model, context, _options| {
+                let streamed_seen = Arc::clone(&streamed_seen);
+                async move {
+                    streamed_seen.lock().unwrap().extend(
+                        context
+                            .messages
+                            .iter()
+                            .filter_map(user_text_value)
+                            .map(str::to_string),
+                    );
+                    let (mut sender, stream) = create_assistant_message_event_stream();
+                    sender.push(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: assistant_text_message(&model, "done"),
+                    });
+                    Ok(stream)
+                }
+                .boxed()
+            }
+        });
+        let (_events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("original")],
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            config,
+            emit,
+            None,
+            Some(stream_fn),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*transformed_seen.lock().unwrap(), ["original"]);
+        assert_eq!(*converted_seen.lock().unwrap(), ["transformed"]);
+        assert_eq!(*streamed_seen.lock().unwrap(), ["transformed"]);
+    }
+
+    #[tokio::test]
+    async fn steering_messages_inject_after_all_tool_calls_complete_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "first" }),
+                        Some("tool-1".to_string()),
+                    ),
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "second" }),
+                        Some("tool-2".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("after steering", None),
+        ]);
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.get_steering_messages = Some(Arc::new({
+            let poll_count = Arc::clone(&poll_count);
+            move || {
+                let poll_count = Arc::clone(&poll_count);
+                async move {
+                    if poll_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                        vec![user_text("steer now")]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                .boxed()
+            }
+        }));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo both")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        let events = events.lock().unwrap();
+        let last_tool_result_index = events
+            .iter()
+            .rposition(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageEnd {
+                        message: Message::ToolResult(_)
+                    }
+                )
+            })
+            .expect("tool result event");
+        let steering_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageStart { message }
+                        if user_text_value(message) == Some("steer now")
+                )
+            })
+            .expect("steering event");
+        assert!(last_tool_result_index < steering_index);
+        assert_eq!(tool_result_message_ids(&events), ["tool-1", "tool-2"]);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn tool_execution_mode_sequential_overrides_parallel_config_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "first" }),
+                        Some("tool-1".to_string()),
+                    ),
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "second" }),
+                        Some("tool-2".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.tool_execution = ToolExecutionMode::Parallel;
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                executed: Arc::new(StdMutex::new(Vec::new())),
+                delay_first: true,
+                execution_mode: Some(ToolExecutionMode::Sequential),
+                terminate: false,
+            })],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo both")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        let events = events.lock().unwrap();
+        let tool_execution_end_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_execution_end_ids, ["tool-1", "tool-2"]);
+        assert_eq!(tool_result_message_ids(&events), ["tool-1", "tool-2"]);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn prepare_next_turn_snapshot_is_used_before_continuing_like_upstream() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let streamed_contexts = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let stream_fn: StreamFn = Arc::new({
+            let calls = Arc::clone(&calls);
+            let streamed_contexts = Arc::clone(&streamed_contexts);
+            move |model, context, _options| {
+                let calls = Arc::clone(&calls);
+                let streamed_contexts = Arc::clone(&streamed_contexts);
+                async move {
+                    streamed_contexts.lock().unwrap().push(
+                        context
+                            .messages
+                            .iter()
+                            .filter_map(user_text_value)
+                            .map(str::to_string)
+                            .collect(),
+                    );
+                    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let (mut sender, stream) = create_assistant_message_event_stream();
+                    sender.push(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: assistant_text_message(&model, format!("turn {call}")),
+                    });
+                    Ok(stream)
+                }
+                .boxed()
+            }
+        });
+        let steering_polls = Arc::new(AtomicUsize::new(0));
+        let mut config = AgentLoopConfig::new(Model {
+            id: "test-model".to_string(),
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            ..Default::default()
+        });
+        config.get_steering_messages = Some(Arc::new({
+            let steering_polls = Arc::clone(&steering_polls);
+            move || {
+                let steering_polls = Arc::clone(&steering_polls);
+                async move {
+                    if steering_polls.fetch_add(1, Ordering::SeqCst) == 1 {
+                        vec![user_text("steer")]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                .boxed()
+            }
+        }));
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        config.prepare_next_turn = Some(Arc::new({
+            let prepare_calls = Arc::clone(&prepare_calls);
+            move |_context, _token| {
+                let prepare_calls = Arc::clone(&prepare_calls);
+                async move {
+                    if prepare_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Some(AgentLoopTurnUpdate {
+                            context: Some(AgentContext {
+                                system_prompt: Some(String::new()),
+                                messages: vec![user_text("prepared context")],
+                                tools: Vec::new(),
+                            }),
+                            model: None,
+                            reasoning_level: None,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                .boxed()
+            }
+        }));
+        let (_events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("initial")],
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            config,
+            emit,
+            None,
+            Some(stream_fn),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(
+            *streamed_contexts.lock().unwrap(),
+            vec![
+                vec!["initial".to_string()],
+                vec!["prepared context".to_string(), "steer".to_string()],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_and_terminate_controls_exit_before_more_messages_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "stop" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("should not be reached", None),
+        ]);
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                executed: Arc::new(StdMutex::new(Vec::new())),
+                delay_first: false,
+                execution_mode: None,
+                terminate: true,
+            })],
+        };
+        let (_events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("echo once")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, Message::Assistant(_)))
+                .count(),
+            1
+        );
+        registration.unregister();
+
+        let mut config = AgentLoopConfig::new(Model {
+            id: "test-model".to_string(),
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            ..Default::default()
+        });
+        let follow_up_polls = Arc::new(AtomicUsize::new(0));
+        config.get_follow_up_messages = Some(Arc::new({
+            let follow_up_polls = Arc::clone(&follow_up_polls);
+            move || {
+                let follow_up_polls = Arc::clone(&follow_up_polls);
+                async move {
+                    follow_up_polls.fetch_add(1, Ordering::SeqCst);
+                    vec![user_text("follow up")]
+                }
+                .boxed()
+            }
+        }));
+        config.should_stop_after_turn = Some(Arc::new(|_context| async { true }.boxed()));
+        let (_events, emit) = collect_events();
+        let messages = run_agent_loop(
+            vec![user_text("stop after turn")],
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            config,
+            emit,
+            None,
+            Some(immediate_stream_fn("stopped")),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(follow_up_polls.load(Ordering::SeqCst), 0);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| user_text_value(message) == Some("follow up"))
+        );
     }
 }

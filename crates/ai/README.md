@@ -17,6 +17,7 @@ calling, because tool calling is essential for agentic workflows.
 ## Table of Contents
 
 - [Supported Providers](#supported-providers)
+- [Port Scope](#port-scope)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Agent Loop](#agent-loop)
@@ -81,6 +82,28 @@ built-in provider surface in this port. PRs to add support for additional
 providers are welcome.
 
 The TypeScript coding-agent harness, CLI, and TUI are not included.
+
+## Port Scope
+
+This crate tracks upstream `pi` behavior for the Rust APIs that correspond to
+the active scope:
+
+| Upstream `pi` area | Rust status |
+| --- | --- |
+| `packages/ai/src/types.ts`, `stream.ts`, `models.ts`, `api-registry.ts` | Ported as shared message/context types, stream helpers, generated model metadata, and API registry. |
+| `packages/ai/src/providers/openai-completions.ts` | Ported for Chat Completions-compatible streaming and simple options. |
+| `packages/ai/src/providers/openai-responses.ts` | Ported for OpenAI Responses streaming and simple options. |
+| `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages streaming and simple options. |
+| `packages/ai/src/providers/faux.ts` | Ported for deterministic provider and agent-loop tests. |
+| `packages/agent/src/agent.ts`, `agent-loop.ts`, `types.ts` | Ported into this crate for core agent state, queueing, lifecycle events, tool execution, hooks, and continuation. |
+| `packages/agent/src/harness/**`, coding-agent CLI, and TUI | Not included in this Rust crate. |
+| Image generation, Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex Responses | Not part of the active built-in provider surface. PRs to add support are welcome. |
+
+The goal is behavioral parity before Rust-specific API polish. Where upstream
+uses TypeScript casts for provider-specific escape hatches, this crate exposes
+the equivalent through typed options where possible and
+`StreamOptions::provider_options` where the upstream behavior is intentionally
+loose.
 
 ## Installation
 
