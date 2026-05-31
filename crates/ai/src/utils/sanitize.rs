@@ -1,3 +1,1 @@
-pub fn sanitize_surrogates(text: &str) -> String {
-    text.to_string()
-}
+pub use crate::utils::sanitize_unicode::*;
