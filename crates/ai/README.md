@@ -393,6 +393,10 @@ common `SimpleStreamOptions` shape:
 - `OpenAIResponsesOptions`
 - `AnthropicOptions`
 
+For parity with upstream's cast-based escape hatch, `stream_simple` also checks
+`StreamOptions::provider_options` for provider-specific fields that upstream
+accepts through casts, such as OpenAI Chat Completions `toolChoice`.
+
 ### Streaming Thinking Content
 
 Thinking content streams through `ThinkingStart`, `ThinkingDelta`, and

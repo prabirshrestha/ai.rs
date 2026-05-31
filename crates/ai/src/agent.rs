@@ -13,8 +13,7 @@ use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::agent_types::{
     AfterToolCallFn, AgentContext, AgentEvent, AgentEventListener, AgentEventSink, AgentLoopConfig,
     AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn, PrepareNextTurnFn,
-    QueueMode, ShouldStopAfterTurnFn, StreamFn, ToolExecutionMode, TransformContextFn,
-    user_message,
+    QueueMode, StreamFn, ToolExecutionMode, TransformContextFn, user_message,
 };
 use crate::{AgentError, AgentResult};
 
@@ -72,7 +71,6 @@ pub struct AgentOptions {
     pub transform_context: Option<TransformContextFn>,
     pub stream_fn: Option<StreamFn>,
     pub get_api_key: Option<GetApiKeyFn>,
-    pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     pub prepare_next_turn: Option<PrepareNextTurnFn>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
@@ -91,7 +89,6 @@ impl AgentOptions {
             transform_context: None,
             stream_fn: None,
             get_api_key: None,
-            should_stop_after_turn: None,
             prepare_next_turn: None,
             before_tool_call: None,
             after_tool_call: None,
@@ -159,7 +156,6 @@ pub struct Agent {
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
     get_api_key: Option<GetApiKeyFn>,
-    should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     prepare_next_turn: Option<PrepareNextTurnFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
@@ -182,7 +178,6 @@ impl Agent {
             transform_context: options.transform_context,
             stream_fn: options.stream_fn,
             get_api_key: options.get_api_key,
-            should_stop_after_turn: options.should_stop_after_turn,
             prepare_next_turn: options.prepare_next_turn,
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
@@ -559,7 +554,7 @@ impl Agent {
             convert_to_llm: self.convert_to_llm.clone(),
             transform_context: self.transform_context.clone(),
             get_api_key: self.get_api_key.clone(),
-            should_stop_after_turn: self.should_stop_after_turn.clone(),
+            should_stop_after_turn: None,
             prepare_next_turn: self.prepare_next_turn.clone(),
             get_steering_messages: Some(Arc::new(move || {
                 let steering_queue = steering_queue.clone();

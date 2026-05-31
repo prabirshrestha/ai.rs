@@ -953,3 +953,348 @@ async fn emit_tool_result_message(
     .await?;
     emit(AgentEvent::MessageEnd { message }).await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use tokio_util::sync::CancellationToken;
+
+    use super::run_agent_loop;
+    use crate::agent_types::{
+        AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentTool, AgentToolResult,
+        AgentToolUpdateCallback, BeforeToolCallContext, BeforeToolCallResult, ToolExecutionMode,
+    };
+    use crate::providers::faux::{
+        FauxAssistantMessageOptions, faux_assistant_message, faux_tool_call, register_faux_provider,
+    };
+    use crate::{
+        Message, StopReason, Tool, ToolResultContent, ToolResultMessage, UserMessageContent,
+    };
+
+    fn collect_events() -> (Arc<StdMutex<Vec<AgentEvent>>>, AgentEventSink) {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let sink_events = Arc::clone(&events);
+        let sink = Arc::new(move |event: AgentEvent| {
+            let sink_events = Arc::clone(&sink_events);
+            Box::pin(async move {
+                sink_events.lock().unwrap().push(event);
+                Ok(())
+            })
+                as Pin<Box<dyn std::future::Future<Output = crate::AgentResult<()>> + Send>>
+        });
+        (events, sink)
+    }
+
+    fn text_from_tool_result(message: &ToolResultMessage) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ToolResultContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn user_text(text: &str) -> Message {
+        Message::User(crate::UserMessage {
+            content: UserMessageContent::Text(text.to_string()),
+            timestamp: 0,
+        })
+    }
+
+    struct EditTool {
+        executed: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl AgentTool for EditTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "edit".to_string(),
+                description: "Apply edits.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "oldText": { "type": "string" },
+                                    "newText": { "type": "string" }
+                                },
+                                "required": ["oldText", "newText"]
+                            }
+                        }
+                    },
+                    "required": ["edits"]
+                }),
+            }
+        }
+
+        fn label(&self) -> &str {
+            "Edit"
+        }
+
+        fn prepare_arguments(&self, args: Value) -> crate::AgentResult<Value> {
+            let Some(old_text) = args.get("oldText").and_then(Value::as_str) else {
+                return Ok(args);
+            };
+            let Some(new_text) = args.get("newText").and_then(Value::as_str) else {
+                return Ok(args);
+            };
+            Ok(json!({
+                "edits": [{
+                    "oldText": old_text,
+                    "newText": new_text
+                }]
+            }))
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            self.executed.lock().unwrap().push(args);
+            Ok(AgentToolResult::text("edited"))
+        }
+    }
+
+    struct EchoTool {
+        executed: Arc<StdMutex<Vec<String>>>,
+        delay_first: bool,
+    }
+
+    #[async_trait]
+    impl AgentTool for EchoTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "echo".to_string(),
+                description: "Echo a value.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]
+                }),
+            }
+        }
+
+        fn label(&self) -> &str {
+            "Echo"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            let value = args
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if self.delay_first && value == "first" {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            self.executed.lock().unwrap().push(value.clone());
+            Ok(AgentToolResult::text(format!("echoed: {value}")))
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_arguments_runs_before_validation_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "edit",
+                    json!({ "oldText": "before", "newText": "after" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EditTool {
+                executed: Arc::clone(&executed),
+            })],
+        };
+        let (_events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("edit something")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(
+            *executed.lock().unwrap(),
+            vec![json!({ "edits": [{ "oldText": "before", "newText": "after" }] })]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn before_tool_call_blocks_without_executing_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "hello" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.before_tool_call = Some(Arc::new(|_context: BeforeToolCallContext, _token| {
+            Box::pin(async {
+                Ok(Some(BeforeToolCallResult {
+                    block: true,
+                    reason: Some("blocked by test".to_string()),
+                }))
+            })
+        }));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                executed: Arc::clone(&executed),
+                delay_first: false,
+            })],
+        };
+        let (events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("echo something")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert!(executed.lock().unwrap().is_empty());
+        let tool_result = messages
+            .iter()
+            .find_map(|message| match message {
+                Message::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("tool result");
+        assert!(tool_result.is_error);
+        assert_eq!(text_from_tool_result(tool_result), "blocked by test");
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_end_events_complete_order_but_results_source_order() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "first" }),
+                        Some("tool-1".to_string()),
+                    ),
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "second" }),
+                        Some("tool-2".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.tool_execution = ToolExecutionMode::Parallel;
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                executed,
+                delay_first: true,
+            })],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo both")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        let events = events.lock().unwrap();
+        let tool_execution_end_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_result_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageEnd {
+                    message: Message::ToolResult(tool_result),
+                } => Some(tool_result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_execution_end_ids, ["tool-2", "tool-1"]);
+        assert_eq!(tool_result_ids, ["tool-1", "tool-2"]);
+        registration.unregister();
+    }
+}

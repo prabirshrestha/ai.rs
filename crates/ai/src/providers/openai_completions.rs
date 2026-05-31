@@ -79,10 +79,19 @@ pub fn stream_simple_openai_completions(
         context,
         OpenAICompletionsOptions {
             base,
-            tool_choice: options.tool_choice,
+            tool_choice: simple_tool_choice(&options),
             reasoning_effort,
         },
     )
+}
+
+fn simple_tool_choice(options: &SimpleStreamOptions) -> Option<Value> {
+    options
+        .stream
+        .provider_options
+        .get("toolChoice")
+        .or_else(|| options.stream.provider_options.get("tool_choice"))
+        .cloned()
 }
 
 pub fn stream_openai_completions(
@@ -2987,9 +2996,11 @@ mod tests {
                     api_key: Some("test-key".to_string()),
                     cache_retention: Some(CacheRetention::None),
                     on_payload: Some(on_payload),
+                    provider_options: [("toolChoice".to_string(), json!("required"))]
+                        .into_iter()
+                        .collect(),
                     ..Default::default()
                 },
-                tool_choice: Some(json!("required")),
                 ..Default::default()
             },
         );
