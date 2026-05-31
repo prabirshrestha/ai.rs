@@ -1296,7 +1296,7 @@ mod tests {
         let messages = run_agent_loop(
             vec![user_text("Hello")],
             AgentContext {
-                system_prompt: Some("You are helpful.".to_string()),
+                system_prompt: "You are helpful.".to_string(),
                 messages: Vec::new(),
                 tools: Vec::new(),
             },
@@ -1385,7 +1385,7 @@ mod tests {
         run_agent_loop(
             vec![user_text("Hello")],
             AgentContext {
-                system_prompt: Some("You are helpful.".to_string()),
+                system_prompt: "You are helpful.".to_string(),
                 messages: vec![Message::Custom(json!({
                     "role": "notification",
                     "text": "This is a notification",
@@ -1426,7 +1426,7 @@ mod tests {
         ]);
         let executed = Arc::new(StdMutex::new(Vec::new()));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EditTool {
                 executed: Arc::clone(&executed),
@@ -1480,7 +1480,7 @@ mod tests {
             })
         }));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EchoTool {
                 executed: Arc::clone(&executed),
@@ -1541,7 +1541,7 @@ mod tests {
         ]);
         let executed = Arc::new(StdMutex::new(Vec::new()));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(echo_tool(Arc::clone(&executed)))],
         };
@@ -1601,7 +1601,7 @@ mod tests {
             })
         }));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(MutatedArgsTool {
                 executed: Arc::clone(&executed),
@@ -1653,7 +1653,7 @@ mod tests {
         let mut config = AgentLoopConfig::new(registration.get_model());
         config.tool_execution = ToolExecutionMode::Parallel;
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EchoTool {
                 executed,
@@ -1770,7 +1770,7 @@ mod tests {
         run_agent_loop(
             vec![user_text("original")],
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: Vec::new(),
                 tools: Vec::new(),
             },
@@ -1828,7 +1828,7 @@ mod tests {
             }
         }));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
         };
@@ -1900,7 +1900,7 @@ mod tests {
         let mut config = AgentLoopConfig::new(registration.get_model());
         config.tool_execution = ToolExecutionMode::Parallel;
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EchoTool {
                 executed: Arc::new(StdMutex::new(Vec::new())),
@@ -1956,7 +1956,7 @@ mod tests {
         let slow_finished = Arc::new(StdMutex::new(false));
         let fast_started_before_slow_finished = Arc::new(StdMutex::new(false));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![
                 Arc::new(NamedProbeTool {
@@ -2026,7 +2026,7 @@ mod tests {
             faux_assistant_message("done", None),
         ]);
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EchoTool {
                 executed: Arc::new(StdMutex::new(Vec::new())),
@@ -2121,7 +2121,7 @@ mod tests {
                     if prepare_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         Some(AgentLoopTurnUpdate {
                             context: Some(AgentContext {
-                                system_prompt: Some(String::new()),
+                                system_prompt: String::new(),
                                 messages: vec![user_text("prepared context")],
                                 tools: Vec::new(),
                             }),
@@ -2140,7 +2140,7 @@ mod tests {
         run_agent_loop(
             vec![user_text("initial")],
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: Vec::new(),
                 tools: Vec::new(),
             },
@@ -2220,7 +2220,7 @@ mod tests {
         let messages = run_agent_loop(
             vec![user_text("stop after turn")],
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: Vec::new(),
                 tools: Vec::new(),
             },
@@ -2292,7 +2292,7 @@ mod tests {
             faux_assistant_message("should not be reached", None),
         ]);
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(EchoTool {
                 executed: Arc::new(StdMutex::new(Vec::new())),
@@ -2358,7 +2358,7 @@ mod tests {
             })
         }));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
         };
@@ -2412,7 +2412,7 @@ mod tests {
             })
         }));
         let context = AgentContext {
-            system_prompt: Some(String::new()),
+            system_prompt: String::new(),
             messages: Vec::new(),
             tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
         };
@@ -2444,7 +2444,7 @@ mod tests {
         let (_events, emit) = collect_events();
         let empty_result = run_agent_loop_continue(
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: Vec::new(),
                 tools: Vec::new(),
             },
@@ -2465,7 +2465,7 @@ mod tests {
         let (_events, emit) = collect_events();
         let assistant_result = run_agent_loop_continue(
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: vec![Message::Assistant(assistant_text_message(
                     &Model::default(),
                     "assistant tail",
@@ -2489,7 +2489,7 @@ mod tests {
         let (events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: vec![user_text("existing")],
                 tools: Vec::new(),
             },
@@ -2519,7 +2519,7 @@ mod tests {
         let (_events, emit) = collect_events();
         run_agent_loop_continue(
             AgentContext {
-                system_prompt: Some(String::new()),
+                system_prompt: String::new(),
                 messages: vec![Message::Custom(json!({ "kind": "ui" }))],
                 tools: Vec::new(),
             },

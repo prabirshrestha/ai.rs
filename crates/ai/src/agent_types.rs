@@ -82,7 +82,7 @@ pub type DynAgentTool = Arc<dyn AgentTool>;
 
 #[derive(Clone)]
 pub struct AgentContext {
-    pub system_prompt: Option<String>,
+    pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
     pub tools: Vec<DynAgentTool>,
 }
@@ -90,7 +90,7 @@ pub struct AgentContext {
 impl AgentContext {
     pub fn llm_context(&self) -> Context {
         Context {
-            system_prompt: self.system_prompt.clone(),
+            system_prompt: Some(self.system_prompt.clone()),
             messages: self
                 .messages
                 .iter()

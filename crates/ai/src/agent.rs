@@ -536,7 +536,7 @@ impl Agent {
     async fn create_context_snapshot(&self) -> AgentContext {
         let state = self.state.lock().await;
         AgentContext {
-            system_prompt: Some(state.system_prompt.clone()),
+            system_prompt: state.system_prompt.clone(),
             messages: state.messages.clone(),
             tools: state.tools.clone(),
         }
