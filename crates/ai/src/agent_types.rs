@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
@@ -203,7 +203,7 @@ pub struct AgentLoopTurnUpdate {
 pub struct BeforeToolCallContext {
     pub assistant_message: AssistantMessage,
     pub tool_call: crate::ToolCall,
-    pub args: Value,
+    pub args: Arc<Mutex<Value>>,
     pub context: AgentContext,
 }
 

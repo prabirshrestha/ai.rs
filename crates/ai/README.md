@@ -230,6 +230,19 @@ async fn main() -> Result<()> {
 }
 ```
 
+Core loop hooks track upstream `pi` semantics:
+
+- `transform_context` runs before `convert_to_llm`.
+- `before_tool_call` receives already-validated arguments. Its `args` field is
+  shared mutable state so hooks can mutate arguments before execution, matching
+  upstream JavaScript object-reference behavior; the loop does not revalidate
+  after that mutation.
+- `after_tool_call` can replace content/details/error state and can set
+  `terminate`; a tool batch terminates only when every finalized result has
+  `terminate = true`.
+- `prepare_next_turn` can replace the next context, model, or reasoning level
+  before steering/follow-up polling starts another provider request.
+
 ## Tools
 
 Tools enable LLMs to interact with external systems. This crate uses JSON Schema

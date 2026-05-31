@@ -723,11 +723,12 @@ async fn prepare_tool_call(
     };
 
     if let Some(before_tool_call) = &config.before_tool_call {
+        let shared_args = Arc::new(StdMutex::new(prepared_args.clone()));
         match before_tool_call(
             BeforeToolCallContext {
                 assistant_message: assistant.clone(),
                 tool_call: tool_call.clone(),
-                args: prepared_args.clone(),
+                args: Arc::clone(&shared_args),
                 context: context.clone(),
             },
             cancellation_token.clone(),
@@ -761,6 +762,10 @@ async fn prepare_tool_call(
                 )));
             }
         }
+        prepared_args = shared_args
+            .lock()
+            .map_err(|error| AgentError::Other(format!("before tool args lock poisoned: {error}")))?
+            .clone();
     }
 
     if cancellation_token
@@ -967,10 +972,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::run_agent_loop;
+    use super::run_agent_loop_continue;
     use crate::agent_types::{
-        AgentContext, AgentEvent, AgentEventSink, AgentLoopConfig, AgentLoopTurnUpdate, AgentTool,
-        AgentToolResult, AgentToolUpdateCallback, BeforeToolCallContext, BeforeToolCallResult,
-        StreamFn, ToolExecutionMode,
+        AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentEventSink,
+        AgentLoopConfig, AgentLoopTurnUpdate, AgentTool, AgentToolResult, AgentToolUpdateCallback,
+        BeforeToolCallContext, BeforeToolCallResult, StreamFn, ToolExecutionMode,
     };
     use crate::event_stream::create_assistant_message_event_stream;
     use crate::providers::faux::{
@@ -1187,6 +1193,45 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
+    struct MutatedArgsTool {
+        executed: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl AgentTool for MutatedArgsTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "echo".to_string(),
+                description: "Echo a value.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]
+                }),
+            }
+        }
+
+        fn label(&self) -> &str {
+            "Echo"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            self.executed
+                .lock()
+                .unwrap()
+                .push(args.get("value").cloned().unwrap_or(Value::Null));
+            Ok(AgentToolResult::text("echoed"))
+        }
+    }
+
     #[tokio::test]
     async fn prepare_arguments_runs_before_validation_like_upstream() {
         let registration = register_faux_provider(None);
@@ -1299,6 +1344,55 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
         );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn before_tool_call_mutated_args_execute_without_revalidation_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "hello" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.before_tool_call = Some(Arc::new(|context: BeforeToolCallContext, _token| {
+            Box::pin(async move {
+                context.args.lock().unwrap()["value"] = json!(123);
+                Ok(None)
+            })
+        }));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(MutatedArgsTool {
+                executed: Arc::clone(&executed),
+            })],
+        };
+        let (_events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo something")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*executed.lock().unwrap(), [json!(123)]);
         registration.unregister();
     }
 
@@ -1801,5 +1895,209 @@ mod tests {
                 .iter()
                 .any(|message| user_text_value(message) == Some("follow up"))
         );
+    }
+
+    #[tokio::test]
+    async fn continues_when_not_all_parallel_tool_results_terminate_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "first" }),
+                        Some("tool-1".to_string()),
+                    ),
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "second" }),
+                        Some("tool-2".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("continued", None),
+        ]);
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.after_tool_call = Some(Arc::new(|context: AfterToolCallContext, _token| {
+            Box::pin(async move {
+                Ok(Some(AfterToolCallResult {
+                    terminate: Some(context.tool_call.id == "tool-1"),
+                    ..AfterToolCallResult::default()
+                }))
+            })
+        }));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
+        };
+        let (_events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("echo both")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, Message::Assistant(_)))
+                .count(),
+            2
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn after_tool_call_can_mark_batch_terminating_like_upstream() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "stop" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("should not be reached", None),
+        ]);
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.after_tool_call = Some(Arc::new(|_context: AfterToolCallContext, _token| {
+            Box::pin(async {
+                Ok(Some(AfterToolCallResult {
+                    terminate: Some(true),
+                    ..AfterToolCallResult::default()
+                }))
+            })
+        }));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(echo_tool(Arc::new(StdMutex::new(Vec::new()))))],
+        };
+        let (_events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("echo once")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, Message::Assistant(_)))
+                .count(),
+            1
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn loop_continue_validation_and_existing_context_events_match_upstream() {
+        let (_events, emit) = collect_events();
+        let empty_result = run_agent_loop_continue(
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            AgentLoopConfig::new(Model::default()),
+            emit,
+            None,
+            Some(immediate_stream_fn("unused")),
+        )
+        .await;
+        assert!(matches!(
+            empty_result,
+            Err(crate::AgentError::NoMessagesToContinue)
+        ));
+
+        let (_events, emit) = collect_events();
+        let assistant_result = run_agent_loop_continue(
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: vec![Message::Assistant(assistant_text_message(
+                    &Model::default(),
+                    "assistant tail",
+                ))],
+                tools: Vec::new(),
+            },
+            AgentLoopConfig::new(Model::default()),
+            emit,
+            None,
+            Some(immediate_stream_fn("unused")),
+        )
+        .await;
+        assert!(matches!(
+            assistant_result,
+            Err(crate::AgentError::CannotContinueFromAssistant)
+        ));
+
+        let (events, emit) = collect_events();
+        run_agent_loop_continue(
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: vec![user_text("existing")],
+                tools: Vec::new(),
+            },
+            AgentLoopConfig::new(Model {
+                id: "test-model".to_string(),
+                api: "test".to_string(),
+                provider: "test".to_string(),
+                ..Default::default()
+            }),
+            emit,
+            None,
+            Some(immediate_stream_fn("continued")),
+        )
+        .await
+        .expect("continue succeeds");
+        assert!(!events.lock().unwrap().iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageStart { message }
+                    if user_text_value(message) == Some("existing")
+            )
+        }));
+
+        let (_events, emit) = collect_events();
+        run_agent_loop_continue(
+            AgentContext {
+                system_prompt: Some(String::new()),
+                messages: vec![Message::Custom(json!({ "kind": "ui" }))],
+                tools: Vec::new(),
+            },
+            AgentLoopConfig::new(Model {
+                id: "test-model".to_string(),
+                api: "test".to_string(),
+                provider: "test".to_string(),
+                ..Default::default()
+            }),
+            emit,
+            None,
+            Some(immediate_stream_fn("custom tail")),
+        )
+        .await
+        .expect("custom tail continue succeeds");
     }
 }
