@@ -33,18 +33,6 @@ pub struct OpenAIResponsesOptions {
     pub reasoning_effort: Option<ModelThinkingLevel>,
     pub reasoning_summary: Option<Option<String>>,
     pub service_tier: Option<String>,
-    pub request_url: Option<String>,
-    pub request_model: Option<String>,
-    pub payload_override: Option<Value>,
-    pub include_store: Option<bool>,
-    pub auth_header: OpenAIResponsesAuthHeader,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum OpenAIResponsesAuthHeader {
-    #[default]
-    Bearer,
-    ApiKey,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,14 +159,11 @@ async fn run_stream(
     };
     let compat = get_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
-    let mut payload = if let Some(payload_override) = options.payload_override.clone() {
-        payload_override
-    } else {
+    let mut payload =
         match try_build_responses_payload(&model, &context, &options, &compat, cache_retention) {
             Ok(payload) => payload,
             Err(error) => return Err(StreamFailure::new(output, error)),
-        }
-    };
+        };
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -187,13 +172,9 @@ async fn run_stream(
         }
     }
 
-    let request_url = if let Some(request_url) = options.request_url.clone() {
-        request_url
-    } else {
-        match request_base_url(&model) {
-            Ok(base_url) => format!("{}/responses", trim_end_slash(&base_url)),
-            Err(error) => return Err(StreamFailure::new(output, error)),
-        }
+    let request_url = match request_base_url(&model) {
+        Ok(base_url) => format!("{}/responses", trim_end_slash(&base_url)),
+        Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let request_headers = match headers(
         &model,
@@ -202,7 +183,6 @@ async fn run_stream(
         &api_key,
         &compat,
         cache_retention,
-        options.auth_header,
     ) {
         Ok(headers) => headers,
         Err(error) => return Err(StreamFailure::new(output, error)),
@@ -738,14 +718,12 @@ fn try_build_responses_payload(
         true,
     )?;
     let mut payload = json!({
-        "model": options.request_model.as_deref().unwrap_or(&model.id),
+        "model": model.id,
         "input": messages,
         "stream": true
     });
     let object = payload.as_object_mut().expect("payload object");
-    if options.include_store.unwrap_or(true) {
-        object.insert("store".to_string(), json!(false));
-    }
+    object.insert("store".to_string(), json!(false));
     if let Some(max_tokens) = options.base.max_tokens.filter(|max_tokens| *max_tokens > 0) {
         object.insert("max_output_tokens".to_string(), json!(max_tokens));
     }
@@ -1168,26 +1146,14 @@ fn headers(
     api_key: &str,
     compat: &ResolvedOpenAIResponsesCompat,
     cache_retention: CacheRetention,
-    auth_header: OpenAIResponsesAuthHeader,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if !api_key.is_empty() {
-        match auth_header {
-            OpenAIResponsesAuthHeader::Bearer => {
-                headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {api_key}"))
-                        .map_err(|e| Error::InvalidHeaderValue("authorization".to_string(), e))?,
-                );
-            }
-            OpenAIResponsesAuthHeader::ApiKey => {
-                headers.insert(
-                    HeaderName::from_static("api-key"),
-                    HeaderValue::from_str(api_key)
-                        .map_err(|e| Error::InvalidHeaderValue("api-key".to_string(), e))?,
-                );
-            }
-        }
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|e| Error::InvalidHeaderValue("authorization".to_string(), e))?,
+        );
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     for (name, value) in &model.headers {
@@ -1618,7 +1584,6 @@ mod tests {
             "test-key",
             &get_compat(&model),
             CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
         )
         .unwrap();
 
@@ -1862,7 +1827,6 @@ mod tests {
             "test-key",
             &compat,
             CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
         )
         .unwrap();
         assert_eq!(
@@ -1885,7 +1849,6 @@ mod tests {
             "test-key",
             &compat,
             CacheRetention::None,
-            OpenAIResponsesAuthHeader::Bearer,
         )
         .unwrap();
         assert!(request_headers.get("session_id").is_none());
@@ -1912,7 +1875,6 @@ mod tests {
             "test-key",
             &get_compat(&model),
             CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
         )
         .unwrap();
 
@@ -1954,7 +1916,6 @@ mod tests {
             "test-key",
             &get_compat(&model),
             CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
         )
         .unwrap();
 
