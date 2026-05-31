@@ -27,7 +27,7 @@ pub use api_registry::{
     ApiProvider, ApiStreamFunction, ApiStreamSimpleFunction, clear_api_providers, get_api_provider,
     get_api_providers, register_api_provider, unregister_api_providers,
 };
-pub use env_api_keys::{api_key_env_vars, find_env_keys, get_env_api_key};
+pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use event_stream::{
     AssistantMessageEventStream, AssistantMessageEventStreamSender,
@@ -84,8 +84,7 @@ pub use stream::{complete, complete_simple, stream, stream_simple};
 pub use types::*;
 pub use utils::diagnostics::{
     AssistantMessageDiagnostic, DiagnosticErrorInfo, append_assistant_message_diagnostic,
-    create_assistant_message_diagnostic, diagnostic_error_from_message, extract_diagnostic_error,
-    format_thrown_value,
+    create_assistant_message_diagnostic, extract_diagnostic_error, format_thrown_value,
 };
 pub use utils::json::{parse_json_with_repair, parse_streaming_json, repair_json};
 pub use utils::overflow::{get_overflow_patterns, is_context_overflow};

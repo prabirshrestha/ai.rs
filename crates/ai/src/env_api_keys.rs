@@ -1,4 +1,4 @@
-pub fn api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
+fn api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
     match provider {
         "github-copilot" => Some(&["COPILOT_GITHUB_TOKEN"]),
         "anthropic" => Some(&["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
