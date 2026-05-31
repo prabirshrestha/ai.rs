@@ -1779,7 +1779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_aborting_before_the_first_chunk() {
+    async fn supports_aborting_before_first_chunk() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("hello", None)]);
         let cancellation_token = CancellationToken::new();
