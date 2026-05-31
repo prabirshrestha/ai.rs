@@ -1163,7 +1163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replaces_and_appends_queued_responses_like_upstream() {
+    async fn can_replace_and_append_queued_responses() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("first", None)]);
         let context = Context {
@@ -1233,7 +1233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_async_response_factories_like_upstream() {
+    async fn supports_async_response_factories() {
         let registration = register_faux_provider(None);
         registration.set_responses([FauxResponseStep::factory(
             |context, options, state, model| async move {
@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_share_cache_across_requests_without_session_id_like_upstream() {
+    async fn does_not_share_cache_across_sessions_or_requests_without_session_id() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message("first", None),
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_multiple_tool_calls_in_one_message_like_upstream() {
+    async fn streams_multiple_tool_calls_in_one_message() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message(
             vec![
@@ -1587,7 +1587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_error_and_aborted_messages_stream_as_terminal_errors_like_upstream() {
+    async fn streams_explicit_assistant_error_and_aborted_messages_as_terminal_errors() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1639,7 +1639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_aborting_before_first_chunk_like_upstream() {
+    async fn supports_aborting_before_the_first_chunk() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("hello", None)]);
         let cancellation_token = CancellationToken::new();
@@ -1730,7 +1730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_aborting_mid_thinking_stream_when_paced_like_upstream() {
+    async fn supports_aborting_mid_thinking_stream_when_paced() {
         let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
             tokens_per_second: Some(100.0),
             token_size: Some(FauxTokenSize {
@@ -1784,7 +1784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_aborting_mid_toolcall_stream_when_paced_like_upstream() {
+    async fn supports_aborting_mid_toolcall_stream_when_paced() {
         let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
             tokens_per_second: Some(100.0),
             token_size: Some(FauxTokenSize {

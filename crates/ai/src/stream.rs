@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_reports_unregistered_provider_like_upstream() {
+    fn stream_reports_unregistered_provider() {
         let model = test_model("missing-api-provider-test");
         let error = match stream(model, Context::default(), None) {
             Ok(_) => panic!("expected missing provider error"),

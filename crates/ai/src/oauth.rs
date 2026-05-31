@@ -1694,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_device_token_response_like_upstream() {
+    fn parses_device_token_response() {
         assert_eq!(
             parse_device_token_response(serde_json::json!({ "access_token": "ghu_refresh" })),
             OAuthDeviceCodePollResult::Complete("ghu_refresh".to_string())
@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_copilot_token_response_like_upstream() {
+    fn parses_copilot_token_response() {
         let token = parse_copilot_token_response(serde_json::json!({
             "token": "tid=test;exp=9999999999",
             "expires_at": 9999999999_u64
@@ -1881,14 +1881,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_matches_upstream() {
+    fn provider_metadata_matches_expected_shape() {
         let provider = github_copilot_oauth_provider();
         assert_eq!(provider.id(), "github-copilot");
         assert_eq!(provider.name(), "GitHub Copilot");
     }
 
     #[test]
-    fn anthropic_provider_metadata_matches_upstream() {
+    fn anthropic_provider_metadata_matches_expected_shape() {
         let provider = anthropic_oauth_provider();
         assert_eq!(provider.id(), "anthropic");
         assert_eq!(provider.name(), "Anthropic (Claude Pro/Max)");

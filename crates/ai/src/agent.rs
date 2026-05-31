@@ -650,13 +650,14 @@ mod tests {
     use crate::agent_types::{AgentTool, AgentToolResult, AgentToolUpdateCallback, user_message};
     use crate::event_stream::create_assistant_message_event_stream;
     use crate::providers::faux::{
-        FauxAssistantMessageOptions, faux_assistant_message, faux_text, faux_tool_call,
-        register_faux_provider,
+        FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep, FauxTokenSize,
+        RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking,
+        faux_tool_call, register_faux_provider,
     };
     use crate::{
         Agent, AgentError, AgentEvent, AgentOptions, AssistantContent, AssistantMessage,
         AssistantMessageEvent, ImageContent, Message, Model, ModelThinkingLevel, StopReason,
-        TextContent, Tool, ToolResultContent,
+        TextContent, Tool, ToolResultContent, ToolResultMessage,
     };
 
     fn text_from_message(message: &Message) -> String {
@@ -801,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_default_state_matches_upstream_shape() {
+    async fn should_create_an_agent_instance_with_default_state() {
         let agent = Agent::default();
         let state = agent.state().await;
 
@@ -817,7 +818,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_custom_initial_state_and_mutators_match_upstream() {
+    async fn should_create_an_agent_instance_with_custom_initial_state_and_update_state_with_mutators()
+     {
         let model = Model {
             id: "custom-model".to_string(),
             api: "openai-completions".to_string(),
@@ -863,7 +865,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_subscribers_settle_before_prompt_and_idle_like_upstream() {
+    async fn should_await_async_subscribers_before_prompt_resolves_and_wait_for_idle_should_wait_for_async_subscribers()
+     {
         let agent = Arc::new(Agent::new(AgentOptions {
             stream_fn: Some(immediate_stream_fn("ok")),
             ..AgentOptions::default()
@@ -915,7 +918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribers_receive_active_cancellation_token_like_upstream() {
+    async fn should_pass_the_active_abort_signal_to_subscribers() {
         let agent = Arc::new(Agent::new(AgentOptions {
             stream_fn: Some(abortable_stream_fn()),
             ..AgentOptions::default()
@@ -957,7 +960,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn already_processing_errors_match_upstream_paths() {
+    async fn emits_full_lifecycle_events_for_thrown_run_failures() {
+        let agent = Agent::new(AgentOptions {
+            stream_fn: Some(Arc::new(|_model, _context, _options| {
+                async move { Err(crate::Error::Validation("provider exploded".to_string())) }
+                    .boxed()
+            })),
+            ..AgentOptions::default()
+        });
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        agent
+            .subscribe(Arc::new({
+                let events = Arc::clone(&events);
+                move |event, _token| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(match event {
+                            AgentEvent::AgentStart => "agent_start",
+                            AgentEvent::TurnStart => "turn_start",
+                            AgentEvent::MessageStart { .. } => "message_start",
+                            AgentEvent::MessageEnd { .. } => "message_end",
+                            AgentEvent::TurnEnd { .. } => "turn_end",
+                            AgentEvent::AgentEnd { .. } => "agent_end",
+                            AgentEvent::MessageUpdate { .. } => "message_update",
+                            AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+                            AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                        });
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        agent
+            .prompt_text("hello", Vec::new())
+            .await
+            .expect("failure is emitted as assistant error");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "agent_start",
+                "turn_start",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "turn_end",
+                "agent_end",
+            ]
+        );
+        let state = agent.state().await;
+        let Some(Message::Assistant(last_message)) = state.messages.last() else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(last_message.stop_reason, StopReason::Error);
+        assert_eq!(
+            last_message.error_message.as_deref(),
+            Some("provider exploded")
+        );
+        assert_eq!(state.error_message.as_deref(), Some("provider exploded"));
+    }
+
+    #[tokio::test]
+    async fn should_throw_when_prompt_or_continue_called_while_streaming() {
         let agent = Arc::new(Agent::new(AgentOptions {
             stream_fn: Some(abortable_stream_fn()),
             ..AgentOptions::default()
@@ -983,7 +1051,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_uses_queued_messages_from_assistant_tail_like_upstream() {
+    async fn continue_should_process_queued_follow_up_messages_after_an_assistant_turn_and_keep_one_at_a_time_steering_semantics_from_assistant_tail()
+     {
         let counter = Arc::new(AtomicUsize::new(0));
         let agent = Agent::new(AgentOptions {
             initial_state: AgentState {
@@ -1046,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_session_id_to_stream_fn_options_like_upstream() {
+    async fn forwards_session_id_to_stream_fn_options() {
         let received_session_id = Arc::new(StdMutex::new(None));
         let stream_fn: StreamFn = Arc::new({
             let received_session_id = Arc::clone(&received_session_id);
@@ -1083,7 +1152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_handles_basic_text_prompt_like_upstream() {
+    async fn handles_a_basic_text_prompt() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("4", None)]);
         let agent = Agent::new(AgentOptions {
@@ -1110,7 +1179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_executes_tools_and_tracks_pending_tool_calls_like_upstream() {
+    async fn executes_tools_and_tracks_pending_tool_calls() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1194,6 +1263,345 @@ mod tests {
                 ("tool_execution_end", Vec::<String>::new()),
             ]
         );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn handles_abort_during_streaming() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            tokens_per_second: Some(20.0),
+            token_size: Some(FauxTokenSize {
+                min: Some(2),
+                max: Some(2),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen",
+            None,
+        )]);
+        let agent = Arc::new(Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant.".to_string(),
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        }));
+
+        let prompt = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move {
+                agent
+                    .prompt_text("Count slowly from 1 to 20.", Vec::new())
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        agent.abort().await;
+        prompt.await.unwrap().expect("aborted run settles");
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        let Some(Message::Assistant(last_message)) = state.messages.last() else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(last_message.stop_reason, StopReason::Aborted);
+        assert!(last_message.error_message.is_some());
+        assert_eq!(state.error_message, last_message.error_message);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn emits_lifecycle_updates_while_streaming() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSize {
+                min: Some(1),
+                max: Some(1),
+            }),
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message("1 2 3 4 5", None)]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant.".to_string(),
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        agent
+            .subscribe(Arc::new({
+                let events = Arc::clone(&events);
+                move |event, _token| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(match event {
+                            AgentEvent::AgentStart => "agent_start",
+                            AgentEvent::TurnStart => "turn_start",
+                            AgentEvent::MessageStart { .. } => "message_start",
+                            AgentEvent::MessageUpdate { .. } => "message_update",
+                            AgentEvent::MessageEnd { .. } => "message_end",
+                            AgentEvent::TurnEnd { .. } => "turn_end",
+                            AgentEvent::AgentEnd { .. } => "agent_end",
+                            AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+                            AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                        });
+                        Ok(())
+                    }
+                    .boxed()
+                }
+            }))
+            .await;
+
+        agent
+            .prompt_text("Count from 1 to 5.", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        {
+            let events = events.lock().unwrap();
+            assert!(events.contains(&"agent_start"));
+            assert!(events.contains(&"turn_start"));
+            assert!(events.contains(&"message_start"));
+            assert!(events.contains(&"message_update"));
+            assert!(events.contains(&"message_end"));
+            assert!(events.contains(&"turn_end"));
+            assert!(events.contains(&"agent_end"));
+            assert!(
+                events.iter().position(|event| *event == "agent_start")
+                    < events.iter().position(|event| *event == "message_start")
+            );
+            assert!(
+                events.iter().position(|event| *event == "message_start")
+                    < events.iter().position(|event| *event == "message_end")
+            );
+            assert!(
+                events.iter().position(|event| *event == "message_end")
+                    < events.iter().rposition(|event| *event == "agent_end")
+            );
+        }
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        assert_eq!(state.messages.len(), 2);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn maintains_context_across_multiple_turns() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            FauxResponseStep::from(faux_assistant_message("Nice to meet you, Alice.", None)),
+            FauxResponseStep::factory(|context, _options, _state, _model| async move {
+                let has_alice = context.messages.iter().any(|message| match message {
+                    Message::User(user) => match &user.content {
+                        crate::UserMessageContent::Text(text) => text.contains("Alice"),
+                        crate::UserMessageContent::Parts(parts) => parts.iter().any(|part| {
+                            matches!(part, crate::UserContent::Text(text) if text.text.contains("Alice"))
+                        }),
+                    },
+                    _ => false,
+                });
+                Ok(faux_assistant_message(
+                    if has_alice {
+                        "Your name is Alice."
+                    } else {
+                        "I do not know your name."
+                    },
+                    None,
+                ))
+            }),
+        ]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant.".to_string(),
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text("My name is Alice.", Vec::new())
+            .await
+            .expect("first prompt succeeds");
+        assert_eq!(agent.state().await.messages.len(), 2);
+
+        agent
+            .prompt_text("What is my name?", Vec::new())
+            .await
+            .expect("second prompt succeeds");
+
+        let state = agent.state().await;
+        assert_eq!(state.messages.len(), 4);
+        assert!(
+            text_from_message(&state.messages[3])
+                .to_lowercase()
+                .contains("alice")
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn preserves_thinking_content_blocks() {
+        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+            models: vec![FauxModelDefinition {
+                id: "faux-reasoning".to_string(),
+                reasoning: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        registration.set_responses([faux_assistant_message(
+            vec![faux_thinking("step by step"), faux_text("4")],
+            None,
+        )]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant.".to_string(),
+                model: registration.get_model(),
+                reasoning_level: ModelThinkingLevel::Low,
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent
+            .prompt_text("What is 2+2?", Vec::new())
+            .await
+            .expect("prompt succeeds");
+
+        let state = agent.state().await;
+        let Message::Assistant(assistant) = &state.messages[1] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(
+            assistant.content,
+            vec![faux_thinking("step by step"), faux_text("4")]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn continue_throws_when_no_messages_in_context() {
+        let registration = register_faux_provider(None);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "Test".to_string(),
+                model: registration.get_model(),
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        assert!(matches!(
+            agent.continue_run().await,
+            Err(AgentError::NoMessagesToContinue)
+        ));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn continue_throws_when_last_message_is_assistant() {
+        let registration = register_faux_provider(None);
+        let model = registration.get_model();
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "Test".to_string(),
+                model: model.clone(),
+                messages: vec![Message::Assistant(assistant_text_message(&model, "Hello"))],
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        assert!(matches!(
+            agent.continue_run().await,
+            Err(AgentError::CannotContinueFromAssistant)
+        ));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn continues_and_gets_a_response_when_last_message_is_user() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message("HELLO WORLD", None)]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt: "You are a helpful assistant. Follow instructions exactly."
+                    .to_string(),
+                model: registration.get_model(),
+                messages: vec![user_message("Say exactly: HELLO WORLD", Vec::new())],
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent.continue_run().await.expect("continue succeeds");
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        assert_eq!(state.messages.len(), 2);
+        assert!(matches!(state.messages[0], Message::User(_)));
+        assert!(matches!(state.messages[1], Message::Assistant(_)));
+        assert!(
+            text_from_message(&state.messages[1])
+                .to_uppercase()
+                .contains("HELLO WORLD")
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn continues_and_processes_tool_results() {
+        let registration = register_faux_provider(None);
+        let model = registration.get_model();
+        registration.set_responses([faux_assistant_message("The answer is 8.", None)]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentState {
+                system_prompt:
+                    "You are a helpful assistant. After getting a calculation result, state the answer clearly."
+                        .to_string(),
+                model: model.clone(),
+                tools: vec![Arc::new(CalculateTool)],
+                messages: vec![
+                    user_message("What is 5 + 3?", Vec::new()),
+                    Message::Assistant({
+                        let mut assistant = assistant_text_message(&model, "Let me calculate that.");
+                        assistant.stop_reason = StopReason::ToolUse;
+                        assistant.content.push(faux_tool_call(
+                            "calculate",
+                            json!({ "expression": "5 + 3" }),
+                            Some("calc-1".to_string()),
+                        ));
+                        assistant
+                    }),
+                    Message::ToolResult(ToolResultMessage {
+                        tool_call_id: "calc-1".to_string(),
+                        tool_name: "calculate".to_string(),
+                        content: vec![ToolResultContent::text("5 + 3 = 8")],
+                        details: None,
+                        is_error: false,
+                        timestamp: crate::utils::time::now_millis(),
+                    }),
+                ],
+                ..AgentState::default()
+            },
+            ..AgentOptions::default()
+        });
+
+        agent.continue_run().await.expect("continue succeeds");
+
+        let state = agent.state().await;
+        assert!(!state.is_streaming);
+        assert!(state.messages.len() >= 4);
+        let Some(last_message) = state.messages.last() else {
+            panic!("expected last message");
+        };
+        assert!(matches!(last_message, Message::Assistant(_)));
+        assert!(text_from_message(last_message).contains('8'));
         registration.unregister();
     }
 

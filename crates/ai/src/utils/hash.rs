@@ -35,7 +35,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_upstream_short_hash() {
+    fn short_hash_matches_expected_value() {
         assert_eq!(short_hash(""), "k4n83c7h0j2b");
         assert_eq!(short_hash("hello"), "1h6qa0qrowduu");
         assert_eq!(short_hash("foreign-tool-call-id"), "1r12n89219uo");

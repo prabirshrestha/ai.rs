@@ -1181,6 +1181,63 @@ mod tests {
         }
     }
 
+    struct NamedProbeTool {
+        name: &'static str,
+        starts: Arc<StdMutex<Vec<String>>>,
+        slow_finished: Arc<StdMutex<bool>>,
+        fast_started_before_slow_finished: Arc<StdMutex<bool>>,
+        execution_mode: Option<ToolExecutionMode>,
+    }
+
+    #[async_trait]
+    impl AgentTool for NamedProbeTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: self.name.to_string(),
+                description: format!("{} tool", self.name),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]
+                }),
+            }
+        }
+
+        fn label(&self) -> &str {
+            self.name
+        }
+
+        fn execution_mode(&self) -> Option<ToolExecutionMode> {
+            self.execution_mode
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            let value = args
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            self.starts
+                .lock()
+                .unwrap()
+                .push(format!("{}:{value}", self.name));
+            if self.name == "slow" {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                *self.slow_finished.lock().unwrap() = true;
+            } else if self.name == "fast" && !*self.slow_finished.lock().unwrap() {
+                *self.fast_started_before_slow_finished.lock().unwrap() = true;
+            }
+            Ok(AgentToolResult::text(format!("{}: {value}", self.name)))
+        }
+    }
+
     fn tool_result_message_ids(events: &[AgentEvent]) -> Vec<&str> {
         events
             .iter()
@@ -1233,7 +1290,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_arguments_runs_before_validation_like_upstream() {
+    async fn should_emit_events_with_agent_message_types() {
+        let (events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("Hello")],
+            AgentContext {
+                system_prompt: Some("You are helpful.".to_string()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            AgentLoopConfig::new(Model {
+                id: "test-model".to_string(),
+                api: "test".to_string(),
+                provider: "test".to_string(),
+                ..Default::default()
+            }),
+            emit,
+            None,
+            Some(immediate_stream_fn("Hi there!")),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], Message::User(_)));
+        assert!(matches!(messages[1], Message::Assistant(_)));
+
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::AgentStart))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnStart))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::MessageStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::MessageEnd { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnEnd { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::AgentEnd { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_handle_custom_message_types_via_convert_to_llm() {
+        let converted_messages = Arc::new(StdMutex::new(Vec::<Message>::new()));
+        let custom_seen = Arc::new(StdMutex::new(false));
+        let mut config = AgentLoopConfig::new(Model {
+            id: "test-model".to_string(),
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            ..Default::default()
+        });
+        config.convert_to_llm = Some(Arc::new({
+            let converted_messages = Arc::clone(&converted_messages);
+            let custom_seen = Arc::clone(&custom_seen);
+            move |messages| {
+                let converted_messages = Arc::clone(&converted_messages);
+                let custom_seen = Arc::clone(&custom_seen);
+                async move {
+                    *custom_seen.lock().unwrap() = messages
+                        .iter()
+                        .any(|message| matches!(message, Message::Custom(_)));
+                    let filtered = messages
+                        .into_iter()
+                        .filter(|message| message.is_llm_message())
+                        .collect::<Vec<_>>();
+                    *converted_messages.lock().unwrap() = filtered.clone();
+                    filtered
+                }
+                .boxed()
+            }
+        }));
+        let (_events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("Hello")],
+            AgentContext {
+                system_prompt: Some("You are helpful.".to_string()),
+                messages: vec![Message::Custom(json!({
+                    "role": "notification",
+                    "text": "This is a notification",
+                    "timestamp": 0
+                }))],
+                tools: Vec::new(),
+            },
+            config,
+            emit,
+            None,
+            Some(immediate_stream_fn("Response")),
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert!(*custom_seen.lock().unwrap());
+        let converted_messages = converted_messages.lock().unwrap();
+        assert_eq!(converted_messages.len(), 1);
+        assert!(matches!(converted_messages[0], Message::User(_)));
+    }
+
+    #[tokio::test]
+    async fn should_prepare_tool_arguments_for_validation() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1278,7 +1453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_tool_call_blocks_without_executing_like_upstream() {
+    async fn before_tool_call_blocks_without_executing() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1348,7 +1523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_tool_call_mutated_args_execute_without_revalidation_like_upstream() {
+    async fn should_execute_mutated_before_tool_call_args_without_revalidation() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1469,7 +1644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transform_context_runs_before_convert_to_llm_like_upstream() {
+    async fn should_apply_transform_context_before_convert_to_llm() {
         let mut config = AgentLoopConfig::new(Model {
             id: "test-model".to_string(),
             api: "test".to_string(),
@@ -1559,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn steering_messages_inject_after_all_tool_calls_complete_like_upstream() {
+    async fn should_inject_queued_messages_after_all_tool_calls_complete() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1644,7 +1819,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_execution_mode_sequential_overrides_parallel_config_like_upstream() {
+    async fn should_force_sequential_execution_when_a_tool_has_execution_mode_sequential_even_with_default_parallel_config()
+     {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1706,7 +1882,133 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_next_turn_snapshot_is_used_before_continuing_like_upstream() {
+    async fn should_force_sequential_execution_when_one_of_multiple_tools_has_execution_mode_sequential()
+     {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call("slow", json!({ "value": "a" }), Some("tool-1".to_string())),
+                    faux_tool_call("fast", json!({ "value": "b" }), Some("tool-2".to_string())),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let starts = Arc::new(StdMutex::new(Vec::new()));
+        let slow_finished = Arc::new(StdMutex::new(false));
+        let fast_started_before_slow_finished = Arc::new(StdMutex::new(false));
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![
+                Arc::new(NamedProbeTool {
+                    name: "slow",
+                    starts: Arc::clone(&starts),
+                    slow_finished: Arc::clone(&slow_finished),
+                    fast_started_before_slow_finished: Arc::clone(
+                        &fast_started_before_slow_finished,
+                    ),
+                    execution_mode: Some(ToolExecutionMode::Sequential),
+                }),
+                Arc::new(NamedProbeTool {
+                    name: "fast",
+                    starts: Arc::clone(&starts),
+                    slow_finished: Arc::clone(&slow_finished),
+                    fast_started_before_slow_finished: Arc::clone(
+                        &fast_started_before_slow_finished,
+                    ),
+                    execution_mode: None,
+                }),
+            ],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("run both")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*starts.lock().unwrap(), ["slow:a", "fast:b"]);
+        assert!(!*fast_started_before_slow_finished.lock().unwrap());
+        assert_eq!(
+            tool_result_message_ids(&events.lock().unwrap()),
+            ["tool-1", "tool-2"]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn should_allow_parallel_execution_when_all_tools_have_execution_mode_parallel() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "first" }),
+                        Some("tool-1".to_string()),
+                    ),
+                    faux_tool_call(
+                        "echo",
+                        json!({ "value": "second" }),
+                        Some("tool-2".to_string()),
+                    ),
+                ],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let context = AgentContext {
+            system_prompt: Some(String::new()),
+            messages: Vec::new(),
+            tools: vec![Arc::new(EchoTool {
+                executed: Arc::new(StdMutex::new(Vec::new())),
+                delay_first: true,
+                execution_mode: Some(ToolExecutionMode::Parallel),
+                terminate: false,
+            })],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("echo both")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        let events = events.lock().unwrap();
+        let tool_execution_end_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_execution_end_ids, ["tool-2", "tool-1"]);
+        assert_eq!(tool_result_message_ids(&events), ["tool-1", "tool-2"]);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn should_use_prepare_next_turn_snapshot_before_continuing() {
         let calls = Arc::new(AtomicUsize::new(0));
         let streamed_contexts = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
         let stream_fn: StreamFn = Arc::new({
@@ -1806,7 +2108,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_and_terminate_controls_exit_before_more_messages_like_upstream() {
+    async fn should_stop_after_the_current_turn_and_after_a_tool_batch_when_every_tool_result_sets_terminate_true()
+     {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1898,7 +2201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continues_when_not_all_parallel_tool_results_terminate_like_upstream() {
+    async fn should_continue_after_parallel_tool_calls_when_not_all_tool_results_terminate() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -1959,7 +2262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_tool_call_can_mark_batch_terminating_like_upstream() {
+    async fn should_allow_after_tool_call_to_mark_a_tool_batch_as_terminating() {
         let registration = register_faux_provider(None);
         registration.set_responses([
             faux_assistant_message(
@@ -2013,7 +2316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_continue_validation_and_existing_context_events_match_upstream() {
+    async fn agent_loop_continue_validation_and_existing_context_events() {
         let (_events, emit) = collect_events();
         let empty_result = run_agent_loop_continue(
             AgentContext {

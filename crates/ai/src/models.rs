@@ -214,7 +214,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_registry_matches_upstream_catalog_size() {
+    fn generated_registry_matches_catalog_size() {
         let registry = builtin_models();
         assert!(
             !registry
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_provider_order_matches_upstream_registry_order() {
+    fn generated_provider_order_matches_registry_order() {
         let registry = builtin_models();
         let providers = registry.get_providers();
 
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_model_order_matches_upstream_registry_order() {
+    fn generated_model_order_matches_registry_order() {
         let registry = builtin_models();
         let openai_ids = registry
             .get_models("openai")
