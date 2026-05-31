@@ -423,19 +423,20 @@ let response = complete_simple(
 
 Use `stream_simple` and `complete_simple` for normal application code. They take
 `SimpleStreamOptions`, resolve the model's API, and map common options such as
-reasoning, cache retention, service tier, API key, cancellation, payload hooks,
-and retry settings onto the selected provider.
+reasoning, cache retention, API key, cancellation, payload hooks, and retry
+settings onto the selected provider.
 
-Use `stream` and `complete` when you need provider-specific options beyond the
-common `SimpleStreamOptions` shape:
+Use `stream` and `complete` when you need the full `StreamOptions` shape. For
+parity with upstream's provider-specific option casts, place provider-specific
+fields in `StreamOptions::provider_options` using the upstream camelCase names,
+such as OpenAI Chat Completions `toolChoice`, OpenAI Responses `serviceTier`,
+or Anthropic `thinkingDisplay`.
 
-- `OpenAICompletionsOptions`
-- `OpenAIResponsesOptions`
-- `AnthropicOptions`
+Provider modules also expose typed provider options for direct provider calls:
 
-For parity with upstream's cast-based escape hatch, `stream_simple` also checks
-`StreamOptions::provider_options` for provider-specific fields that upstream
-accepts through casts, such as OpenAI Chat Completions `toolChoice`.
+- `providers::openai_completions::OpenAICompletionsOptions`
+- `providers::openai_responses::OpenAIResponsesOptions`
+- `providers::anthropic::AnthropicOptions`
 
 ### Streaming Thinking Content
 
@@ -532,7 +533,7 @@ let model = get_model("anthropic", "claude-sonnet-4-5");
 ### Custom Models
 
 ```rust
-use ai::{register_model, Model, ModelCost, ModelInput};
+use ai::{stream_simple, Context, Message, Model, ModelCost, ModelInput, SimpleStreamOptions};
 
 let model = Model {
     id: "local-model".to_string(),
@@ -545,23 +546,33 @@ let model = Model {
     ..Default::default()
 };
 
-register_model("local", model);
+let stream = stream_simple(
+    model,
+    Context {
+        messages: vec![Message::user_text("What is the capital of France?")],
+        ..Default::default()
+    },
+    Some(SimpleStreamOptions::default()),
+)?;
 ```
 
 ### OpenAI Compatibility Settings
 
 OpenAI-compatible providers can require small payload differences. The Rust port
-keeps the compatibility metadata on `ModelCompat` and resolves it through
-`get_openai_completions_compat` and `get_openai_responses_compat`.
+keeps the compatibility metadata on `ModelCompat`. Set `model.compat` on custom
+models when the target OpenAI-compatible endpoint needs payload differences such
+as non-standard reasoning, cache-control, max-token, or tool-result behavior.
 
 ### Thread Safety
 
-The model, API, and OAuth registries are global registries backed by
-`OnceLock` plus `RwLock`. Lookup functions such as `get_model` take a read lock
-and return cloned values, and registration functions such as `register_model`
-take a write lock. They are safe to call from multiple threads, but registration
-is global mutable state, so applications should register custom models during
-startup rather than concurrently with request dispatch.
+The built-in model catalog is loaded once and exposed through clone-returning
+lookup functions such as `get_model`, `get_models`, and `get_providers`.
+
+The API and OAuth registries are global registries backed by `OnceLock` plus
+`RwLock`. Lookup and registration functions are safe to call from multiple
+threads, but registration is global mutable state, so applications should
+register custom API/OAuth providers during startup rather than concurrently with
+request dispatch.
 
 ### Type Safety
 
