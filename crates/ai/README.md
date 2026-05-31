@@ -208,7 +208,7 @@ use ai::{
 async fn main() -> Result<()> {
     let model = get_model("openai", "gpt-4o-mini").expect("model");
     let context = AgentContext {
-        system_prompt: Some("You are a concise assistant.".to_string()),
+        system_prompt: "You are a concise assistant.".to_string(),
         messages: Vec::new(),
         tools: Vec::new(),
     };
@@ -242,7 +242,7 @@ Core loop hooks track upstream `pi` semantics:
   `terminate`; a tool batch terminates only when every finalized result has
   `terminate = true`.
 - On `AgentLoopConfig`, `prepare_next_turn` can replace the next context,
-  model, or reasoning level before steering/follow-up polling starts another
+  model, or thinking level before steering/follow-up polling starts another
   provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
   `Agent.prepareNextTurn`: it receives only the active cancellation token and
   can return the same turn update.
@@ -426,11 +426,19 @@ Use `stream_simple` and `complete_simple` for normal application code. They take
 reasoning, cache retention, API key, cancellation, payload hooks, and retry
 settings onto the selected provider.
 
-Use `stream` and `complete` when you need the full `StreamOptions` shape. For
+Use `stream` and `complete` when you need the non-simple `StreamOptions` shape.
+This maps to upstream Pi's lower-level `stream` / `complete` entry points. For
 parity with upstream's provider-specific option casts, place provider-specific
 fields in `StreamOptions::provider_options` using the upstream camelCase names,
 such as OpenAI Chat Completions `toolChoice`, OpenAI Responses `serviceTier`,
 or Anthropic `thinkingDisplay`.
+
+In short:
+
+- `stream_simple` / `complete_simple`: preferred app-level API, equivalent to
+  upstream `streamSimple` / `completeSimple`.
+- `stream` / `complete`: lower-level API for direct `StreamOptions` and
+  provider-specific option forwarding.
 
 The crate root also exports the scoped direct provider stream functions,
 matching upstream `register-builtins` exports:
