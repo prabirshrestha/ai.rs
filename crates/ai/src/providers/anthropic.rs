@@ -1,10 +1,7 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use futures::{StreamExt, pin_mut};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
@@ -69,7 +66,6 @@ impl AnthropicThinkingDisplay {
 #[derive(Clone)]
 pub struct AnthropicOptions {
     pub base: StreamOptions,
-    pub client: Option<Arc<dyn AnthropicClient>>,
     pub thinking_enabled: Option<bool>,
     pub thinking_budget_tokens: Option<u32>,
     pub effort: Option<AnthropicEffort>,
@@ -82,7 +78,6 @@ impl Default for AnthropicOptions {
     fn default() -> Self {
         Self {
             base: StreamOptions::default(),
-            client: None,
             thinking_enabled: None,
             thinking_budget_tokens: None,
             effort: None,
@@ -91,20 +86,6 @@ impl Default for AnthropicOptions {
             tool_choice: None,
         }
     }
-}
-
-#[derive(Clone)]
-pub struct AnthropicClientRequest {
-    pub url: String,
-    pub headers: HeaderMap,
-    pub payload: Value,
-    pub model: Model,
-    pub options: StreamOptions,
-}
-
-#[async_trait]
-pub trait AnthropicClient: Send + Sync {
-    async fn send_stream(&self, request: AnthropicClientRequest) -> Result<reqwest::Response>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -247,13 +228,12 @@ async fn run_stream(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    if api_key.is_none() && options.client.is_none() {
+    let Some(api_key) = api_key else {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
         ));
-    }
-    let api_key = api_key.unwrap_or_default();
+    };
     let is_oauth = is_oauth_token(&api_key);
     let compat = get_anthropic_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
@@ -286,26 +266,14 @@ async fn run_stream(
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
     let client = reqwest::Client::new();
-    let response_result = if let Some(client) = options.client.clone() {
+    let response_result = send_with_retries(&options.base, || {
         client
-            .send_stream(AnthropicClientRequest {
-                url: request_url,
-                headers: request_headers,
-                payload,
-                model: model.clone(),
-                options: options.base.clone(),
-            })
-            .await
-    } else {
-        send_with_retries(&options.base, || {
-            client
-                .post(request_url.as_str())
-                .headers(request_headers.clone())
-                .json(&payload)
-                .timeout(request_timeout(options.base.timeout_ms))
-        })
-        .await
-    };
+            .post(request_url.as_str())
+            .headers(request_headers.clone())
+            .json(&payload)
+            .timeout(request_timeout(options.base.timeout_ms))
+    })
+    .await;
     let response = match response_result {
         Ok(response) => response,
         Err(Error::Cancelled) => return Err(StreamFailure::cancelled(output)),

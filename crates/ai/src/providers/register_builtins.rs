@@ -145,7 +145,6 @@ fn anthropic_options_from_stream_options(options: StreamOptions) -> anthropic::A
     let tool_choice = provider_option(&options, &["toolChoice"]).cloned();
     anthropic::AnthropicOptions {
         base: options,
-        client: None,
         thinking_enabled,
         thinking_budget_tokens,
         effort,

@@ -50,9 +50,9 @@ pub use oauth::{
     refresh_oauth_token, register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
 pub use providers::anthropic::{
-    AnthropicClient, AnthropicClientRequest, AnthropicEffort, AnthropicOptions,
-    AnthropicThinkingDisplay, ResolvedAnthropicCompat, build_anthropic_payload,
-    convert_messages as convert_anthropic_messages, stream_anthropic, stream_simple_anthropic,
+    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, ResolvedAnthropicCompat,
+    build_anthropic_payload, convert_messages as convert_anthropic_messages, stream_anthropic,
+    stream_simple_anthropic,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
