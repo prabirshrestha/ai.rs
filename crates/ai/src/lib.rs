@@ -49,31 +49,15 @@ pub use oauth::{
     poll_oauth_device_code_flow, refresh_anthropic_token, refresh_github_copilot_token,
     refresh_oauth_token, register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
-pub use providers::anthropic::{
-    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, ResolvedAnthropicCompat,
-    build_anthropic_payload, convert_messages as convert_anthropic_messages, stream_anthropic,
-    stream_simple_anthropic,
-};
+pub use providers::anthropic::{AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay};
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
     FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,
     RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
     register_faux_provider,
 };
-pub use providers::github_copilot_headers::{
-    build_copilot_dynamic_headers, has_copilot_vision_input, infer_copilot_initiator,
-};
-pub use providers::openai_completions::{
-    OpenAICompletionsOptions, ResolvedOpenAICompletionsCompat, build_chat_completions_payload,
-    convert_messages as convert_openai_completions_messages,
-    detect_compat as detect_openai_completions_compat, get_compat as get_openai_completions_compat,
-    stream_openai_completions, stream_simple_openai_completions,
-};
-pub use providers::openai_responses::{
-    OpenAIResponsesOptions, ResolvedOpenAIResponsesCompat, build_responses_payload,
-    convert_responses_messages, convert_responses_tools, get_compat as get_openai_responses_compat,
-    stream_openai_responses, stream_simple_openai_responses,
-};
+pub use providers::openai_completions::OpenAICompletionsOptions;
+pub use providers::openai_responses::OpenAIResponsesOptions;
 pub use providers::register_builtins::{register_builtin_api_providers, reset_api_providers};
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
