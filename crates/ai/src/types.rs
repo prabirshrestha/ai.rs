@@ -142,16 +142,6 @@ pub type ResponseHook = Arc<
         + Send
         + Sync,
 >;
-pub type ImagesPayloadHook = Arc<
-    dyn Fn(Value, &ImagesModel) -> Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>
-        + Send
-        + Sync,
->;
-pub type ImagesResponseHook = Arc<
-    dyn Fn(ProviderResponse, &ImagesModel) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-        + Send
-        + Sync,
->;
 
 #[derive(Clone, Default)]
 pub struct StreamOptions {
@@ -179,19 +169,6 @@ pub struct SimpleStreamOptions {
     pub reasoning: Option<ModelThinkingLevel>,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub tool_choice: Option<Value>,
-}
-
-#[derive(Clone, Default)]
-pub struct ImagesOptions {
-    pub cancellation_token: Option<CancellationToken>,
-    pub api_key: Option<String>,
-    pub on_payload: Option<ImagesPayloadHook>,
-    pub on_response: Option<ImagesResponseHook>,
-    pub headers: HashMap<String, String>,
-    pub timeout_ms: Option<u64>,
-    pub max_retries: Option<u32>,
-    pub max_retry_delay_ms: Option<u64>,
-    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -455,66 +432,6 @@ pub struct Context {
     pub tools: Vec<Tool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ImagesContent {
-    #[serde(rename = "text")]
-    Text(TextContent),
-    #[serde(rename = "image")]
-    Image(ImageContent),
-}
-
-impl ImagesContent {
-    pub fn text<T: Into<String>>(text: T) -> Self {
-        Self::Text(TextContent {
-            text: text.into(),
-            text_signature: None,
-        })
-    }
-
-    pub fn image<T: Into<String>, U: Into<String>>(data: T, mime_type: U) -> Self {
-        Self::Image(ImageContent {
-            data: data.into(),
-            mime_type: mime_type.into(),
-        })
-    }
-}
-
-pub type ImagesInputContent = ImagesContent;
-pub type ImagesOutputContent = ImagesContent;
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ImagesContext {
-    #[serde(default)]
-    pub input: Vec<ImagesInputContent>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ImagesStopReason {
-    Stop,
-    Error,
-    Aborted,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssistantImages {
-    pub api: Api,
-    pub provider: Provider,
-    pub model: String,
-    #[serde(default)]
-    pub output: Vec<ImagesOutputContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
-    pub stop_reason: ImagesStopReason,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    pub timestamp: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelInput {
@@ -551,23 +468,6 @@ pub struct Model {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub compat: ModelCompat,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImagesModel {
-    pub id: String,
-    pub name: String,
-    pub api: Api,
-    pub provider: Provider,
-    pub base_url: String,
-    #[serde(default)]
-    pub input: Vec<ModelInput>,
-    #[serde(default)]
-    pub output: Vec<ModelInput>,
-    pub cost: ModelCost,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

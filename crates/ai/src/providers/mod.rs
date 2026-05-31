@@ -1,8 +1,6 @@
 pub mod anthropic;
-pub mod cloudflare;
 pub mod faux;
 pub mod github_copilot_headers;
-pub mod images;
 pub mod openai_completions;
 pub mod openai_prompt_cache;
 pub mod openai_responses;

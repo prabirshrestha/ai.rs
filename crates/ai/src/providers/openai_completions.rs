@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::{calculate_cost, clamp_thinking_level};
-use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -1110,10 +1109,6 @@ pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     let is_moonshot = provider == "moonshotai"
         || provider == "moonshotai-cn"
         || base_url.contains("api.moonshot.");
-    let is_cloudflare_workers_ai =
-        provider == "cloudflare-workers-ai" || base_url.contains("api.cloudflare.com");
-    let is_cloudflare_ai_gateway =
-        provider == "cloudflare-ai-gateway" || base_url.contains("gateway.ai.cloudflare.com");
     let is_non_standard = provider == "cerebras"
         || base_url.contains("cerebras.ai")
         || provider == "xai"
@@ -1124,11 +1119,8 @@ pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         || is_zai
         || is_moonshot
         || provider == "opencode"
-        || base_url.contains("opencode.ai")
-        || is_cloudflare_workers_ai
-        || is_cloudflare_ai_gateway;
-    let use_max_tokens =
-        base_url.contains("chutes.ai") || is_moonshot || is_cloudflare_ai_gateway || is_together;
+        || base_url.contains("opencode.ai");
+    let use_max_tokens = base_url.contains("chutes.ai") || is_moonshot || is_together;
     let is_grok = provider == "xai" || base_url.contains("api.x.ai");
     let is_deep_seek = provider == "deepseek" || base_url.contains("deepseek.com");
     let cache_control_format = if provider == "openrouter" && model.id.starts_with("anthropic/") {
@@ -1140,11 +1132,7 @@ pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     ResolvedOpenAICompletionsCompat {
         supports_store: !is_non_standard,
         supports_developer_role: !is_non_standard,
-        supports_reasoning_effort: !is_grok
-            && !is_zai
-            && !is_moonshot
-            && !is_together
-            && !is_cloudflare_ai_gateway,
+        supports_reasoning_effort: !is_grok && !is_zai && !is_moonshot && !is_together,
         supports_usage_in_streaming: true,
         max_tokens_field: if use_max_tokens {
             MaxTokensField::MaxTokens
@@ -1169,12 +1157,10 @@ pub fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         open_router_routing: None,
         vercel_gateway_routing: None,
         zai_tool_stream: false,
-        supports_strict_mode: !is_moonshot && !is_together && !is_cloudflare_ai_gateway,
+        supports_strict_mode: !is_moonshot && !is_together,
         cache_control_format,
         send_session_affinity_headers: false,
-        supports_long_cache_retention: !(is_together
-            || is_cloudflare_workers_ai
-            || is_cloudflare_ai_gateway),
+        supports_long_cache_retention: !is_together,
     }
 }
 
@@ -1348,8 +1334,7 @@ fn headers(
     cache_retention: CacheRetention,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
-    let is_cloudflare_ai_gateway = model.provider == "cloudflare-ai-gateway";
-    if !api_key.is_empty() && !is_cloudflare_ai_gateway {
+    if !api_key.is_empty() {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {api_key}"))
@@ -1406,13 +1391,6 @@ fn headers(
             .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
         headers.insert(name, value);
     }
-    if !api_key.is_empty() && is_cloudflare_ai_gateway {
-        headers.insert(
-            HeaderName::from_static("cf-aig-authorization"),
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| Error::InvalidHeaderValue("cf-aig-authorization".to_string(), e))?,
-        );
-    }
     Ok(headers)
 }
 
@@ -1428,11 +1406,7 @@ fn trim_end_slash(url: &str) -> &str {
 }
 
 fn request_base_url(model: &Model) -> Result<String> {
-    if is_cloudflare_provider(&model.provider) {
-        resolve_cloudflare_base_url(model)
-    } else {
-        Ok(model.base_url.clone())
-    }
+    Ok(model.base_url.clone())
 }
 
 fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
@@ -1876,42 +1850,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_uses_conservative_fields_for_cloudflare_compat_models() {
-        let mut model = crate::get_model(
-            "cloudflare-ai-gateway",
-            "workers-ai/@cf/moonshotai/kimi-k2.6",
-        )
-        .expect("cloudflare workers kimi");
-        model.base_url = "https://gateway.ai.cloudflare.com/v1/account/gateway/compat".to_string();
-        let context = Context {
-            system_prompt: Some("You are helpful.".to_string()),
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let options = OpenAICompletionsOptions {
-            base: StreamOptions {
-                max_tokens: Some(1234),
-                ..Default::default()
-            },
-            reasoning_effort: Some(ModelThinkingLevel::High),
-            ..Default::default()
-        };
-        let payload = build_chat_completions_payload(
-            &model,
-            &context,
-            &options,
-            &get_compat(&model),
-            CacheRetention::Short,
-        );
-
-        assert_eq!(payload["messages"][0]["role"], json!("system"));
-        assert_eq!(payload["max_tokens"], json!(1234));
-        assert!(payload.get("max_completion_tokens").is_none());
-        assert!(payload.get("reasoning_effort").is_none());
-        assert!(payload.get("store").is_none());
-    }
-
-    #[test]
     fn chat_payload_uses_openrouter_reasoning_object() {
         let mut model = model();
         model.provider = "openrouter".to_string();
@@ -2204,120 +2142,6 @@ mod tests {
         assert!(request_headers.get("session_id").is_none());
         assert!(request_headers.get("x-client-request-id").is_none());
         assert!(request_headers.get("x-session-affinity").is_none());
-    }
-
-    #[test]
-    fn chat_headers_use_cloudflare_ai_gateway_authorization() {
-        let mut model = model();
-        model.provider = "cloudflare-ai-gateway".to_string();
-        let context = Context {
-            system_prompt: None,
-            messages: vec![Message::user_text("hi")],
-            tools: Vec::new(),
-        };
-
-        let headers = headers(
-            &model,
-            &context,
-            &StreamOptions::default(),
-            "test-key",
-            &get_compat(&model),
-            CacheRetention::Short,
-        )
-        .unwrap();
-
-        assert!(headers.get(AUTHORIZATION).is_none());
-        assert_eq!(
-            headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer test-key")
-        );
-    }
-
-    #[test]
-    fn chat_headers_preserve_cloudflare_byok_authorization() {
-        let mut model = model();
-        model.provider = "cloudflare-ai-gateway".to_string();
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let mut options = StreamOptions::default();
-        options.headers.insert(
-            "Authorization".to_string(),
-            "Bearer upstream-token".to_string(),
-        );
-
-        let request_headers = headers(
-            &model,
-            &context,
-            &options,
-            "cf-token",
-            &get_compat(&model),
-            CacheRetention::Short,
-        )
-        .unwrap();
-
-        assert_eq!(
-            request_headers
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer upstream-token")
-        );
-        assert_eq!(
-            request_headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer cf-token")
-        );
-    }
-
-    #[test]
-    fn chat_headers_send_cloudflare_workers_session_affinity() {
-        let mut model = crate::get_model(
-            "cloudflare-ai-gateway",
-            "workers-ai/@cf/moonshotai/kimi-k2.6",
-        )
-        .expect("cloudflare workers kimi");
-        model.base_url = "https://gateway.ai.cloudflare.com/v1/account/gateway/compat".to_string();
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let options = StreamOptions {
-            session_id: Some("session-1".to_string()),
-            ..Default::default()
-        };
-
-        let request_headers = headers(
-            &model,
-            &context,
-            &options,
-            "test-key",
-            &get_compat(&model),
-            CacheRetention::Short,
-        )
-        .unwrap();
-
-        assert_eq!(
-            request_headers
-                .get("session_id")
-                .and_then(|value| value.to_str().ok()),
-            Some("session-1")
-        );
-        assert_eq!(
-            request_headers
-                .get("x-client-request-id")
-                .and_then(|value| value.to_str().ok()),
-            Some("session-1")
-        );
-        assert_eq!(
-            request_headers
-                .get("x-session-affinity")
-                .and_then(|value| value.to_str().ok()),
-            Some("session-1")
-        );
     }
 
     #[test]

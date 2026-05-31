@@ -6,9 +6,6 @@ pub mod api_registry;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
-pub mod image_models;
-pub mod images;
-pub mod images_api_registry;
 pub mod models;
 pub mod oauth;
 pub mod providers;
@@ -36,10 +33,6 @@ pub use event_stream::{
     AssistantMessageEventStream, AssistantMessageEventStreamSender,
     create_assistant_message_event_stream,
 };
-pub use image_models::{
-    get_image_model, get_image_models, get_image_providers, register_image_model,
-};
-pub use images::generate_images;
 pub use models::{
     calculate_cost, clamp_thinking_level, get_model, get_models, get_providers,
     get_supported_thinking_levels, models_are_equal, register_model,

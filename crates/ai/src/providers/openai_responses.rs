@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::{calculate_cost, clamp_thinking_level};
-use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -1172,8 +1171,7 @@ fn headers(
     auth_header: OpenAIResponsesAuthHeader,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
-    let is_cloudflare_ai_gateway = model.provider == "cloudflare-ai-gateway";
-    if !api_key.is_empty() && !is_cloudflare_ai_gateway {
+    if !api_key.is_empty() {
         match auth_header {
             OpenAIResponsesAuthHeader::Bearer => {
                 headers.insert(
@@ -1237,13 +1235,6 @@ fn headers(
             .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
         headers.insert(name, value);
     }
-    if !api_key.is_empty() && is_cloudflare_ai_gateway {
-        headers.insert(
-            HeaderName::from_static("cf-aig-authorization"),
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| Error::InvalidHeaderValue("cf-aig-authorization".to_string(), e))?,
-        );
-    }
     Ok(headers)
 }
 
@@ -1281,11 +1272,7 @@ fn trim_end_slash(url: &str) -> &str {
 }
 
 fn request_base_url(model: &Model) -> Result<String> {
-    if is_cloudflare_provider(&model.provider) {
-        resolve_cloudflare_base_url(model)
-    } else {
-        Ok(model.base_url.clone())
-    }
+    Ok(model.base_url.clone())
 }
 
 fn format_openai_responses_api_error(status: reqwest::StatusCode, body: &str) -> String {
@@ -1935,75 +1922,6 @@ mod tests {
                 .get("x-client-request-id")
                 .and_then(|value| value.to_str().ok()),
             Some("session-123")
-        );
-    }
-
-    #[test]
-    fn response_headers_use_cloudflare_ai_gateway_authorization() {
-        let mut model = model();
-        model.provider = "cloudflare-ai-gateway".to_string();
-        let context = Context {
-            system_prompt: None,
-            messages: vec![Message::user_text("hi")],
-            tools: Vec::new(),
-        };
-
-        let headers = headers(
-            &model,
-            &context,
-            &StreamOptions::default(),
-            "test-key",
-            &get_compat(&model),
-            CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
-        )
-        .unwrap();
-
-        assert!(headers.get(AUTHORIZATION).is_none());
-        assert_eq!(
-            headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer test-key")
-        );
-    }
-
-    #[test]
-    fn response_headers_preserve_cloudflare_byok_authorization() {
-        let mut model = model();
-        model.provider = "cloudflare-ai-gateway".to_string();
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let mut options = StreamOptions::default();
-        options.headers.insert(
-            "Authorization".to_string(),
-            "Bearer upstream-token".to_string(),
-        );
-
-        let request_headers = headers(
-            &model,
-            &context,
-            &options,
-            "cf-token",
-            &get_compat(&model),
-            CacheRetention::Short,
-            OpenAIResponsesAuthHeader::Bearer,
-        )
-        .unwrap();
-
-        assert_eq!(
-            request_headers
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer upstream-token")
-        );
-        assert_eq!(
-            request_headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer cf-token")
         );
     }
 

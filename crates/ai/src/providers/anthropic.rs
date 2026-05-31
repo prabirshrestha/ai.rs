@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
-use crate::providers::cloudflare::{is_cloudflare_provider, resolve_cloudflare_base_url};
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -1068,13 +1067,7 @@ fn headers(
         beta_features.push(INTERLEAVED_THINKING_BETA);
     }
 
-    if model.provider == "cloudflare-ai-gateway" {
-        headers.insert(
-            HeaderName::from_static("cf-aig-authorization"),
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| Error::InvalidHeaderValue("cf-aig-authorization".to_string(), e))?,
-        );
-    } else if model.provider == "github-copilot" || is_oauth {
+    if model.provider == "github-copilot" || is_oauth {
         headers.insert(
             HeaderName::from_static("authorization"),
             HeaderValue::from_str(&format!("Bearer {api_key}"))
@@ -1208,11 +1201,7 @@ fn trim_end_slash(url: &str) -> &str {
 }
 
 fn request_base_url(model: &Model) -> Result<String> {
-    if is_cloudflare_provider(&model.provider) {
-        resolve_cloudflare_base_url(model)
-    } else {
-        Ok(model.base_url.clone())
-    }
+    Ok(model.base_url.clone())
 }
 
 fn to_claude_code_name(name: &str) -> String {
@@ -1973,69 +1962,6 @@ mod tests {
                 .get("x-session-affinity")
                 .and_then(|value| value.to_str().ok()),
             Some("override")
-        );
-    }
-
-    #[test]
-    fn cloudflare_anthropic_headers_use_gateway_auth_without_direct_anthropic_auth() {
-        let mut model = anthropic_model("claude-sonnet-4-5");
-        model.provider = "cloudflare-ai-gateway".to_string();
-        model.base_url =
-            "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic".to_string();
-        let context = Context {
-            messages: vec![crate::types::Message::user_text("hello")],
-            ..Default::default()
-        };
-        let mut options = AnthropicOptions::default();
-        options.base.session_id = Some("session-123".to_string());
-
-        let request_headers = headers(
-            &model,
-            &context,
-            &options,
-            "cf-token",
-            false,
-            get_anthropic_compat(&model),
-            CacheRetention::Short,
-        )
-        .unwrap();
-
-        assert_eq!(
-            request_headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer cf-token")
-        );
-        assert!(request_headers.get("x-api-key").is_none());
-        assert!(request_headers.get("authorization").is_none());
-        assert!(request_headers.get("x-session-affinity").is_none());
-
-        options.base.headers.insert(
-            "authorization".to_string(),
-            "Bearer upstream-key".to_string(),
-        );
-        let override_headers = headers(
-            &model,
-            &context,
-            &options,
-            "cf-token",
-            false,
-            get_anthropic_compat(&model),
-            CacheRetention::Short,
-        )
-        .unwrap();
-
-        assert_eq!(
-            override_headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer upstream-key")
-        );
-        assert_eq!(
-            override_headers
-                .get("cf-aig-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer cf-token")
         );
     }
 

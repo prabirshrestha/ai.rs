@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 description = "Rust port of the pi ai package"
 repository.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true

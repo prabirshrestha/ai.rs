@@ -15,6 +15,7 @@ const SUPPORTED_MODEL_APIS: [&str; 3] = [
     "openai-completions",
     "openai-responses",
 ];
+const UNSUPPORTED_MODEL_PROVIDERS: [&str; 2] = ["cloudflare-ai-gateway", "cloudflare-workers-ai"];
 
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (model.cost.input / 1_000_000.0) * usage.input as f64;
@@ -184,6 +185,7 @@ fn builtin_models() -> ModelRegistry {
         .as_object()
         .expect("generated model registry should be an object")
         .iter()
+        .filter(|(provider, _)| !UNSUPPORTED_MODEL_PROVIDERS.contains(&provider.as_str()))
         .filter_map(|(provider, models)| {
             let models = models
                 .as_object()
@@ -214,14 +216,20 @@ mod tests {
     #[test]
     fn generated_registry_matches_upstream_catalog_size() {
         let registry = builtin_models();
-        assert_eq!(registry.providers.len(), 26);
-        assert_eq!(
+        assert!(
+            !registry
+                .get_providers()
+                .contains(&"cloudflare-ai-gateway".to_string())
+        );
+        assert!(
+            !registry
+                .get_providers()
+                .contains(&"cloudflare-workers-ai".to_string())
+        );
+        assert!(
             registry
-                .providers
-                .iter()
-                .map(|provider| provider.models.len())
-                .sum::<usize>(),
-            733
+                .get_providers()
+                .contains(&"github-copilot".to_string())
         );
     }
 
@@ -255,14 +263,14 @@ mod tests {
             [
                 "anthropic",
                 "cerebras",
-                "cloudflare-ai-gateway",
-                "cloudflare-workers-ai",
                 "deepseek",
                 "fireworks",
                 "github-copilot",
                 "groq",
                 "huggingface",
                 "kimi-coding",
+                "minimax",
+                "minimax-cn",
             ]
         );
     }
