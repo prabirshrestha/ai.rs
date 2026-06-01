@@ -1298,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_thinking_signature_converts_to_text_by_default() {
+    fn converts_empty_signature_thinking_to_text_by_default() {
         let mut model = anthropic_model("mimo-v2.5-pro");
         model.provider = "xiaomi-token-plan-ams".to_string();
         let messages = vec![
@@ -1320,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_thinking_signature_can_be_preserved_with_compat() {
+    fn preserves_empty_signature_thinking_when_allow_empty_signature_is_enabled() {
         let mut model = anthropic_model("mimo-v2.5-pro");
         model.provider = "xiaomi-token-plan-ams".to_string();
         model.compat.anthropic_messages.allow_empty_signature = Some(true);
@@ -1418,8 +1418,72 @@ mod tests {
     }
 
     #[test]
-    fn thinking_disabled_payload_for_reasoning_models() {
+    fn sends_thinking_type_disabled_for_budget_based_reasoning_models_when_thinking_is_off() {
         let model = anthropic_model("claude-sonnet-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn disables_thinking_for_claude_reasoning_models() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn sends_thinking_type_disabled_for_adaptive_reasoning_models_when_thinking_is_off() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn sends_thinking_type_disabled_for_claude_opus_4_8_when_thinking_is_off() {
+        let model = crate::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
         let payload = build_anthropic_payload(
             &model,
             &Context {
@@ -1570,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_thinking_payload_uses_effort() {
+    fn uses_adaptive_thinking_for_claude_opus_4_8_when_reasoning_is_enabled() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
         let payload = build_anthropic_payload(
@@ -1596,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_model_ids_use_legacy_thinking_payload_by_default() {
+    fn sends_legacy_thinking_payload_for_custom_model_ids_by_default() {
         let mut model = anthropic_model("vendor--claude-opus-latest");
         model.provider = "vendor-proxy".to_string();
         let payload = build_anthropic_payload(
@@ -1623,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn force_adaptive_thinking_enables_adaptive_payload_for_custom_model_ids() {
+    fn sends_adaptive_thinking_payload_when_compat_force_adaptive_thinking_is_true() {
         let mut model = anthropic_model("vendor--claude-opus-latest");
         model.provider = "vendor-proxy".to_string();
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
@@ -1650,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn force_adaptive_thinking_preserves_disabled_thinking_when_reasoning_is_off() {
+    fn preserves_thinking_type_disabled_when_reasoning_is_off_regardless_of_override() {
         let mut model = anthropic_model("vendor--claude-opus-latest");
         model.provider = "vendor-proxy".to_string();
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
@@ -1673,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_thinking_can_be_disabled_by_compat_override() {
+    fn allows_built_in_adaptive_models_to_opt_out_with_compat_force_adaptive_thinking_false() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(false);
         let payload = build_anthropic_payload(
@@ -1700,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn built_in_adaptive_thinking_model_uses_xhigh_effort() {
+    fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_opus_4_8() {
         let model = crate::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
         assert_eq!(
             model.compat.anthropic_messages.force_adaptive_thinking,
@@ -1729,6 +1793,17 @@ mod tests {
             json!({ "type": "adaptive", "display": "summarized" })
         );
         assert_eq!(payload["output_config"], json!({ "effort": "xhigh" }));
+    }
+
+    #[test]
+    fn marks_built_in_anthropic_messages_models_that_use_adaptive_thinking() {
+        for model_id in ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"] {
+            let model = crate::get_model("anthropic", model_id).expect("adaptive model");
+            assert_eq!(
+                model.compat.anthropic_messages.force_adaptive_thinking,
+                Some(true)
+            );
+        }
     }
 
     #[test]
@@ -1994,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn eager_tool_input_streaming_is_enabled_by_default() {
+    fn sends_per_tool_eager_input_streaming_by_default() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
         let context = Context {
@@ -2020,7 +2095,8 @@ mod tests {
     }
 
     #[test]
-    fn fine_grained_tool_streaming_beta_is_used_when_eager_input_is_disabled() {
+    fn uses_the_legacy_fine_grained_tool_streaming_beta_when_eager_tool_input_streaming_is_disabled()
+     {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
         model
@@ -2055,7 +2131,7 @@ mod tests {
     }
 
     #[test]
-    fn fine_grained_tool_streaming_beta_is_omitted_without_tools() {
+    fn does_not_send_the_legacy_fine_grained_tool_streaming_beta_when_there_are_no_tools() {
         let mut model = anthropic_model("claude-opus-4-8");
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
         model
@@ -2081,7 +2157,7 @@ mod tests {
     }
 
     #[test]
-    fn copilot_anthropic_headers_use_bearer_auth_and_dynamic_headers() {
+    fn uses_bearer_auth_copilot_headers_and_valid_anthropic_messages_payload() {
         let mut model = anthropic_model("claude-sonnet-4.6");
         model.provider = "github-copilot".to_string();
         model.headers.insert(
@@ -2156,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn copilot_anthropic_omits_interleaved_thinking_beta_for_adaptive_models() {
+    fn omits_interleaved_thinking_beta_for_adaptive_thinking_models() {
         let mut model = anthropic_model("claude-sonnet-4.6");
         model.provider = "github-copilot".to_string();
         model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
@@ -2423,7 +2499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repairs_malformed_sse_json_and_streamed_tool_json() {
+    async fn repairs_malformed_sse_json_and_malformed_streamed_tool_json() {
         let body = sse_body(&[
             (
                 "message_start",
