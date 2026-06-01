@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use crate::api_registry::{self, ApiProvider};
 use crate::providers::{anthropic, openai_completions, openai_responses};
 use crate::types::{Context, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions};
-use crate::{AssistantMessageEventStream, Error, Result};
+use crate::{AssistantMessageEventStream, Result};
 use serde_json::Value;
 
 pub use anthropic::{stream_anthropic, stream_simple_anthropic};
@@ -41,7 +41,6 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantMessageEventStream> {
-                    ensure_simple_api_key(&model, &options)?;
                     Ok(anthropic::stream_simple_anthropic(model, context, options))
                 },
             ),
@@ -65,7 +64,6 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantMessageEventStream> {
-                    ensure_simple_api_key(&model, &options)?;
                     Ok(openai_completions::stream_simple_openai_completions(
                         model, context, options,
                     ))
@@ -91,7 +89,6 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantMessageEventStream> {
-                    ensure_simple_api_key(&model, &options)?;
                     Ok(openai_responses::stream_simple_openai_responses(
                         model, context, options,
                     ))
@@ -100,16 +97,6 @@ fn register_builtins() {
         },
         Some("builtin".to_string()),
     );
-}
-
-fn ensure_simple_api_key(model: &Model, options: &SimpleStreamOptions) -> Result<()> {
-    options
-        .stream
-        .api_key
-        .as_deref()
-        .filter(|api_key| !api_key.trim().is_empty())
-        .map(|_| ())
-        .ok_or_else(|| Error::MissingApiKey(model.provider.clone()))
 }
 
 fn openai_completions_options_from_stream_options(
