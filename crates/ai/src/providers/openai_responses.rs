@@ -1309,6 +1309,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn should_handle_empty_content_array() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::User(crate::types::UserMessage {
+                content: UserMessageContent::Parts(Vec::new()),
+                timestamp: 0,
+            })],
+            ..Default::default()
+        };
+
+        let messages =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_string_content() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("")],
+            ..Default::default()
+        };
+
+        let messages =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
+
+        assert_eq!(
+            messages,
+            vec![json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "" }]
+            })]
+        );
+    }
+
+    #[test]
+    fn should_handle_whitespace_only_content() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("   \n\t  ")],
+            ..Default::default()
+        };
+
+        let messages =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
+
+        assert_eq!(
+            messages,
+            vec![json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "   \n\t  " }]
+            })]
+        );
+    }
+
+    #[test]
+    fn should_handle_empty_assistant_message_in_conversation() {
+        let model = model();
+        let context = Context {
+            messages: vec![
+                Message::user_text("Hello, how are you?"),
+                Message::Assistant(AssistantMessage::empty_for(&model)),
+                Message::user_text("Please respond this time."),
+            ],
+            ..Default::default()
+        };
+
+        let messages =
+            convert_responses_messages(&model, &context, &["openai"].into_iter().collect(), true);
+        let roles = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(roles, ["user", "user"]);
+    }
+
     fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {
         Arc::new(move |_response, _model| {
             let calls = Arc::clone(&calls);
@@ -2604,7 +2683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_immediate_cancellation_returns_aborted_message() {
+    async fn should_handle_immediate_abort() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         cancellation_token.cancel();
         let mut stream = stream_openai_responses(
@@ -2630,7 +2709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_midstream_cancellation_returns_aborted_message() {
+    async fn should_abort_mid_stream() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (base_url, release_server) = spawn_hanging_sse_server(sse_body(&[
             json!({

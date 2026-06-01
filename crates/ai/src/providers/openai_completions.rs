@@ -1457,6 +1457,72 @@ mod tests {
     }
 
     #[test]
+    fn should_handle_empty_content_array() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::User(crate::types::UserMessage {
+                content: UserMessageContent::Parts(Vec::new()),
+                timestamp: 0,
+            })],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &get_compat(&model));
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_string_content() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("")],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &get_compat(&model));
+
+        assert_eq!(messages, vec![json!({ "role": "user", "content": "" })]);
+    }
+
+    #[test]
+    fn should_handle_whitespace_only_content() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("   \n\t  ")],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &get_compat(&model));
+
+        assert_eq!(
+            messages,
+            vec![json!({ "role": "user", "content": "   \n\t  " })]
+        );
+    }
+
+    #[test]
+    fn should_handle_empty_assistant_message_in_conversation() {
+        let model = model();
+        let context = Context {
+            messages: vec![
+                Message::user_text("Hello, how are you?"),
+                Message::Assistant(AssistantMessage::empty_for(&model)),
+                Message::user_text("Please respond this time."),
+            ],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &get_compat(&model));
+        let roles = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(roles, ["user", "user"]);
+    }
+
+    #[test]
     fn simple_tool_choice_uses_upstream_camel_case_name() {
         let camel = SimpleStreamOptions {
             stream: StreamOptions {
@@ -2047,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_prefilled_context_normalizes_responses_pipe_tool_call_ids() {
+    fn openrouter_should_handle_prefilled_context_with_long_pipe_separated_ids() {
         let mut source_model = model();
         source_model.provider = "github-copilot".to_string();
         source_model.api = "openai-responses".to_string();
@@ -2733,7 +2799,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_immediate_cancellation_returns_aborted_message() {
+    async fn should_handle_immediate_abort() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         cancellation_token.cancel();
         let mut stream = stream_openai_completions(
@@ -2759,7 +2825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_midstream_cancellation_returns_aborted_message() {
+    async fn should_abort_mid_stream() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (base_url, release_server) = spawn_hanging_sse_server(chat_sse_body(&[json!({
             "id": "chatcmpl-abort",

@@ -138,25 +138,37 @@ mod tests {
     }
 
     #[test]
-    fn detects_explicit_overflow_errors() {
+    fn detects_explicit_ollama_prompt_too_long_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "400 `prompt too long; exceeded max context length by 100918 tokens`"
             ),
             Some(32768)
         ));
+    }
+
+    #[test]
+    fn detects_together_ai_context_length_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "400 The input (516368 tokens) is longer than the model's context length (262144 tokens)."
             ),
             Some(262144)
         ));
+    }
+
+    #[test]
+    fn detects_litellm_wrapped_openai_maximum_context_length_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "Requested token count exceeds the model's maximum context length of 131072 tokens."
             ),
             Some(131072)
         ));
+    }
+
+    #[test]
+    fn detects_openrouter_poolside_maximum_allowed_input_length_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "Provider returned error: Input length 131393 exceeds the maximum allowed input length of 131040 tokens."
@@ -166,25 +178,41 @@ mod tests {
     }
 
     #[test]
-    fn excludes_non_overflow_errors() {
+    fn does_not_treat_generic_non_overflow_ollama_errors_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message("500 `model runner crashed unexpectedly`"),
             Some(32768)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_bedrock_throttling_too_many_tokens_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message(
                 "Throttling error: Too many tokens, please wait before trying again."
             ),
             Some(200000)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_bedrock_service_unavailable_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message("Service unavailable: The service is temporarily unavailable."),
             Some(200000)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_generic_rate_limit_errors_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message("Rate limit exceeded, please retry after 30 seconds."),
             Some(200000)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_http_429_style_errors_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message("Too many requests. Please slow down."),
             Some(200000)
@@ -192,21 +220,32 @@ mod tests {
     }
 
     #[test]
-    fn detects_silent_and_length_stop_overflow() {
+    fn detects_silent_overflow_with_input_tokens_above_context_window() {
         let mut silent = create_error_message("");
         silent.stop_reason = StopReason::Stop;
         silent.error_message = None;
         silent.usage.input = 200001;
         assert!(is_context_overflow(&silent, Some(200000)));
+    }
 
+    #[test]
+    fn detects_xiaomi_style_overflow_length_stop_with_zero_output_and_filled_context() {
         assert!(is_context_overflow(
             &create_length_stop_message(58, 1048512, 0),
             Some(1048576)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_normal_length_stops_with_output_as_overflow() {
         assert!(!is_context_overflow(
             &create_length_stop_message(1000, 0, 4096),
             Some(200000)
         ));
+    }
+
+    #[test]
+    fn does_not_treat_length_stops_far_below_context_as_overflow() {
         assert!(!is_context_overflow(
             &create_length_stop_message(100, 0, 0),
             Some(200000)

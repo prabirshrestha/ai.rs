@@ -1250,6 +1250,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn should_handle_empty_content_array() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let messages = vec![crate::types::Message::User(crate::types::UserMessage {
+            content: UserMessageContent::Parts(Vec::new()),
+            timestamp: 0,
+        })];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_string_content() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let messages = vec![crate::types::Message::user_text("")];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn should_handle_whitespace_only_content() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let messages = vec![crate::types::Message::user_text("   \n\t  ")];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_assistant_message_in_conversation() {
+        let model = anthropic_model("claude-sonnet-4-5");
+        let messages = vec![
+            crate::types::Message::user_text("Hello, how are you?"),
+            crate::types::Message::Assistant(AssistantMessage::empty_for(&model)),
+            crate::types::Message::user_text("Please respond this time."),
+        ];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+        let roles = converted
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(roles, ["user", "user"]);
+    }
+
     fn counting_on_response(calls: Arc<AtomicUsize>) -> ResponseHook {
         Arc::new(move |_response, _model| {
             let calls = Arc::clone(&calls);
@@ -2869,7 +2920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_immediate_cancellation_returns_aborted_message() {
+    async fn should_handle_immediate_abort() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         cancellation_token.cancel();
         let mut stream = stream_anthropic(
@@ -2895,7 +2946,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_midstream_cancellation_returns_aborted_message() {
+    async fn should_abort_mid_stream() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (base_url, release_server) = spawn_hanging_sse_server(sse_body(&[
             (

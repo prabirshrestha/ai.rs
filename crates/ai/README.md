@@ -11,6 +11,11 @@ and
 surfaces. Unlike the TypeScript repo, the agent loop lives in this `ai` crate;
 there is no separate harness crate here.
 
+This README follows the upstream
+[`packages/ai/README.md`](https://github.com/earendil-works/pi/tree/main/packages/ai)
+section order as closely as possible, with Rust examples and explicit notes for
+upstream sections that are outside this port's active scope.
+
 **Note**: Like upstream `pi-ai`, this crate focuses on models that support tool
 calling, because tool calling is essential for agentic workflows.
 

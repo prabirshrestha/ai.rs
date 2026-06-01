@@ -3,6 +3,9 @@
 Rust port of the focused [`pi`](https://github.com/earendil-works/pi) AI and
 core agent runtime surfaces.
 
+This README intentionally follows the upstream `pi` README structure, adapted
+for Rust and for the provider/runtime scope that exists in this repository.
+
 This repository tracks the upstream `pi` package layout where the scoped Rust
 surface exists:
 
@@ -20,13 +23,22 @@ Rust-specific API polish.
 
 | Upstream `pi` README section | ai.rs mapping |
 | --- | --- |
-| Project introduction | This repository is `ai.rs`, a Rust port of the scoped AI and core agent runtime packages. |
+| Project introduction | This repository is `ai.rs`, a Rust port of the scoped AI and core agent runtime packages from [`pi`](https://github.com/earendil-works/pi). |
 | Share your OSS coding agent sessions | Not part of this Rust crate. Upstream session publishing belongs to the TypeScript coding-agent workflow. |
 | All Packages | See [All Crates](#all-crates). The Rust workspace currently has one crate that combines the scoped AI package and core agent runtime. |
 | Contributing | PRs are welcome, especially for additional provider support that is intentionally out of scope today. |
 | Development | See [Development](#development) for the Rust equivalents of build, check, format, clippy, and test commands. |
 | Supply-chain hardening | See [Supply-chain hardening](#supply-chain-hardening) for the Rust equivalent. |
 | License | MIT. |
+
+## Upstream Pi
+
+To compare this Rust port with upstream `pi`:
+
+- [Visit pi.dev](https://pi.dev)
+- [Read the upstream repository](https://github.com/earendil-works/pi)
+- [Read upstream `packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
+- [Read upstream `packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent)
 
 ## All Crates
 

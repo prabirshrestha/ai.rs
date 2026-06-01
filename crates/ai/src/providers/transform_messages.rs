@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn inserts_synthetic_result_before_user_interrupting_tool_flow() {
+    fn should_filter_out_tool_calls_without_corresponding_tool_results() {
         let model = copilot_claude_model();
         let transformed = transform_messages(
             &[
