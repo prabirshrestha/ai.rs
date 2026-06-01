@@ -335,12 +335,7 @@ async fn run_stream(
                     .map(|value| (*field, value))
             });
         if let Some((field, reasoning)) = reasoning_field {
-            let signature = if model.provider == "opencode-go" && field == "reasoning" {
-                "reasoning_content"
-            } else {
-                field
-            };
-            let index = ensure_thinking_block(&mut output, &mut thinking_block, signature, sender);
+            let index = ensure_thinking_block(&mut output, &mut thinking_block, field, sender);
             if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
                 block.thinking.push_str(reasoning);
             }
@@ -890,12 +885,9 @@ pub fn convert_messages(
                         if !assistant_text.is_empty() {
                             assistant_obj.insert("content".to_string(), json!(assistant_text));
                         }
-                        let mut signature = thinking_blocks
+                        let signature = thinking_blocks
                             .first()
                             .and_then(|block| block.thinking_signature.as_deref());
-                        if model.provider == "opencode-go" && signature == Some("reasoning") {
-                            signature = Some("reasoning_content");
-                        }
                         if let Some(signature) = signature.filter(|signature| !signature.is_empty())
                         {
                             assistant_obj.insert(
@@ -1103,68 +1095,25 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
     }
 }
 
-fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
-    let provider = model.provider.as_str();
-    let base_url = model.base_url.as_str();
-    let is_zai = provider == "zai" || base_url.contains("api.z.ai");
-    let is_together = provider == "together"
-        || base_url.contains("api.together.ai")
-        || base_url.contains("api.together.xyz");
-    let is_moonshot = provider == "moonshotai"
-        || provider == "moonshotai-cn"
-        || base_url.contains("api.moonshot.");
-    let is_non_standard = provider == "cerebras"
-        || base_url.contains("cerebras.ai")
-        || provider == "xai"
-        || base_url.contains("api.x.ai")
-        || is_together
-        || base_url.contains("chutes.ai")
-        || base_url.contains("deepseek.com")
-        || is_zai
-        || is_moonshot
-        || provider == "opencode"
-        || base_url.contains("opencode.ai");
-    let use_max_tokens = base_url.contains("chutes.ai") || is_moonshot || is_together;
-    let is_grok = provider == "xai" || base_url.contains("api.x.ai");
-    let is_deep_seek = provider == "deepseek" || base_url.contains("deepseek.com");
-    let cache_control_format = if provider == "openrouter" && model.id.starts_with("anthropic/") {
-        Some(CacheControlFormat::Anthropic)
-    } else {
-        None
-    };
-
+fn detect_compat(_model: &Model) -> ResolvedOpenAICompletionsCompat {
     ResolvedOpenAICompletionsCompat {
-        supports_store: !is_non_standard,
-        supports_developer_role: !is_non_standard,
-        supports_reasoning_effort: !is_grok && !is_zai && !is_moonshot && !is_together,
+        supports_store: true,
+        supports_developer_role: true,
+        supports_reasoning_effort: true,
         supports_usage_in_streaming: true,
-        max_tokens_field: if use_max_tokens {
-            MaxTokensField::MaxTokens
-        } else {
-            MaxTokensField::MaxCompletionTokens
-        },
+        max_tokens_field: MaxTokensField::MaxCompletionTokens,
         requires_tool_result_name: false,
         requires_assistant_after_tool_result: false,
         requires_thinking_as_text: false,
-        requires_reasoning_content_on_assistant_messages: is_deep_seek,
-        thinking_format: if is_deep_seek {
-            OpenAIThinkingFormat::Deepseek
-        } else if is_zai {
-            OpenAIThinkingFormat::Zai
-        } else if is_together {
-            OpenAIThinkingFormat::Together
-        } else if provider == "openrouter" || base_url.contains("openrouter.ai") {
-            OpenAIThinkingFormat::Openrouter
-        } else {
-            OpenAIThinkingFormat::Openai
-        },
+        requires_reasoning_content_on_assistant_messages: false,
+        thinking_format: OpenAIThinkingFormat::Openai,
         open_router_routing: None,
         vercel_gateway_routing: None,
         zai_tool_stream: false,
-        supports_strict_mode: !is_moonshot && !is_together,
-        cache_control_format,
+        supports_strict_mode: true,
+        cache_control_format: None,
         send_session_affinity_headers: false,
-        supports_long_cache_retention: !is_together,
+        supports_long_cache_retention: true,
     }
 }
 
@@ -1945,12 +1894,13 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_uses_openrouter_reasoning_object() {
+    fn chat_payload_uses_explicit_openrouter_reasoning_compat() {
         let mut model = model();
         model.provider = "openrouter".to_string();
         model.id = "deepseek/deepseek-r1".to_string();
         model.base_url = "https://openrouter.ai/api/v1".to_string();
         model.reasoning = true;
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Openrouter);
         let context = Context {
             messages: vec![Message::user_text("hi")],
             ..Default::default()
@@ -1970,6 +1920,39 @@ mod tests {
 
         assert_eq!(payload["reasoning"], json!({ "effort": "high" }));
         assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn provider_name_does_not_enable_out_of_scope_openai_compat() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.id = "deepseek/deepseek-r1".to_string();
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.reasoning = true;
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(ModelThinkingLevel::High),
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning_effort"], json!("high"));
+        assert!(payload.get("reasoning").is_none());
+        assert!(
+            payload["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3823,49 +3806,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_go_reasoning_deltas_use_reasoning_content_signature() {
-        let mut chat_model = model();
-        chat_model.id = "kimi-k2.6".to_string();
-        chat_model.provider = "opencode-go".to_string();
-        chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
-            "id": "chatcmpl-opencode-go-reasoning",
-            "choices": [{
-                "delta": { "reasoning": "think" },
-                "finish_reason": "stop"
-            }]
-        })]))
-        .await;
-
-        let mut stream = stream_openai_completions(
-            chat_model,
-            Context {
-                messages: vec![Message::user_text("Use reasoning.")],
-                ..Default::default()
-            },
-            OpenAICompletionsOptions {
-                base: StreamOptions {
-                    api_key: Some("test-key".to_string()),
-                    cache_retention: Some(CacheRetention::None),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
-
-        assert_eq!(
-            message.content,
-            vec![AssistantContent::Thinking(ThinkingContent {
-                thinking: "think".to_string(),
-                thinking_signature: Some("reasoning_content".to_string()),
-                redacted: None,
-            })]
-        );
-    }
-
-    #[tokio::test]
-    async fn non_opencode_go_reasoning_deltas_keep_source_signature() {
+    async fn reasoning_deltas_keep_source_signature() {
         let mut chat_model = model();
         chat_model.id = "gpt-4o-mini".to_string();
         chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
@@ -4190,16 +4131,15 @@ mod tests {
     }
 
     #[test]
-    fn opencode_go_replays_reasoning_as_reasoning_content() {
+    fn replays_thinking_with_source_signature() {
         let mut model = model();
-        model.id = "kimi-k2.6".to_string();
-        model.provider = "opencode-go".to_string();
+        model.id = "gpt-4o-mini".to_string();
         let compat = get_compat(&model);
         let assistant = assistant_message(
             vec![
                 AssistantContent::Thinking(ThinkingContent {
                     thinking: "think".to_string(),
-                    thinking_signature: Some("reasoning".to_string()),
+                    thinking_signature: Some("reasoning_content".to_string()),
                     redacted: None,
                 }),
                 AssistantContent::ToolCall(ToolCall {
@@ -4530,11 +4470,12 @@ mod tests {
     }
 
     #[test]
-    fn detects_anthropic_cache_markers_for_openrouter_anthropic_models() {
+    fn applies_anthropic_cache_markers_when_explicit_compat_enables_them() {
         let mut model = model();
         model.provider = "openrouter".to_string();
         model.id = "anthropic/claude-sonnet-4.5".to_string();
         model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.compat.openai_completions.cache_control_format = Some(CacheControlFormat::Anthropic);
         let context = Context {
             system_prompt: Some("System prompt".to_string()),
             messages: vec![Message::user_text("Hello")],

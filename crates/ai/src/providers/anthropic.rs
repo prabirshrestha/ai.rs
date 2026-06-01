@@ -951,19 +951,14 @@ fn update_anthropic_usage(output: &mut AssistantMessage, usage: &Value, model: &
 }
 
 fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
-    let is_fireworks = model.provider == "fireworks";
     let compat = &model.compat.anthropic_messages;
     ResolvedAnthropicCompat {
         supports_eager_tool_input_streaming: compat
             .supports_eager_tool_input_streaming
-            .unwrap_or(!is_fireworks),
-        supports_long_cache_retention: compat
-            .supports_long_cache_retention
-            .unwrap_or(!is_fireworks),
-        send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(is_fireworks),
-        supports_cache_control_on_tools: compat
-            .supports_cache_control_on_tools
-            .unwrap_or(!is_fireworks),
+            .unwrap_or(true),
+        supports_long_cache_retention: compat.supports_long_cache_retention.unwrap_or(true),
+        send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(false),
+        supports_cache_control_on_tools: compat.supports_cache_control_on_tools.unwrap_or(true),
     }
 }
 
@@ -1993,7 +1988,10 @@ mod tests {
     #[test]
     fn session_affinity_headers_follow_cache_retention_and_overrides() {
         let mut model = anthropic_model("claude-haiku-4-5");
-        model.provider = "fireworks".to_string();
+        model
+            .compat
+            .anthropic_messages
+            .send_session_affinity_headers = Some(true);
         let context = Context {
             messages: vec![crate::types::Message::user_text("hello")],
             ..Default::default()
@@ -2051,6 +2049,18 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("override")
         );
+    }
+
+    #[test]
+    fn provider_name_does_not_enable_out_of_scope_anthropic_compat() {
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.provider = "fireworks".to_string();
+        let compat = get_anthropic_compat(&model);
+
+        assert!(compat.supports_eager_tool_input_streaming);
+        assert!(compat.supports_long_cache_retention);
+        assert!(!compat.send_session_affinity_headers);
+        assert!(compat.supports_cache_control_on_tools);
     }
 
     #[test]

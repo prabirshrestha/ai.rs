@@ -532,9 +532,11 @@ let stream = stream_simple(
 ### OpenAI Compatibility Settings
 
 OpenAI-compatible providers can require small payload differences. The Rust port
-keeps the compatibility metadata on `ModelCompat`. Set `model.compat` on custom
-models when the target OpenAI-compatible endpoint needs payload differences such
-as non-standard reasoning, cache-control, max-token, or tool-result behavior.
+keeps upstream compatibility metadata on `ModelCompat` for explicit custom
+models, but the active built-in surface does not infer broad provider-specific
+behavior from provider names or base URLs. Set `model.compat` on custom models
+when the target OpenAI-compatible endpoint needs payload differences such as
+non-standard reasoning, cache-control, max-token, or tool-result behavior.
 
 ### Thread Safety
 
