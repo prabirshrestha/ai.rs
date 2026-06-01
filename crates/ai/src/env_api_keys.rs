@@ -99,35 +99,51 @@ mod tests {
         openai.restore();
     }
 
-    #[test]
-    fn github_copilot_only_uses_copilot_token_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    fn with_saved_github_env(test: impl FnOnce()) {
         let copilot = SavedEnv::capture("COPILOT_GITHUB_TOKEN");
         let gh = SavedEnv::capture("GH_TOKEN");
         let github = SavedEnv::capture("GITHUB_TOKEN");
 
-        unsafe {
-            std::env::remove_var("COPILOT_GITHUB_TOKEN");
-            std::env::set_var("GH_TOKEN", "gh-token");
-            std::env::set_var("GITHUB_TOKEN", "github-token");
-        }
-        assert_eq!(find_env_keys("github-copilot"), None);
-        assert_eq!(get_env_api_key("github-copilot"), None);
-
-        unsafe {
-            std::env::set_var("COPILOT_GITHUB_TOKEN", "copilot-token");
-        }
-        assert_eq!(
-            find_env_keys("github-copilot"),
-            Some(vec!["COPILOT_GITHUB_TOKEN".to_string()])
-        );
-        assert_eq!(
-            get_env_api_key("github-copilot").as_deref(),
-            Some("copilot-token")
-        );
+        test();
 
         copilot.restore();
         gh.restore();
         github.restore();
+    }
+
+    #[test]
+    fn does_not_treat_generic_github_tokens_as_github_copilot_credentials() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        with_saved_github_env(|| {
+            unsafe {
+                std::env::remove_var("COPILOT_GITHUB_TOKEN");
+                std::env::set_var("GH_TOKEN", "gh-token");
+                std::env::set_var("GITHUB_TOKEN", "github-token");
+            }
+
+            assert_eq!(find_env_keys("github-copilot"), None);
+            assert_eq!(get_env_api_key("github-copilot"), None);
+        });
+    }
+
+    #[test]
+    fn resolves_github_copilot_credentials_from_copilot_github_token() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        with_saved_github_env(|| {
+            unsafe {
+                std::env::set_var("COPILOT_GITHUB_TOKEN", "copilot-token");
+                std::env::set_var("GH_TOKEN", "gh-token");
+                std::env::set_var("GITHUB_TOKEN", "github-token");
+            }
+
+            assert_eq!(
+                find_env_keys("github-copilot"),
+                Some(vec!["COPILOT_GITHUB_TOKEN".to_string()])
+            );
+            assert_eq!(
+                get_env_api_key("github-copilot").as_deref(),
+                Some("copilot-token")
+            );
+        });
     }
 }
