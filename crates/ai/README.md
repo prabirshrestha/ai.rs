@@ -28,9 +28,12 @@ calling, because tool calling is essential for agentic workflows.
   - [Validating Tool Arguments](#validating-tool-arguments)
   - [Complete Event Reference](#complete-event-reference)
 - [Image Input](#image-input)
+- [Image Generation](#image-generation)
+  - [Basic Image Generation](#basic-image-generation)
+  - [Notes and Limitations](#notes-and-limitations)
 - [Thinking/Reasoning](#thinkingreasoning)
-  - [Unified Interface (streamSimple/completeSimple)](#unified-interface-streamsimplecompletesimple)
-  - [Provider-Specific Options (stream/complete)](#provider-specific-options-streamcomplete)
+  - [Unified Interface](#unified-interface-streamsimplecompletesimple)
+  - [Provider-Specific Options](#provider-specific-options-streamcomplete)
   - [Streaming Thinking Content](#streaming-thinking-content)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
@@ -55,6 +58,7 @@ calling, because tool calling is essential for agentic workflows.
   - [Environment Variables](#environment-variables)
   - [Checking Environment Variables](#checking-environment-variables)
 - [OAuth Providers](#oauth-providers)
+  - [Vertex AI](#vertex-ai)
   - [CLI Login](#cli-login)
   - [Programmatic OAuth](#programmatic-oauth)
   - [Login Flow Example](#login-flow-example)
@@ -352,6 +356,24 @@ let context = Context {
     ..Default::default()
 };
 ```
+
+## Image Generation
+
+Upstream Pi documents image-generation APIs in this slot:
+`getImageModel`, `getImageModels`, `getImageProviders`, and `generateImages`.
+Those APIs are intentionally not included in this Rust port yet.
+
+### Basic Image Generation
+
+No Rust image-generation API is exposed at the moment. Keep using the regular
+chat APIs for image input and tool-result image blocks.
+
+### Notes and Limitations
+
+The active Rust provider surface is focused on chat/agent behavior for OpenAI
+Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub
+Copilot-compatible routing. PRs to add upstream-compatible image-generation
+support are welcome.
 
 ## Thinking/Reasoning
 
@@ -713,6 +735,12 @@ The OAuth registry includes:
 
 - **Anthropic** (Claude Pro/Max subscription)
 - **GitHub Copilot** (Copilot subscription)
+
+### Vertex AI
+
+Upstream Pi includes Vertex AI OAuth documentation here. Native Google and
+Vertex AI APIs are not part of the active built-in provider surface in this
+Rust port.
 
 ### CLI Login
 

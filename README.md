@@ -33,6 +33,13 @@ and core agent runtime surfaces only.
 | --- | --- | --- |
 | [`ai`](crates/ai) | [`packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) + core [`packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent) | Unified LLM API plus the core agent loop runtime for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub Copilot-compatible routing. |
 
+Upstream `pi` packages not ported as Rust crates in this workspace:
+
+| Upstream package | Rust status |
+| --- | --- |
+| [`packages/coding-agent`](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | Not included. |
+| [`packages/tui`](https://github.com/earendil-works/pi/tree/main/packages/tui) | Not included. |
+
 For API usage, model lookup, tool calling, streaming, OAuth, agent loop APIs,
 provider scope, image-input support, out-of-scope Pi surfaces, and the detailed
 upstream file mapping, see
