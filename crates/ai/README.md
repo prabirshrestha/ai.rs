@@ -1,10 +1,10 @@
-# ai
+# ai.rs
 
 Unified LLM API with automatic model discovery, provider configuration, token
 and cost tracking, streaming events, tool calling, simple context persistence,
 and hand-off to other models mid-session.
 
-This crate is the Rust port of the scoped
+The crate name is `ai`. This crate is the Rust port of the scoped
 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
 surface. The core runtime from
 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent)
@@ -18,7 +18,6 @@ calling, because tool calling is essential for agentic workflows.
 ## Table of Contents
 
 - [Supported Providers](#supported-providers)
-- [Port Scope](#port-scope)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Tools](#tools)
@@ -81,6 +80,7 @@ calling, because tool calling is essential for agentic workflows.
   - [Proxy Usage](#proxy-usage)
   - [Low-Level API](#low-level-api)
 - [Development](#development)
+  - [Upstream Mapping](#upstream-mapping)
   - [Adding a New Provider](#adding-a-new-provider)
 - [License](#license)
 
@@ -100,32 +100,6 @@ Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
 Responses, and other broad provider-specific APIs are not part of the active
 built-in provider surface in this port. PRs to add support for additional
 providers are welcome.
-
-## Port Scope
-
-This crate maps the active Rust surface to these upstream Pi files:
-
-| Rust module | Upstream Pi source | Status |
-| --- | --- | --- |
-| `src/stream.rs` | `packages/ai/src/stream.ts` | Ported |
-| `src/api_registry.rs` | `packages/ai/src/api-registry.ts` | Ported |
-| `src/models.rs` | `packages/ai/src/models.ts` | Ported with generated metadata filtered to active providers |
-| `src/env_api_keys.rs` | `packages/ai/src/env-api-keys.ts` | Ported for OpenAI, Anthropic, and GitHub Copilot |
-| `src/providers/openai_completions.rs` | `packages/ai/src/providers/openai-completions.ts` | Ported for scoped OpenAI-compatible chat behavior |
-| `src/providers/openai_responses.rs` | `packages/ai/src/providers/openai-responses.ts` and `openai-responses-shared.ts` | Ported for OpenAI Responses |
-| `src/providers/anthropic.rs` | `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages |
-| `src/providers/faux.rs` | `packages/ai/src/providers/faux.ts` | Ported for tests and deterministic demos |
-| `src/providers/github_copilot_headers.rs` | `packages/ai/src/providers/github-copilot-headers.ts` | Ported for Copilot-compatible routing |
-| `src/providers/simple_options.rs` | `packages/ai/src/providers/simple-options.ts` | Ported |
-| `src/providers/transform_messages.rs` | `packages/ai/src/providers/transform-messages.ts` | Ported |
-| `src/oauth.rs` | Pi OAuth helpers for Anthropic and GitHub Copilot | Ported for active OAuth providers |
-| `src/agent_types.rs` | `packages/agent/src/types.ts` | Ported into this crate |
-| `src/agent_loop.rs` | `packages/agent/src/agent-loop.ts` | Ported into this crate |
-| `src/agent.rs` | `packages/agent/src/agent.ts` | Ported into this crate |
-
-Not included in this Rust port: the TypeScript coding-agent harness, CLI, TUI,
-session sharing workflow, native Cloudflare, Bedrock, Google, Mistral, Azure
-OpenAI Responses, OpenAI Codex Responses, and image-generation APIs.
 
 ## Installation
 
@@ -1079,6 +1053,32 @@ cargo test --workspace
 
 This crate currently keeps Rust test coverage in module-level unit tests under
 `src`; there is no `crates/ai/tests` integration-test directory at the moment.
+
+### Upstream Mapping
+
+This crate maps the active Rust surface to these upstream Pi files:
+
+| Rust module | Upstream Pi source | Status |
+| --- | --- | --- |
+| `src/stream.rs` | `packages/ai/src/stream.ts` | Ported |
+| `src/api_registry.rs` | `packages/ai/src/api-registry.ts` | Ported |
+| `src/models.rs` | `packages/ai/src/models.ts` | Ported with generated metadata filtered to active providers |
+| `src/env_api_keys.rs` | `packages/ai/src/env-api-keys.ts` | Ported for OpenAI, Anthropic, and GitHub Copilot |
+| `src/providers/openai_completions.rs` | `packages/ai/src/providers/openai-completions.ts` | Ported for scoped OpenAI-compatible chat behavior |
+| `src/providers/openai_responses.rs` | `packages/ai/src/providers/openai-responses.ts` and `openai-responses-shared.ts` | Ported for OpenAI Responses |
+| `src/providers/anthropic.rs` | `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages |
+| `src/providers/faux.rs` | `packages/ai/src/providers/faux.ts` | Ported for tests and deterministic demos |
+| `src/providers/github_copilot_headers.rs` | `packages/ai/src/providers/github-copilot-headers.ts` | Ported for Copilot-compatible routing |
+| `src/providers/simple_options.rs` | `packages/ai/src/providers/simple-options.ts` | Ported |
+| `src/providers/transform_messages.rs` | `packages/ai/src/providers/transform-messages.ts` | Ported |
+| `src/oauth.rs` | Pi OAuth helpers for Anthropic and GitHub Copilot | Ported for active OAuth providers |
+| `src/agent_types.rs` | `packages/agent/src/types.ts` | Ported into this crate |
+| `src/agent_loop.rs` | `packages/agent/src/agent-loop.ts` | Ported into this crate |
+| `src/agent.rs` | `packages/agent/src/agent.ts` | Ported into this crate |
+
+Not included in this Rust port: the TypeScript coding-agent harness, CLI, TUI,
+session sharing workflow, native Cloudflare, Bedrock, Google, Mistral, Azure
+OpenAI Responses, OpenAI Codex Responses, and image-generation APIs.
 
 ### Adding a New Provider
 
