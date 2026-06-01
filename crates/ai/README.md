@@ -17,11 +17,16 @@ calling, because tool calling is essential for agentic workflows.
 ## Table of Contents
 
 - [Supported Providers](#supported-providers)
-- [Port Scope](#port-scope)
+- [Upstream Pi Mapping](#upstream-pi-mapping)
+  - [README Section Mapping](#readme-section-mapping)
   - [Upstream File Mapping](#upstream-file-mapping)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Agent Loop](#agent-loop)
+- [Agent Core](#agent-core)
+  - [Agent Loop](#agent-loop)
+  - [Agent State](#agent-state)
+  - [Agent Methods](#agent-methods)
+  - [Steering and Follow-up](#steering-and-follow-up)
 - [Tools](#tools)
   - [Defining Tools](#defining-tools)
   - [Handling Tool Calls](#handling-tool-calls)
@@ -84,7 +89,7 @@ providers are welcome.
 
 The TypeScript coding-agent harness, CLI, and TUI are not included.
 
-## Port Scope
+## Upstream Pi Mapping
 
 This crate tracks upstream `pi` behavior for the Rust APIs that correspond to
 the active scope:
@@ -105,6 +110,32 @@ uses TypeScript casts for provider-specific escape hatches, this crate exposes
 the equivalent through typed options where possible and
 `StreamOptions::provider_options` where the upstream behavior is intentionally
 loose.
+
+### README Section Mapping
+
+This README is a Rust adaptation of the upstream `packages/ai/README.md` plus
+the core runtime parts of `packages/agent/README.md`.
+
+| Upstream README | Rust README mapping |
+| --- | --- |
+| `packages/ai/README.md` Supported Providers | [Supported Providers](#supported-providers), narrowed to OpenAI, Anthropic, and GitHub Copilot-compatible routing. |
+| `packages/ai/README.md` Installation | [Installation](#installation), using Cargo and Tokio instead of npm. |
+| `packages/ai/README.md` Quick Start | [Quick Start](#quick-start), with Rust `Context`, `Message`, `Tool`, `stream_simple`, and `complete_simple`. |
+| `packages/ai/README.md` Tools | [Tools](#tools), using JSON Schema values and Rust validation helpers instead of TypeBox. |
+| `packages/ai/README.md` Image Input | [Image Input](#image-input), retained for chat/text generation. |
+| `packages/ai/README.md` Image Generation | Not included. Image generation is outside the active Rust provider surface. |
+| `packages/ai/README.md` Thinking/Reasoning | [Thinking/Reasoning](#thinkingreasoning), using Rust thinking-level types and provider options. |
+| `packages/ai/README.md` Stop Reasons | [Stop Reasons](#stop-reasons). |
+| `packages/ai/README.md` Error Handling | [Error Handling](#error-handling), using `CancellationToken` instead of `AbortController`. |
+| `packages/ai/README.md` APIs, Models, and Providers | [APIs, Models, and Providers](#apis-models-and-providers), narrowed to active stream APIs. |
+| `packages/ai/README.md` Cross-Provider Handoffs | [Cross-Provider Handoffs](#cross-provider-handoffs). |
+| `packages/ai/README.md` Context Serialization | [Context Serialization](#context-serialization), using `serde`. |
+| `packages/ai/README.md` Browser Usage | [Browser Usage](#browser-usage), marked not applicable for this native Rust crate. |
+| `packages/ai/README.md` OAuth Providers | [OAuth Providers](#oauth-providers), narrowed to Anthropic and GitHub Copilot. |
+| `packages/ai/README.md` Development | [Development](#development), using Cargo commands. |
+| `packages/agent/README.md` Quick Start, event flow, options, state, methods, steering/follow-up, tools, low-level API | [Agent Core](#agent-core), because the core agent loop lives in this crate. |
+| `packages/agent/README.md` Proxy usage | Use `AgentOptions::stream_fn`, or pass a custom `StreamFn` to the low-level loop functions. |
+| `packages/agent/src/harness/**`, coding-agent CLI, and TUI docs | Not included in this Rust crate. |
 
 ### Upstream File Mapping
 
@@ -222,15 +253,18 @@ async fn main() -> Result<()> {
 }
 ```
 
-## Agent Loop
+## Agent Core
 
-The reusable agent loop is part of this crate. It runs model turns, executes
-registered tools, appends tool results, and continues until the assistant stops,
-an error occurs, or a hook asks the loop to stop. The TypeScript harness, CLI,
-and TUI are not included in this Rust port.
+Stateful agent support from upstream `@earendil-works/pi-agent-core` is part of
+this crate. It runs model turns, executes registered tools, appends tool
+results, and continues until the assistant stops, an error occurs, or a hook
+asks the loop to stop. The TypeScript harness, CLI, and TUI are not included in
+this Rust port.
 
 For application-owned state, use `Agent`. For direct loop control, use
 `agent_loop` or `run_agent_loop`.
+
+### Agent Loop
 
 ```rust
 use futures::StreamExt;
@@ -281,6 +315,34 @@ Core loop hooks track upstream `pi` semantics:
   provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
   `Agent.prepareNextTurn`: it receives only the active cancellation token and
   can return the same turn update.
+
+### Agent State
+
+`AgentState` maps to upstream `AgentState` and contains the system prompt,
+active model, thinking level, tools, message history, streaming status, pending
+tool call IDs, and the latest error message.
+
+### Agent Methods
+
+`Agent` maps the upstream stateful wrapper:
+
+- `prompt_text` and `prompt_messages` start a run with new user or message
+  input.
+- `continue_run` resumes from existing context after a user or tool-result
+  message.
+- State mutation helpers update messages, tools, model, thinking level, session
+  ID, and agent options.
+- Subscription helpers emit the same core event categories as upstream:
+  `agent_start`, `turn_start`, `message_start`, `message_update`,
+  `message_end`, `tool_execution_start`, `tool_execution_update`,
+  `tool_execution_end`, `turn_end`, and `agent_end`.
+
+### Steering and Follow-up
+
+The loop supports upstream steering and follow-up queue semantics. The default
+mode processes one queued item at a time; `all` modes drain every queued item
+before the next model turn. `prepare_next_turn` can update context, model, and
+thinking level before the next request.
 
 ## Tools
 
@@ -759,8 +821,7 @@ cargo test -p ai --tests     # integration tests, if present
 ```
 
 This crate currently keeps its Rust test coverage in module-level unit tests
-under `src`. The prior Rust-only integration test files under `crates/ai/tests`
-were removed because they were not a 1:1 port of the upstream `pi` test layout.
+under `src`, matching the current scoped port layout.
 
 ### Adding a New Provider
 

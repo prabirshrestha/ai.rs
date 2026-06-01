@@ -16,6 +16,18 @@ surface exists:
 The goal is 1:1 behavior with upstream `pi` for the Rust APIs in scope before
 Rust-specific API polish.
 
+## Upstream Pi Mapping
+
+| Upstream `pi` README section | ai.rs mapping |
+| --- | --- |
+| Project introduction | This repository is `ai.rs`, a Rust port of the scoped AI and core agent runtime packages. |
+| Share your OSS coding agent sessions | Not part of this Rust crate. Upstream session publishing belongs to the TypeScript coding-agent workflow. |
+| All Packages | See [All Crates](#all-crates). The Rust workspace currently has one crate that combines the scoped AI package and core agent runtime. |
+| Contributing | PRs are welcome, especially for additional provider support that is intentionally out of scope today. |
+| Development | See [Development](#development) for the Rust equivalents of build, check, format, clippy, and test commands. |
+| Supply-chain hardening | See [Supply-chain hardening](#supply-chain-hardening) for the Rust equivalent. |
+| License | MIT. |
+
 ## All Crates
 
 | Crate | Upstream package | Description |
@@ -37,7 +49,7 @@ provider scope, and the detailed upstream file mapping, see
 | `packages/ai/src/providers/openai-completions.ts` | [`crates/ai/src/providers/openai_completions.rs`](crates/ai/src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
 | `packages/ai/src/providers/openai-responses.ts` | [`crates/ai/src/providers/openai_responses.rs`](crates/ai/src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming. |
 | `packages/ai/src/providers/anthropic.ts` | [`crates/ai/src/providers/anthropic.rs`](crates/ai/src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
-| `packages/ai/src/providers/faux.ts` | [`crates/ai/src/providers/faux.rs`](crates/ai/src/providers/faux.rs) | Deterministic test provider. |
+| `packages/ai/src/providers/faux.ts` | [`crates/ai/src/providers/faux.rs`](crates/ai/src/providers/faux.rs) | Deterministic test provider, matching upstream's opt-in test provider. |
 | `packages/ai/src/providers/register-builtins.ts` | [`crates/ai/src/providers/register_builtins.rs`](crates/ai/src/providers/register_builtins.rs) | Registers only the active built-in stream APIs. |
 | `packages/ai/src/providers/transform-messages.ts` | [`crates/ai/src/providers/transform_messages.rs`](crates/ai/src/providers/transform_messages.rs) | Cross-provider message normalization. |
 | `packages/agent/src/types.ts` | [`crates/ai/src/agent_types.rs`](crates/ai/src/agent_types.rs) | Core agent types and event shapes. |
@@ -62,6 +74,12 @@ The TypeScript coding-agent harness, CLI, and TUI from
 [`pi`](https://github.com/earendil-works/pi) are not included. The core agent
 loop is implemented directly inside the `ai` crate.
 
+## Contributing
+
+The current priority is parity with upstream `pi` for the scoped Rust API.
+When adding behavior, prefer a direct upstream mapping first, then Rust-specific
+API polish after the behavior is covered.
+
 ## Development
 
 ```bash
@@ -79,6 +97,12 @@ cargo test -p ai --lib       # unit tests
 cargo test -p ai --doc       # doc tests
 cargo test -p ai --tests     # integration tests, if present
 ```
+
+## Supply-chain hardening
+
+Rust dependency changes are reviewed as code changes. `Cargo.lock` is the
+workspace dependency ground truth, and CI-style local validation should include
+formatting, `cargo check`, clippy, and tests before merging.
 
 ## License
 
