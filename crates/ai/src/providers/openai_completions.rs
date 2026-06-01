@@ -1808,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_omits_default_max_token_fields() {
+    fn does_not_send_default_max_token_fields() {
         let model = model();
         let context = Context {
             messages: vec![Message::user_text("hi")],
@@ -1827,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_sends_explicit_max_tokens_with_compat_field() {
+    fn sends_explicit_max_tokens() {
         let model = model();
         let context = Context {
             messages: vec![Message::user_text("hi")],
@@ -1968,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_omits_tools_when_context_tools_are_empty() {
+    fn omits_tools_field_when_context_tools_is_an_empty_array() {
         let model = model();
         let context = Context {
             messages: vec![Message::user_text("hi")],
@@ -1988,7 +1988,26 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_sends_empty_tools_for_tool_history_without_current_tools() {
+    fn omits_tools_field_when_context_tools_is_undefined() {
+        let model = model();
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("tools").is_none());
+    }
+
+    #[test]
+    fn still_emits_tools_for_anthropic_litellm_proxy_when_conversation_has_tool_history() {
         let model = model();
         let mut assistant = AssistantMessage::empty_for(&model);
         assistant.content.push(AssistantContent::ToolCall(ToolCall {
@@ -2979,7 +2998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_simple_forwards_tool_choice_to_payload() {
+    async fn forwards_tool_choice_from_simple_options_to_payload() {
         let mut chat_model = model();
         chat_model.reasoning = false;
         chat_model.base_url = spawn_sse_server(chat_sse_body(&[json!({
