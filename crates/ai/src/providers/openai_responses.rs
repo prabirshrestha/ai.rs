@@ -2126,7 +2126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn function_call_partial_json_is_not_persisted() {
+    async fn removes_partial_json_from_persisted_tool_call_blocks_at_output_item_done() {
         let arguments = r#"{"path":"README.md","content":"updated"}"#;
         let body = sse_body(&[
             json!({
@@ -3140,7 +3140,7 @@ mod tests {
     }
 
     #[test]
-    fn generates_unique_fallback_message_ids_for_multiple_text_blocks() {
+    fn generates_unique_fallback_message_ids_for_multiple_text_blocks_in_one_assistant_turn() {
         let model = model();
         let assistant = AssistantMessage {
             content: vec![
@@ -3430,7 +3430,7 @@ mod tests {
     }
 
     #[test]
-    fn hashes_foreign_tool_item_ids_for_responses_models() {
+    fn hashes_foreign_copilot_tool_item_ids_into_a_bounded_codex_safe_fc_hash_shape() {
         let model = model();
         let assistant = AssistantMessage {
             content: vec![AssistantContent::ToolCall(ToolCall {
@@ -3495,7 +3495,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_images_stay_inside_function_call_output() {
+    fn should_send_tool_result_images_in_function_call_output() {
         let model = model();
         let assistant = AssistantMessage {
             content: vec![AssistantContent::ToolCall(ToolCall {
