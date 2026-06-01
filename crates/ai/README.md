@@ -593,7 +593,9 @@ downgraded or omitted where the target API cannot accept it.
 
 `Context`, `Message`, assistant content, tool calls, and tool results implement
 `Serialize` and `Deserialize`, so context can be persisted or handed to another
-process.
+process. Serialized user, assistant, and tool-result messages include the same
+`role` fields as upstream Pi, including assistant messages nested in stream
+events.
 
 ```rust
 use ai::Context;

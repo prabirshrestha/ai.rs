@@ -3,7 +3,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -318,7 +319,7 @@ pub enum StopReason {
     Aborted,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserMessage {
     pub content: UserMessageContent,
     pub timestamp: u64,
@@ -333,22 +334,17 @@ impl UserMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssistantMessage {
     pub content: Vec<AssistantContent>,
     pub api: Api,
     pub provider: Provider,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Value>,
     pub usage: Usage,
     pub stop_reason: StopReason,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub timestamp: u64,
 }
@@ -371,29 +367,259 @@ impl AssistantMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolResultMessage {
     pub tool_call_id: String,
     pub tool_name: String,
     pub content: Vec<ToolResultContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
     pub is_error: bool,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "role")]
+fn validate_role(role: Option<&str>, expected: &str) -> std::result::Result<(), String> {
+    match role {
+        Some(actual) if actual != expected => {
+            Err(format!("expected role {expected}, got {actual}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+impl Serialize for UserMessage {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("UserMessage", 3)?;
+        state.serialize_field("role", "user")?;
+        state.serialize_field("content", &self.content)?;
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UserMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            role: Option<String>,
+            content: UserMessageContent,
+            timestamp: u64,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        validate_role(helper.role.as_deref(), "user").map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            content: helper.content,
+            timestamp: helper.timestamp,
+        })
+    }
+}
+
+impl Serialize for AssistantMessage {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut field_count = 8;
+        if self.response_model.is_some() {
+            field_count += 1;
+        }
+        if self.response_id.is_some() {
+            field_count += 1;
+        }
+        if !self.diagnostics.is_empty() {
+            field_count += 1;
+        }
+        if self.error_message.is_some() {
+            field_count += 1;
+        }
+
+        let mut state = serializer.serialize_struct("AssistantMessage", field_count)?;
+        state.serialize_field("role", "assistant")?;
+        state.serialize_field("content", &self.content)?;
+        state.serialize_field("api", &self.api)?;
+        state.serialize_field("provider", &self.provider)?;
+        state.serialize_field("model", &self.model)?;
+        if let Some(response_model) = &self.response_model {
+            state.serialize_field("responseModel", response_model)?;
+        }
+        if let Some(response_id) = &self.response_id {
+            state.serialize_field("responseId", response_id)?;
+        }
+        if !self.diagnostics.is_empty() {
+            state.serialize_field("diagnostics", &self.diagnostics)?;
+        }
+        state.serialize_field("usage", &self.usage)?;
+        state.serialize_field("stopReason", &self.stop_reason)?;
+        if let Some(error_message) = &self.error_message {
+            state.serialize_field("errorMessage", error_message)?;
+        }
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AssistantMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Helper {
+            role: Option<String>,
+            content: Vec<AssistantContent>,
+            api: Api,
+            provider: Provider,
+            model: String,
+            response_model: Option<String>,
+            response_id: Option<String>,
+            #[serde(default)]
+            diagnostics: Vec<Value>,
+            usage: Usage,
+            stop_reason: StopReason,
+            error_message: Option<String>,
+            timestamp: u64,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        validate_role(helper.role.as_deref(), "assistant").map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            content: helper.content,
+            api: helper.api,
+            provider: helper.provider,
+            model: helper.model,
+            response_model: helper.response_model,
+            response_id: helper.response_id,
+            diagnostics: helper.diagnostics,
+            usage: helper.usage,
+            stop_reason: helper.stop_reason,
+            error_message: helper.error_message,
+            timestamp: helper.timestamp,
+        })
+    }
+}
+
+impl Serialize for ToolResultMessage {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut field_count = 6;
+        if self.details.is_some() {
+            field_count += 1;
+        }
+        let mut state = serializer.serialize_struct("ToolResultMessage", field_count)?;
+        state.serialize_field("role", "toolResult")?;
+        state.serialize_field("toolCallId", &self.tool_call_id)?;
+        state.serialize_field("toolName", &self.tool_name)?;
+        state.serialize_field("content", &self.content)?;
+        if let Some(details) = &self.details {
+            state.serialize_field("details", details)?;
+        }
+        state.serialize_field("isError", &self.is_error)?;
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolResultMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Helper {
+            role: Option<String>,
+            tool_call_id: String,
+            tool_name: String,
+            content: Vec<ToolResultContent>,
+            details: Option<Value>,
+            is_error: bool,
+            timestamp: u64,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        validate_role(helper.role.as_deref(), "toolResult").map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            tool_call_id: helper.tool_call_id,
+            tool_name: helper.tool_name,
+            content: helper.content,
+            details: helper.details,
+            is_error: helper.is_error,
+            timestamp: helper.timestamp,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    #[serde(rename = "user")]
     User(UserMessage),
-    #[serde(rename = "assistant")]
     Assistant(AssistantMessage),
-    #[serde(rename = "toolResult")]
     ToolResult(ToolResultMessage),
-    #[serde(rename = "custom")]
     Custom(Value),
+}
+
+impl Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::User(message) => message.serialize(serializer),
+            Self::Assistant(message) => message.serialize(serializer),
+            Self::ToolResult(message) => message.serialize(serializer),
+            Self::Custom(value) => {
+                let mut value = value.clone();
+                match &mut value {
+                    Value::Object(object) => {
+                        object
+                            .entry("role".to_string())
+                            .or_insert_with(|| Value::String("custom".to_string()));
+                        value.serialize(serializer)
+                    }
+                    _ => {
+                        let mut state = serializer.serialize_struct("CustomMessage", 2)?;
+                        state.serialize_field("role", "custom")?;
+                        state.serialize_field("value", &value)?;
+                        state.end()
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let role = value
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("missing message role"))?;
+        match role {
+            "user" => serde_json::from_value(value)
+                .map(Self::User)
+                .map_err(serde::de::Error::custom),
+            "assistant" => serde_json::from_value(value)
+                .map(Self::Assistant)
+                .map_err(serde::de::Error::custom),
+            "toolResult" => serde_json::from_value(value)
+                .map(Self::ToolResult)
+                .map_err(serde::de::Error::custom),
+            "custom" => Ok(Self::Custom(value)),
+            _ => Ok(Self::Custom(value)),
+        }
+    }
 }
 
 impl Message {
@@ -646,4 +872,97 @@ pub enum AssistantMessageEvent {
         reason: StopReason,
         error: AssistantMessage,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn assistant_message() -> AssistantMessage {
+        AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: "hello".to_string(),
+                text_signature: None,
+            })],
+            api: "openai-responses".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.5".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 123,
+        }
+    }
+
+    #[test]
+    fn bare_messages_serialize_with_upstream_roles() {
+        assert_eq!(
+            serde_json::to_value(UserMessage {
+                content: UserMessageContent::Text("hi".to_string()),
+                timestamp: 1,
+            })
+            .unwrap()["role"],
+            json!("user")
+        );
+        assert_eq!(
+            serde_json::to_value(assistant_message()).unwrap()["role"],
+            json!("assistant")
+        );
+        assert_eq!(
+            serde_json::to_value(ToolResultMessage {
+                tool_call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![ToolResultContent::text("done")],
+                details: None,
+                is_error: false,
+                timestamp: 2,
+            })
+            .unwrap()["role"],
+            json!("toolResult")
+        );
+    }
+
+    #[test]
+    fn assistant_events_include_role_in_nested_messages() {
+        let message = assistant_message();
+        let event = AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message,
+        };
+        let value = serde_json::to_value(event).unwrap();
+
+        assert_eq!(value["type"], json!("done"));
+        assert_eq!(value["message"]["role"], json!("assistant"));
+    }
+
+    #[test]
+    fn context_messages_round_trip_with_roles() {
+        let context = Context {
+            messages: vec![
+                Message::user_text("hi"),
+                Message::Assistant(assistant_message()),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("done")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 2,
+                }),
+            ],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&context).unwrap();
+        let restored: Context = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(value["messages"][0]["role"], json!("user"));
+        assert_eq!(value["messages"][1]["role"], json!("assistant"));
+        assert_eq!(value["messages"][2]["role"], json!("toolResult"));
+        assert_eq!(restored, context);
+    }
 }
