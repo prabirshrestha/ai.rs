@@ -24,18 +24,6 @@ calling, because tool calling is essential for agentic workflows.
 - [Supported Providers](#supported-providers)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Agent Core](#agent-core)
-  - [Core Concepts](#core-concepts)
-  - [Event Flow](#event-flow)
-  - [Agent Options](#agent-options)
-  - [Agent Loop](#agent-loop)
-  - [Agent State](#agent-state)
-  - [Agent Methods](#agent-methods)
-  - [Steering and Follow-up](#steering-and-follow-up)
-  - [Custom Message Types](#custom-message-types)
-  - [Agent Tools](#agent-tools)
-  - [Proxy Usage](#proxy-usage)
-  - [Low-Level API](#low-level-api)
 - [Tools](#tools)
   - [Defining Tools](#defining-tools)
   - [Handling Tool Calls](#handling-tool-calls)
@@ -78,6 +66,18 @@ calling, because tool calling is essential for agentic workflows.
   - [Login Flow Example](#login-flow-example)
   - [Using OAuth Tokens](#using-oauth-tokens)
   - [Provider Notes](#provider-notes)
+- [Agent Core](#agent-core)
+  - [Core Concepts](#core-concepts)
+  - [Event Flow](#event-flow)
+  - [Agent Options](#agent-options)
+  - [Agent Loop](#agent-loop)
+  - [Agent State](#agent-state)
+  - [Agent Methods](#agent-methods)
+  - [Steering and Follow-up](#steering-and-follow-up)
+  - [Custom Message Types](#custom-message-types)
+  - [Agent Tools](#agent-tools)
+  - [Proxy Usage](#proxy-usage)
+  - [Low-Level API](#low-level-api)
 - [Development](#development)
   - [Adding a New Provider](#adding-a-new-provider)
 - [Upstream Pi Mapping](#upstream-pi-mapping)
@@ -185,185 +185,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 ```
-
-## Agent Core
-
-Stateful agent support from upstream `@earendil-works/pi-agent-core` is part of
-this crate. It runs model turns, executes registered tools, appends tool
-results, and continues until the assistant stops, an error occurs, or a hook
-asks the loop to stop. The TypeScript harness, CLI, and TUI are not included in
-this Rust port.
-
-For application-owned state, use `Agent`. For direct loop control, use
-`agent_loop` or `run_agent_loop`.
-
-### Core Concepts
-
-`AgentMessage` is the same portable `Message` enum used by the shared LLM API.
-It can contain normal LLM messages (`User`, `Assistant`, `ToolResult`) and
-`Custom` app-owned messages.
-
-The loop follows the upstream message flow:
-
-```text
-AgentMessage[] -> transform_context() -> AgentMessage[] -> convert_to_llm() -> Message[] -> LLM
-```
-
-`transform_context` is optional and is intended for pruning, compaction, or
-external context injection. `convert_to_llm` is required by the loop config and
-filters or converts app-owned messages before each provider request.
-
-### Event Flow
-
-`prompt_text("Hello")` maps to the upstream `prompt("Hello")` event sequence:
-
-```text
-agent_start
-turn_start
-message_start   user
-message_end     user
-message_start   assistant
-message_update  assistant delta
-message_end     assistant
-turn_end
-agent_end
-```
-
-When the assistant calls tools, the same turn emits `tool_execution_start`,
-optional `tool_execution_update`, `tool_execution_end`, then a tool-result
-`message_start` / `message_end`. If the batch does not terminate, the next turn
-starts and the model receives the tool results.
-
-`Agent::subscribe` listeners are awaited in registration order. `agent_end`
-means no more loop events will be emitted, but `wait_for_idle` only returns
-after awaited listeners for that final event have settled.
-
-### Agent Options
-
-`AgentOptions` maps upstream constructor options to Rust fields:
-
-- `initial_state`: system prompt, model, thinking level, tools, and messages.
-- `convert_to_llm` and `transform_context`: context conversion hooks.
-- `stream_fn`: custom stream function for proxy backends.
-- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
-- `before_tool_call` and `after_tool_call`: tool preflight and postprocess
-  hooks.
-- `prepare_next_turn`: hook that can replace context, model, or thinking level.
-- `session_id`: forwarded through `SimpleStreamOptions`.
-- `options`: Rust home for upstream `onPayload`, `onResponse`, transport,
-  thinking budgets, retry delay, API key, cancellation, and provider options.
-- `steering_mode`, `follow_up_mode`, and `tool_execution`: queue and tool batch
-  execution behavior.
-
-### Agent Loop
-
-```rust
-use futures::StreamExt;
-
-use ai::{
-    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig, Message, Result,
-};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let model = get_model("openai", "gpt-4o-mini").expect("model");
-    let context = AgentContext {
-        system_prompt: "You are a concise assistant.".to_string(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
-    let config = AgentLoopConfig::new(model);
-    let prompts = vec![Message::user_text("What is the capital of France?")];
-
-    let mut events = agent_loop(prompts, context, config, None, None);
-    while let Some(event) = events.next().await {
-        match event {
-            AgentEvent::MessageEnd { message } => println!("{message:?}"),
-            AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                println!("running tool: {tool_name}");
-            }
-            _ => {}
-        }
-    }
-
-    let _new_messages = events.result().await?;
-    Ok(())
-}
-```
-
-Core loop hooks track upstream `pi` semantics:
-
-- `transform_context` runs before `convert_to_llm`.
-- `before_tool_call` receives already-validated arguments. Its `args` field is
-  shared mutable state so hooks can mutate arguments before execution, matching
-  upstream JavaScript object-reference behavior; the loop does not revalidate
-  after that mutation.
-- `after_tool_call` can replace content/details/error state and can set
-  `terminate`; a tool batch terminates only when every finalized result has
-  `terminate = true`.
-- On `AgentLoopConfig`, `prepare_next_turn` can replace the next context,
-  model, or thinking level before steering/follow-up polling starts another
-  provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
-  `Agent.prepareNextTurn`: it receives only the active cancellation token and
-  can return the same turn update.
-
-### Agent State
-
-`AgentState` maps to upstream `AgentState` and contains the system prompt,
-active model, thinking level, tools, message history, streaming status, pending
-tool call IDs, and the latest error message.
-
-### Agent Methods
-
-`Agent` maps the upstream stateful wrapper:
-
-- `prompt_text` and `prompt_messages` start a run with new user or message
-  input.
-- `continue_run` resumes from existing context after a user or tool-result
-  message.
-- State mutation helpers update messages, tools, model, thinking level, session
-  ID, and agent options.
-- Subscription helpers emit the same core event categories as upstream:
-  `agent_start`, `turn_start`, `message_start`, `message_update`,
-  `message_end`, `tool_execution_start`, `tool_execution_update`,
-  `tool_execution_end`, `turn_end`, and `agent_end`.
-
-### Steering and Follow-up
-
-The loop supports upstream steering and follow-up queue semantics. The default
-mode processes one queued item at a time; `all` modes drain every queued item
-before the next model turn. `prepare_next_turn` can update context, model, and
-thinking level before the next request.
-
-### Custom Message Types
-
-Use `Message::Custom` for app-specific agent transcript entries. Custom
-messages are retained in agent state, then filtered or converted by
-`convert_to_llm` before provider calls.
-
-### Agent Tools
-
-Agent tools implement the `AgentTool` trait. `definition()` returns the shared
-`Tool` schema, `label()` provides UI text, `execution_mode()` can force a whole
-batch to run sequentially, `prepare_arguments()` can reshape model arguments
-before validation, and `execute()` performs the tool work.
-
-Tool failures should return an error from `execute()`. The loop catches that
-error and reports a tool-result message with `is_error = true`, matching
-upstream behavior.
-
-### Proxy Usage
-
-For proxy backends, pass a custom `StreamFn` through `AgentOptions::stream_fn`
-or directly to `agent_loop`. The function receives the selected `Model`, the
-converted `Context`, and `SimpleStreamOptions`.
-
-### Low-Level API
-
-Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
-`run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
-loop directly. These are the Rust equivalents of upstream `agentLoop` and
-`agentLoopContinue`.
 
 ## Tools
 
@@ -844,6 +665,185 @@ Some Copilot model ids use upstream vendor names such as Gemini or Grok, but
 they are routed through the active OpenAI/Anthropic-compatible APIs in this
 crate; native Google, xAI, or other provider APIs are not registered.
 Anthropic OAuth follows the Claude Pro/Max OAuth flow.
+
+## Agent Core
+
+Stateful agent support from upstream `@earendil-works/pi-agent-core` is part of
+this crate. It runs model turns, executes registered tools, appends tool
+results, and continues until the assistant stops, an error occurs, or a hook
+asks the loop to stop. The TypeScript harness, CLI, and TUI are not included in
+this Rust port.
+
+For application-owned state, use `Agent`. For direct loop control, use
+`agent_loop` or `run_agent_loop`.
+
+### Core Concepts
+
+`AgentMessage` is the same portable `Message` enum used by the shared LLM API.
+It can contain normal LLM messages (`User`, `Assistant`, `ToolResult`) and
+`Custom` app-owned messages.
+
+The loop follows the upstream message flow:
+
+```text
+AgentMessage[] -> transform_context() -> AgentMessage[] -> convert_to_llm() -> Message[] -> LLM
+```
+
+`transform_context` is optional and is intended for pruning, compaction, or
+external context injection. `convert_to_llm` is required by the loop config and
+filters or converts app-owned messages before each provider request.
+
+### Event Flow
+
+`prompt_text("Hello")` maps to the upstream `prompt("Hello")` event sequence:
+
+```text
+agent_start
+turn_start
+message_start   user
+message_end     user
+message_start   assistant
+message_update  assistant delta
+message_end     assistant
+turn_end
+agent_end
+```
+
+When the assistant calls tools, the same turn emits `tool_execution_start`,
+optional `tool_execution_update`, `tool_execution_end`, then a tool-result
+`message_start` / `message_end`. If the batch does not terminate, the next turn
+starts and the model receives the tool results.
+
+`Agent::subscribe` listeners are awaited in registration order. `agent_end`
+means no more loop events will be emitted, but `wait_for_idle` only returns
+after awaited listeners for that final event have settled.
+
+### Agent Options
+
+`AgentOptions` maps upstream constructor options to Rust fields:
+
+- `initial_state`: system prompt, model, thinking level, tools, and messages.
+- `convert_to_llm` and `transform_context`: context conversion hooks.
+- `stream_fn`: custom stream function for proxy backends.
+- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
+- `before_tool_call` and `after_tool_call`: tool preflight and postprocess
+  hooks.
+- `prepare_next_turn`: hook that can replace context, model, or thinking level.
+- `session_id`: forwarded through `SimpleStreamOptions`.
+- `options`: Rust home for upstream `onPayload`, `onResponse`, transport,
+  thinking budgets, retry delay, API key, cancellation, and provider options.
+- `steering_mode`, `follow_up_mode`, and `tool_execution`: queue and tool batch
+  execution behavior.
+
+### Agent Loop
+
+```rust
+use futures::StreamExt;
+
+use ai::{
+    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig, Message, Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = get_model("openai", "gpt-4o-mini").expect("model");
+    let context = AgentContext {
+        system_prompt: "You are a concise assistant.".to_string(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let config = AgentLoopConfig::new(model);
+    let prompts = vec![Message::user_text("What is the capital of France?")];
+
+    let mut events = agent_loop(prompts, context, config, None, None);
+    while let Some(event) = events.next().await {
+        match event {
+            AgentEvent::MessageEnd { message } => println!("{message:?}"),
+            AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                println!("running tool: {tool_name}");
+            }
+            _ => {}
+        }
+    }
+
+    let _new_messages = events.result().await?;
+    Ok(())
+}
+```
+
+Core loop hooks track upstream `pi` semantics:
+
+- `transform_context` runs before `convert_to_llm`.
+- `before_tool_call` receives already-validated arguments. Its `args` field is
+  shared mutable state so hooks can mutate arguments before execution, matching
+  upstream JavaScript object-reference behavior; the loop does not revalidate
+  after that mutation.
+- `after_tool_call` can replace content/details/error state and can set
+  `terminate`; a tool batch terminates only when every finalized result has
+  `terminate = true`.
+- On `AgentLoopConfig`, `prepare_next_turn` can replace the next context,
+  model, or thinking level before steering/follow-up polling starts another
+  provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
+  `Agent.prepareNextTurn`: it receives only the active cancellation token and
+  can return the same turn update.
+
+### Agent State
+
+`AgentState` maps to upstream `AgentState` and contains the system prompt,
+active model, thinking level, tools, message history, streaming status, pending
+tool call IDs, and the latest error message.
+
+### Agent Methods
+
+`Agent` maps the upstream stateful wrapper:
+
+- `prompt_text` and `prompt_messages` start a run with new user or message
+  input.
+- `continue_run` resumes from existing context after a user or tool-result
+  message.
+- State mutation helpers update messages, tools, model, thinking level, session
+  ID, and agent options.
+- Subscription helpers emit the same core event categories as upstream:
+  `agent_start`, `turn_start`, `message_start`, `message_update`,
+  `message_end`, `tool_execution_start`, `tool_execution_update`,
+  `tool_execution_end`, `turn_end`, and `agent_end`.
+
+### Steering and Follow-up
+
+The loop supports upstream steering and follow-up queue semantics. The default
+mode processes one queued item at a time; `all` modes drain every queued item
+before the next model turn. `prepare_next_turn` can update context, model, and
+thinking level before the next request.
+
+### Custom Message Types
+
+Use `Message::Custom` for app-specific agent transcript entries. Custom
+messages are retained in agent state, then filtered or converted by
+`convert_to_llm` before provider calls.
+
+### Agent Tools
+
+Agent tools implement the `AgentTool` trait. `definition()` returns the shared
+`Tool` schema, `label()` provides UI text, `execution_mode()` can force a whole
+batch to run sequentially, `prepare_arguments()` can reshape model arguments
+before validation, and `execute()` performs the tool work.
+
+Tool failures should return an error from `execute()`. The loop catches that
+error and reports a tool-result message with `is_error = true`, matching
+upstream behavior.
+
+### Proxy Usage
+
+For proxy backends, pass a custom `StreamFn` through `AgentOptions::stream_fn`
+or directly to `agent_loop`. The function receives the selected `Model`, the
+converted `Context`, and `SimpleStreamOptions`.
+
+### Low-Level API
+
+Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
+`run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
+loop directly. These are the Rust equivalents of upstream `agentLoop` and
+`agentLoopContinue`.
 
 ## Development
 
