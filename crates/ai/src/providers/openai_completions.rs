@@ -20,7 +20,6 @@ use crate::types::{
 };
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
-use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
 use crate::{Error, Result};
 
@@ -798,7 +797,7 @@ pub fn convert_messages(
         } else {
             "system"
         };
-        params.push(json!({ "role": role, "content": sanitize_surrogates(system_prompt) }));
+        params.push(json!({ "role": role, "content": system_prompt }));
     }
 
     let mut last_role: Option<&str> = None;
@@ -817,7 +816,7 @@ pub fn convert_messages(
         match msg {
             crate::types::Message::User(user) => match &user.content {
                 UserMessageContent::Text(text) => {
-                    params.push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
+                    params.push(json!({ "role": "user", "content": text }));
                     last_role = Some("user");
                 }
                 UserMessageContent::Parts(parts) => {
@@ -825,7 +824,7 @@ pub fn convert_messages(
                             .iter()
                             .map(|part| match part {
                                 UserContent::Text(text) => {
-                                    json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
+                                    json!({ "type": "text", "text": &text.text })
                                 }
                                 UserContent::Image(image) => json!({
                                     "type": "image_url",
@@ -850,7 +849,7 @@ pub fn convert_messages(
                     .iter()
                     .filter_map(|block| match block {
                         AssistantContent::Text(text) if !text.text.trim().is_empty() => {
-                            Some(json!({ "type": "text", "text": sanitize_surrogates(&text.text) }))
+                            Some(json!({ "type": "text", "text": &text.text }))
                         }
                         _ => None,
                     })
@@ -875,7 +874,7 @@ pub fn convert_messages(
                     if compat.requires_thinking_as_text {
                         let thinking_text = thinking_blocks
                             .iter()
-                            .map(|block| sanitize_surrogates(&block.thinking))
+                            .map(|block| block.thinking.as_str())
                             .collect::<Vec<_>>()
                             .join("\n\n");
                         let mut content = vec![json!({ "type": "text", "text": thinking_text })];
@@ -979,7 +978,7 @@ pub fn convert_messages(
                     let has_text = !text_result.is_empty();
                     let mut tool_result = json!({
                         "role": "tool",
-                        "content": sanitize_surrogates(if has_text { &text_result } else { "(see attached image)" }),
+                        "content": if has_text { &text_result } else { "(see attached image)" },
                         "tool_call_id": tool_msg.tool_call_id
                     });
                     if compat.requires_tool_result_name && !tool_msg.tool_name.is_empty() {

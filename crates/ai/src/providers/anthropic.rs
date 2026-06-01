@@ -19,7 +19,6 @@ use crate::types::{
 };
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
-use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
 use crate::{Error, Result};
 
@@ -627,7 +626,7 @@ fn build_anthropic_payload(
         if let Some(system_prompt) = &context.system_prompt
             && !system_prompt.is_empty()
         {
-            let mut item = json!({ "type": "text", "text": sanitize_surrogates(system_prompt) });
+            let mut item = json!({ "type": "text", "text": system_prompt });
             if let Some(cache_control) = &cache_control {
                 item["cache_control"] = cache_control.clone();
             }
@@ -637,7 +636,7 @@ fn build_anthropic_payload(
     } else if let Some(system_prompt) = &context.system_prompt
         && !system_prompt.is_empty()
     {
-        let mut item = json!({ "type": "text", "text": sanitize_surrogates(system_prompt) });
+        let mut item = json!({ "type": "text", "text": system_prompt });
         if let Some(cache_control) = &cache_control {
             item["cache_control"] = cache_control.clone();
         }
@@ -728,19 +727,15 @@ fn convert_messages(
             crate::types::Message::User(user) => match &user.content {
                 UserMessageContent::Text(text) => {
                     if !text.trim().is_empty() {
-                        params
-                            .push(json!({ "role": "user", "content": sanitize_surrogates(text) }));
+                        params.push(json!({ "role": "user", "content": text }));
                     }
                 }
                 UserMessageContent::Parts(parts) => {
                     let blocks: Vec<Value> = parts
                         .iter()
                         .filter_map(|item| match item {
-                            UserContent::Text(text) => {
-                                (!text.text.trim().is_empty()).then(|| {
-                                    json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
-                                })
-                            }
+                            UserContent::Text(text) => (!text.text.trim().is_empty())
+                                .then(|| json!({ "type": "text", "text": &text.text })),
                             UserContent::Image(image) => Some(json!({
                                 "type": "image",
                                 "source": {
@@ -761,7 +756,7 @@ fn convert_messages(
                 for block in &assistant.content {
                     match block {
                         AssistantContent::Text(text) if !text.text.trim().is_empty() => {
-                            blocks.push(json!({ "type": "text", "text": sanitize_surrogates(&text.text) }));
+                            blocks.push(json!({ "type": "text", "text": &text.text }));
                         }
                         AssistantContent::Thinking(thinking) if thinking.redacted == Some(true) => {
                             if let Some(signature) = &thinking.thinking_signature {
@@ -772,17 +767,17 @@ fn convert_messages(
                             match thinking.thinking_signature.as_deref().filter(|s| !s.trim().is_empty()) {
                                 Some(signature) => blocks.push(json!({
                                     "type": "thinking",
-                                    "thinking": sanitize_surrogates(&thinking.thinking),
+                                    "thinking": &thinking.thinking,
                                     "signature": signature
                                 })),
                                 None if allow_empty_signature => blocks.push(json!({
                                     "type": "thinking",
-                                    "thinking": sanitize_surrogates(&thinking.thinking),
+                                    "thinking": &thinking.thinking,
                                     "signature": ""
                                 })),
                                 None => blocks.push(json!({
                                     "type": "text",
-                                    "text": sanitize_surrogates(&thinking.thinking)
+                                    "text": &thinking.thinking
                                 })),
                             }
                         }
@@ -868,14 +863,14 @@ fn convert_content_blocks(content: &[ToolResultContent]) -> Value {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        return json!(sanitize_surrogates(&text));
+        return json!(&text);
     }
 
     let mut blocks: Vec<Value> = content
         .iter()
         .map(|block| match block {
             ToolResultContent::Text(text) => {
-                json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
+                json!({ "type": "text", "text": &text.text })
             }
             ToolResultContent::Image(image) => json!({
                 "type": "image",

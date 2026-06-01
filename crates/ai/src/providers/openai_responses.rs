@@ -21,7 +21,6 @@ use crate::types::{
 use crate::utils::hash::short_hash;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
-use crate::utils::sanitize::sanitize_surrogates;
 use crate::utils::sse;
 use crate::{Error, Result};
 
@@ -831,7 +830,7 @@ fn try_convert_responses_messages(
     {
         messages.push(json!({
             "role": if model.reasoning { "developer" } else { "system" },
-            "content": sanitize_surrogates(system_prompt),
+            "content": system_prompt,
         }));
     }
 
@@ -841,14 +840,14 @@ fn try_convert_responses_messages(
             crate::types::Message::User(user) => match user.content {
                 UserMessageContent::Text(text) => messages.push(json!({
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": sanitize_surrogates(&text) }]
+                    "content": [{ "type": "input_text", "text": &text }]
                 })),
                 UserMessageContent::Parts(parts) => {
                     let content: Vec<Value> = parts
                         .iter()
                         .map(|item| match item {
                             UserContent::Text(text) => {
-                                json!({ "type": "input_text", "text": sanitize_surrogates(&text.text) })
+                                json!({ "type": "input_text", "text": &text.text })
                             }
                             UserContent::Image(image) => json!({
                                 "type": "input_image",
@@ -900,7 +899,7 @@ fn try_convert_responses_messages(
                             let mut item = json!({
                                 "type": "message",
                                 "role": "assistant",
-                                "content": [{ "type": "output_text", "text": sanitize_surrogates(&text.text), "annotations": [] }],
+                                "content": [{ "type": "output_text", "text": &text.text, "annotations": [] }],
                                 "status": "completed",
                                 "id": msg_id,
                             });
@@ -965,7 +964,7 @@ fn try_convert_responses_messages(
                 let output = if has_images && model.input.contains(&ModelInput::Image) {
                     let mut content = Vec::new();
                     if !text_result.is_empty() {
-                        content.push(json!({ "type": "input_text", "text": sanitize_surrogates(&text_result) }));
+                        content.push(json!({ "type": "input_text", "text": &text_result }));
                     }
                     for block in tool_result.content {
                         if let ToolResultContent::Image(ImageContent { data, mime_type }) = block {
@@ -978,11 +977,11 @@ fn try_convert_responses_messages(
                     }
                     Value::Array(content)
                 } else {
-                    json!(sanitize_surrogates(if text_result.is_empty() {
+                    json!(if text_result.is_empty() {
                         "(see attached image)"
                     } else {
                         &text_result
-                    }))
+                    })
                 };
                 messages.push(json!({
                     "type": "function_call_output",
