@@ -680,7 +680,15 @@ fn normalize_faux_assistant_content(content: FauxAssistantContent) -> Vec<Assist
 }
 
 fn estimate_tokens(text: &str) -> u32 {
-    text.chars().count().div_ceil(4) as u32
+    estimate_tokens_from_units(utf16_len(text))
+}
+
+fn estimate_tokens_from_units(units: usize) -> u32 {
+    units.div_ceil(4) as u32
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
 }
 
 fn random_id(prefix: &str) -> String {
@@ -782,19 +790,11 @@ fn serialize_context(context: &Context) -> String {
     parts.join("\n\n")
 }
 
-fn common_prefix_length(a: &str, b: &str) -> usize {
-    a.chars()
-        .zip(b.chars())
+fn common_prefix_utf16_units(a: &str, b: &str) -> usize {
+    a.encode_utf16()
+        .zip(b.encode_utf16())
         .take_while(|(left, right)| left == right)
         .count()
-}
-
-fn prefix_by_chars(text: &str, char_count: usize) -> String {
-    text.chars().take(char_count).collect()
-}
-
-fn suffix_from_chars(text: &str, char_count: usize) -> String {
-    text.chars().skip(char_count).collect()
 }
 
 fn with_usage_estimate(
@@ -815,9 +815,10 @@ fn with_usage_estimate(
     {
         let mut cache = prompt_cache.lock().expect("faux prompt cache poisoned");
         if let Some(previous_prompt) = cache.get(session_id) {
-            let cached_chars = common_prefix_length(previous_prompt, &prompt_text);
-            cache_read = estimate_tokens(&prefix_by_chars(previous_prompt, cached_chars));
-            cache_write = estimate_tokens(&suffix_from_chars(&prompt_text, cached_chars));
+            let cached_units = common_prefix_utf16_units(previous_prompt, &prompt_text);
+            cache_read = estimate_tokens_from_units(cached_units);
+            cache_write =
+                estimate_tokens_from_units(utf16_len(&prompt_text).saturating_sub(cached_units));
             input = prompt_tokens.saturating_sub(cache_read);
         } else {
             cache_write = prompt_tokens;
@@ -901,16 +902,45 @@ fn split_string_by_token_size(
     min_token_size: usize,
     max_token_size: usize,
 ) -> Vec<String> {
-    let token_size = std::cmp::max(1, std::cmp::min(min_token_size, max_token_size));
-    let char_size = std::cmp::max(1, token_size * 4);
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
+    if text.is_empty() {
         return vec![String::new()];
     }
-    chars
-        .chunks(char_size)
-        .map(|chunk| chunk.iter().collect::<String>())
-        .collect()
+    let min_token_size = std::cmp::max(1, std::cmp::min(min_token_size, max_token_size));
+    let max_token_size = std::cmp::max(min_token_size, max_token_size);
+    let range = max_token_size - min_token_size + 1;
+    let mut seed = (utf16_len(text) as u64)
+        ^ ((min_token_size as u64) << 21)
+        ^ ((max_token_size as u64) << 42);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_units = 0;
+    let mut token_size = next_token_size(&mut seed, min_token_size, range);
+    let mut chunk_units = token_size * 4;
+
+    for character in text.chars() {
+        let character_units = character.len_utf16();
+        if !current.is_empty() && current_units + character_units > chunk_units {
+            chunks.push(std::mem::take(&mut current));
+            current_units = 0;
+            token_size = next_token_size(&mut seed, min_token_size, range);
+            chunk_units = token_size * 4;
+        }
+        current.push(character);
+        current_units += character_units;
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn next_token_size(seed: &mut u64, min_token_size: usize, range: usize) -> usize {
+    if range <= 1 {
+        return min_token_size;
+    }
+    *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    min_token_size + ((*seed >> 32) as usize % range)
 }
 
 fn is_cancelled(options: &StreamOptions) -> bool {
@@ -2008,6 +2038,24 @@ mod tests {
     #[test]
     fn split_empty_text_into_one_chunk() {
         assert_eq!(split_string_by_token_size("", 1, 1), vec![""]);
+    }
+
+    #[test]
+    fn split_text_uses_token_size_range() {
+        let text = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let chunks = split_string_by_token_size(text, 1, 3);
+
+        assert_eq!(chunks.join(""), text);
+        assert!(chunks.iter().all(|chunk| utf16_len(chunk) <= 12));
+        assert!(chunks.iter().any(|chunk| utf16_len(chunk) > 4));
+    }
+
+    #[test]
+    fn estimates_tokens_using_utf16_length() {
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        assert_eq!(estimate_tokens("😀😀"), 1);
+        assert_eq!(estimate_tokens("😀😀a"), 2);
     }
 
     #[test]
