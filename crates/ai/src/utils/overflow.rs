@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_together_ai_context_length_errors() {
+    fn detects_input_longer_than_context_length_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "400 The input (516368 tokens) is longer than the model's context length (262144 tokens)."
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_openrouter_poolside_maximum_allowed_input_length_errors() {
+    fn detects_maximum_allowed_input_length_errors() {
         assert!(is_context_overflow(
             &create_error_message(
                 "Provider returned error: Input length 131393 exceeds the maximum allowed input length of 131040 tokens."
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_treat_bedrock_throttling_too_many_tokens_as_overflow() {
+    fn does_not_treat_throttling_too_many_tokens_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message(
                 "Throttling error: Too many tokens, please wait before trying again."
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_treat_bedrock_service_unavailable_as_overflow() {
+    fn does_not_treat_service_unavailable_as_overflow() {
         assert!(!is_context_overflow(
             &create_error_message("Service unavailable: The service is temporarily unavailable."),
             Some(200000)
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_xiaomi_style_overflow_length_stop_with_zero_output_and_filled_context() {
+    fn detects_length_stop_with_zero_output_and_filled_context() {
         assert!(is_context_overflow(
             &create_length_stop_message(58, 1048512, 0),
             Some(1048576)

@@ -664,7 +664,7 @@ fn build_chat_completions_payload(
     }
     if model.base_url.contains("ai-gateway.vercel.sh")
         && let Some(routing) = &compat.vercel_gateway_routing
-        && let Some(gateway_options) = vercel_gateway_options(routing)
+        && let Some(gateway_options) = gateway_provider_options(routing)
     {
         object.insert(
             "providerOptions".to_string(),
@@ -679,7 +679,7 @@ fn build_chat_completions_payload(
     payload
 }
 
-fn vercel_gateway_options(routing: &Value) -> Option<Value> {
+fn gateway_provider_options(routing: &Value) -> Option<Value> {
     let mut gateway = serde_json::Map::new();
     for key in ["only", "order"] {
         if let Some(value) = routing.get(key).filter(|value| !value.is_null()) {
@@ -1894,11 +1894,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_uses_explicit_openrouter_reasoning_compat() {
+    fn chat_payload_uses_explicit_nested_reasoning_compat() {
         let mut model = model();
-        model.provider = "openrouter".to_string();
-        model.id = "deepseek/deepseek-r1".to_string();
-        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.provider = "custom-openai-compatible".to_string();
+        model.id = "custom-reasoning-model".to_string();
+        model.base_url = "https://example.compat/v1".to_string();
         model.reasoning = true;
         model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Openrouter);
         let context = Context {
@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_omits_empty_vercel_gateway_routing() {
+    fn chat_payload_omits_empty_gateway_routing() {
         let mut model = model();
         model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
         model.compat = ModelCompat {
@@ -1983,7 +1983,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_payload_maps_vercel_gateway_routing_to_gateway_options() {
+    fn chat_payload_maps_gateway_routing_to_provider_options() {
         let mut model = model();
         model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
         model.compat = ModelCompat {
@@ -2096,15 +2096,15 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_should_handle_prefilled_context_with_long_pipe_separated_ids() {
+    fn normalizes_prefilled_context_with_long_pipe_separated_ids() {
         let mut source_model = model();
         source_model.provider = "github-copilot".to_string();
         source_model.api = "openai-responses".to_string();
         source_model.id = "gpt-5.2-codex".to_string();
 
         let mut target_model = model();
-        target_model.provider = "openrouter".to_string();
-        target_model.id = "openai/gpt-5.2-codex".to_string();
+        target_model.provider = "custom-openai-compatible".to_string();
+        target_model.id = "gpt-5.2-codex-compatible".to_string();
 
         let raw_tool_call_id = concat!(
             "call_pAYbIr76hXIjncD9UE4eGfnS|",
@@ -3869,10 +3869,10 @@ mod tests {
     }
 
     #[test]
-    fn enables_zai_tool_stream_for_supported_models_with_tools() {
+    fn enables_explicit_tool_stream_for_supported_models_with_tools() {
         let mut model = model();
-        model.provider = "zai".to_string();
-        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.provider = "custom-openai-compatible".to_string();
+        model.base_url = "https://example.compat/v1".to_string();
         model.compat.openai_completions.zai_tool_stream = Some(true);
         let compat = get_compat(&model);
         let payload = build_chat_completions_payload(
@@ -3891,10 +3891,10 @@ mod tests {
     }
 
     #[test]
-    fn omits_zai_tool_stream_without_tools() {
+    fn omits_explicit_tool_stream_without_tools() {
         let mut model = model();
-        model.provider = "zai".to_string();
-        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.provider = "custom-openai-compatible".to_string();
+        model.base_url = "https://example.compat/v1".to_string();
         model.compat.openai_completions.zai_tool_stream = Some(true);
         let compat = get_compat(&model);
         let payload = build_chat_completions_payload(
@@ -3913,10 +3913,10 @@ mod tests {
     }
 
     #[test]
-    fn groq_qwen_reasoning_levels_map_to_default_reasoning_effort() {
+    fn thinking_level_map_can_remap_reasoning_effort() {
         let mut model = model();
-        model.id = "qwen/qwen3-32b".to_string();
-        model.provider = "groq".to_string();
+        model.id = "custom-reasoning-model".to_string();
+        model.provider = "custom-openai-compatible".to_string();
         model
             .thinking_level_map
             .insert("high".to_string(), Some("default".to_string()));
@@ -3938,10 +3938,10 @@ mod tests {
     }
 
     #[test]
-    fn groq_models_without_level_mapping_keep_reasoning_effort() {
+    fn reasoning_levels_without_mapping_keep_reasoning_effort() {
         let mut model = model();
-        model.id = "openai/gpt-oss-20b".to_string();
-        model.provider = "groq".to_string();
+        model.id = "custom-reasoning-model".to_string();
+        model.provider = "custom-openai-compatible".to_string();
         let payload = build_chat_completions_payload(
             &model,
             &Context {
@@ -3960,29 +3960,29 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_thinking_payload_respects_reasoning_effort_compat() {
-        let mut opencode_go = model();
-        opencode_go.id = "kimi-k2.6".to_string();
-        opencode_go.provider = "opencode-go".to_string();
-        opencode_go.compat.openai_completions.thinking_format =
+    fn custom_thinking_payload_respects_reasoning_effort_compat() {
+        let mut unsupported_effort = model();
+        unsupported_effort.id = "custom-thinking-model".to_string();
+        unsupported_effort.provider = "custom-openai-compatible".to_string();
+        unsupported_effort.compat.openai_completions.thinking_format =
             Some(OpenAIThinkingFormat::Deepseek);
-        opencode_go
+        unsupported_effort
             .compat
             .openai_completions
             .supports_reasoning_effort = Some(false);
-        let opencode_compat = get_compat(&opencode_go);
-        let opencode_disabled = build_chat_completions_payload(
-            &opencode_go,
+        let unsupported_compat = get_compat(&unsupported_effort);
+        let unsupported_disabled = build_chat_completions_payload(
+            &unsupported_effort,
             &Context {
                 messages: vec![Message::user_text("hello")],
                 ..Default::default()
             },
             &OpenAICompletionsOptions::default(),
-            &opencode_compat,
+            &unsupported_compat,
             CacheRetention::Short,
         );
-        let opencode_enabled = build_chat_completions_payload(
-            &opencode_go,
+        let unsupported_enabled = build_chat_completions_payload(
+            &unsupported_effort,
             &Context {
                 messages: vec![Message::user_text("hello")],
                 ..Default::default()
@@ -3991,23 +3991,33 @@ mod tests {
                 reasoning_effort: Some(ModelThinkingLevel::High),
                 ..Default::default()
             },
-            &opencode_compat,
+            &unsupported_compat,
             CacheRetention::Short,
         );
 
-        assert_eq!(opencode_disabled["thinking"], json!({ "type": "disabled" }));
-        assert!(opencode_disabled.get("reasoning_effort").is_none());
-        assert_eq!(opencode_enabled["thinking"], json!({ "type": "enabled" }));
-        assert!(opencode_enabled.get("reasoning_effort").is_none());
+        assert_eq!(
+            unsupported_disabled["thinking"],
+            json!({ "type": "disabled" })
+        );
+        assert!(unsupported_disabled.get("reasoning_effort").is_none());
+        assert_eq!(
+            unsupported_enabled["thinking"],
+            json!({ "type": "enabled" })
+        );
+        assert!(unsupported_enabled.get("reasoning_effort").is_none());
 
-        let mut xiaomi = model();
-        xiaomi.id = "mimo-v2.5-pro".to_string();
-        xiaomi.provider = "xiaomi".to_string();
-        xiaomi.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Deepseek);
-        xiaomi.compat.openai_completions.supports_reasoning_effort = Some(true);
-        let xiaomi_compat = get_compat(&xiaomi);
-        let xiaomi_payload = build_chat_completions_payload(
-            &xiaomi,
+        let mut supported_effort = model();
+        supported_effort.id = "custom-thinking-model".to_string();
+        supported_effort.provider = "custom-openai-compatible".to_string();
+        supported_effort.compat.openai_completions.thinking_format =
+            Some(OpenAIThinkingFormat::Deepseek);
+        supported_effort
+            .compat
+            .openai_completions
+            .supports_reasoning_effort = Some(true);
+        let supported_compat = get_compat(&supported_effort);
+        let supported_payload = build_chat_completions_payload(
+            &supported_effort,
             &Context {
                 messages: vec![Message::user_text("hello")],
                 ..Default::default()
@@ -4016,12 +4026,12 @@ mod tests {
                 reasoning_effort: Some(ModelThinkingLevel::High),
                 ..Default::default()
             },
-            &xiaomi_compat,
+            &supported_compat,
             CacheRetention::Short,
         );
 
-        assert_eq!(xiaomi_payload["thinking"], json!({ "type": "enabled" }));
-        assert_eq!(xiaomi_payload["reasoning_effort"], json!("high"));
+        assert_eq!(supported_payload["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(supported_payload["reasoning_effort"], json!("high"));
     }
 
     #[test]
@@ -4063,10 +4073,10 @@ mod tests {
     }
 
     #[test]
-    fn xiaomi_mimo_metadata_requires_reasoning_content_replay() {
+    fn explicit_metadata_requires_reasoning_content_replay() {
         let mut model = model();
-        model.id = "mimo-v2.5-pro".to_string();
-        model.provider = "xiaomi".to_string();
+        model.id = "custom-thinking-model".to_string();
+        model.provider = "custom-openai-compatible".to_string();
         model
             .compat
             .openai_completions
@@ -4087,10 +4097,10 @@ mod tests {
     }
 
     #[test]
-    fn xiaomi_mimo_tool_call_replay_includes_empty_reasoning_content() {
+    fn explicit_tool_call_replay_includes_empty_reasoning_content() {
         let mut model = model();
-        model.id = "mimo-v2.5-pro".to_string();
-        model.provider = "xiaomi".to_string();
+        model.id = "custom-thinking-model".to_string();
+        model.provider = "custom-openai-compatible".to_string();
         model
             .compat
             .openai_completions
