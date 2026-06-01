@@ -157,7 +157,7 @@ the core runtime parts of `packages/agent/README.md`.
 | `packages/ai/src/providers/faux.ts` | [`src/providers/faux.rs`](src/providers/faux.rs) | Deterministic faux provider for tests and agent-loop examples. |
 | `packages/ai/src/providers/anthropic.ts` | [`src/providers/anthropic.rs`](src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
 | `packages/ai/src/providers/openai-completions.ts` | [`src/providers/openai_completions.rs`](src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
-| `packages/ai/src/providers/openai-responses.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming. |
+| `packages/ai/src/providers/openai-responses.ts` and `packages/ai/src/providers/openai-responses-shared.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming and shared Responses message/tool conversion. |
 | `packages/ai/src/providers/register-builtins.ts` | [`src/providers/register_builtins.rs`](src/providers/register_builtins.rs) | Registers `anthropic-messages`, `openai-completions`, and `openai-responses`. |
 | `packages/ai/src/providers/simple-options.ts` | [`src/providers/simple_options.rs`](src/providers/simple_options.rs) | Common simple-option mapping helpers. |
 | `packages/ai/src/providers/transform-messages.ts` | [`src/providers/transform_messages.rs`](src/providers/transform_messages.rs) | Cross-provider message normalization. |
@@ -805,6 +805,9 @@ credentials into the API key used by stream options.
 ### Provider Notes
 
 GitHub Copilot support includes OAuth helpers and dynamic request headers.
+Some Copilot model ids use upstream vendor names such as Gemini or Grok, but
+they are routed through the active OpenAI/Anthropic-compatible APIs in this
+crate; native Google, xAI, or other provider APIs are not registered.
 Anthropic OAuth follows the Claude Pro/Max OAuth flow.
 
 ## Development

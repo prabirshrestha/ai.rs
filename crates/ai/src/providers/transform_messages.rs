@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_aborted_assistant_turns_before_follow_up_messages() {
+    fn should_handle_abort_then_new_message() {
         let model = copilot_claude_model();
         let mut aborted = assistant_message(vec![
             AssistantContent::Thinking(ThinkingContent {
