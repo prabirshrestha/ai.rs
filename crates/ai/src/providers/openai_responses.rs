@@ -3408,7 +3408,7 @@ mod tests {
         let mut source_model = model();
         source_model.id = "gpt-5-mini".to_string();
         let mut target_model = model();
-        target_model.id = "gpt-5.2-codex".to_string();
+        target_model.id = "gpt-5.2".to_string();
         let assistant = AssistantMessage {
             content: vec![AssistantContent::ToolCall(ToolCall {
                 id: "call_abc|fc_paired".to_string(),
@@ -3506,7 +3506,7 @@ mod tests {
     }
 
     #[test]
-    fn hashes_foreign_copilot_tool_item_ids_into_a_bounded_codex_safe_fc_hash_shape() {
+    fn hashes_foreign_copilot_tool_item_ids_into_a_bounded_responses_safe_fc_hash_shape() {
         let model = model();
         let assistant = AssistantMessage {
             content: vec![AssistantContent::ToolCall(ToolCall {

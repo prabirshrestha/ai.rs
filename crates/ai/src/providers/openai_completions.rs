@@ -2100,11 +2100,11 @@ mod tests {
         let mut source_model = model();
         source_model.provider = "github-copilot".to_string();
         source_model.api = "openai-responses".to_string();
-        source_model.id = "gpt-5.2-codex".to_string();
+        source_model.id = "gpt-5.2".to_string();
 
         let mut target_model = model();
         target_model.provider = "custom-openai-compatible".to_string();
-        target_model.id = "gpt-5.2-codex-compatible".to_string();
+        target_model.id = "gpt-5.2-compatible".to_string();
 
         let raw_tool_call_id = concat!(
             "call_pAYbIr76hXIjncD9UE4eGfnS|",
