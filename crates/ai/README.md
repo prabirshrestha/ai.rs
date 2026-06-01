@@ -22,16 +22,20 @@ calling, because tool calling is essential for agentic workflows.
 ## Table of Contents
 
 - [Supported Providers](#supported-providers)
-- [Upstream Pi Mapping](#upstream-pi-mapping)
-  - [README Section Mapping](#readme-section-mapping)
-  - [Upstream File Mapping](#upstream-file-mapping)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Agent Core](#agent-core)
+  - [Core Concepts](#core-concepts)
+  - [Event Flow](#event-flow)
+  - [Agent Options](#agent-options)
   - [Agent Loop](#agent-loop)
   - [Agent State](#agent-state)
   - [Agent Methods](#agent-methods)
   - [Steering and Follow-up](#steering-and-follow-up)
+  - [Custom Message Types](#custom-message-types)
+  - [Agent Tools](#agent-tools)
+  - [Proxy Usage](#proxy-usage)
+  - [Low-Level API](#low-level-api)
 - [Tools](#tools)
   - [Defining Tools](#defining-tools)
   - [Handling Tool Calls](#handling-tool-calls)
@@ -39,6 +43,9 @@ calling, because tool calling is essential for agentic workflows.
   - [Validating Tool Arguments](#validating-tool-arguments)
   - [Complete Event Reference](#complete-event-reference)
 - [Image Input](#image-input)
+- [Image Generation](#image-generation)
+  - [Basic Image Generation](#basic-image-generation)
+  - [Notes and Limitations](#notes-and-limitations)
 - [Thinking/Reasoning](#thinkingreasoning)
   - [Unified Interface](#unified-interface-stream_simplecomplete_simple)
   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
@@ -73,6 +80,9 @@ calling, because tool calling is essential for agentic workflows.
   - [Provider Notes](#provider-notes)
 - [Development](#development)
   - [Adding a New Provider](#adding-a-new-provider)
+- [Upstream Pi Mapping](#upstream-pi-mapping)
+  - [README Section Mapping](#readme-section-mapping)
+  - [Upstream File Mapping](#upstream-file-mapping)
 - [License](#license)
 
 ## Supported Providers
@@ -93,88 +103,6 @@ built-in provider surface in this port. PRs to add support for additional
 providers are welcome.
 
 The TypeScript coding-agent harness, CLI, and TUI are not included.
-
-## Upstream Pi Mapping
-
-This crate tracks upstream `pi` behavior for the Rust APIs that correspond to
-the active scope:
-
-| Upstream `pi` area | Rust status |
-| --- | --- |
-| `packages/ai/src/types.ts`, `stream.ts`, `models.ts`, `api-registry.ts` | Ported as shared message/context types, stream helpers, generated model metadata, and API registry. |
-| `packages/ai/src/providers/openai-completions.ts` | Ported for Chat Completions-compatible streaming and simple options. |
-| `packages/ai/src/providers/openai-responses.ts` | Ported for OpenAI Responses streaming and simple options. |
-| `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages streaming and simple options. |
-| `packages/ai/src/providers/faux.ts` | Ported for deterministic provider and agent-loop tests. |
-| `packages/agent/src/agent.ts`, `agent-loop.ts`, `types.ts` | Ported into this crate for core agent state, queueing, lifecycle events, tool execution, hooks, and continuation. |
-| `packages/agent/src/harness/**`, coding-agent CLI, and TUI | Not included in this Rust crate. |
-| Image generation, Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex Responses | Not part of the active built-in provider surface. PRs to add support are welcome. |
-
-The goal is behavioral parity before Rust-specific API polish. Where upstream
-uses TypeScript casts for provider-specific escape hatches, this crate exposes
-the equivalent through typed options where possible and
-`StreamOptions::provider_options` where the upstream behavior is intentionally
-loose.
-
-### README Section Mapping
-
-This README is a Rust adaptation of the upstream `packages/ai/README.md` plus
-the core runtime parts of `packages/agent/README.md`.
-
-| Upstream README | Rust README mapping |
-| --- | --- |
-| `packages/ai/README.md` Supported Providers | [Supported Providers](#supported-providers), narrowed to OpenAI, Anthropic, and GitHub Copilot-compatible routing. |
-| `packages/ai/README.md` Installation | [Installation](#installation), using Cargo and Tokio instead of npm. |
-| `packages/ai/README.md` Quick Start | [Quick Start](#quick-start), with Rust `Context`, `Message`, `Tool`, `stream_simple`, and `complete_simple`. |
-| `packages/ai/README.md` Tools | [Tools](#tools), using JSON Schema values and Rust validation helpers instead of TypeBox. |
-| `packages/ai/README.md` Image Input | [Image Input](#image-input), retained for chat/text generation. |
-| `packages/ai/README.md` Image Generation | Not included. Image generation is outside the active Rust provider surface. |
-| `packages/ai/README.md` Thinking/Reasoning | [Thinking/Reasoning](#thinkingreasoning), using Rust thinking-level types and provider options. |
-| `packages/ai/README.md` Stop Reasons | [Stop Reasons](#stop-reasons). |
-| `packages/ai/README.md` Error Handling | [Error Handling](#error-handling), using `CancellationToken` instead of `AbortController`. |
-| `packages/ai/README.md` APIs, Models, and Providers | [APIs, Models, and Providers](#apis-models-and-providers), narrowed to active stream APIs. |
-| `packages/ai/README.md` Cross-Provider Handoffs | [Cross-Provider Handoffs](#cross-provider-handoffs). |
-| `packages/ai/README.md` Context Serialization | [Context Serialization](#context-serialization), using `serde`. |
-| `packages/ai/README.md` Browser Usage | [Browser Usage](#browser-usage), marked not applicable for this native Rust crate. |
-| `packages/ai/README.md` OAuth Providers | [OAuth Providers](#oauth-providers), narrowed to Anthropic and GitHub Copilot. |
-| `packages/ai/README.md` Development | [Development](#development), using Cargo commands. |
-| `packages/agent/README.md` Quick Start, event flow, options, state, methods, steering/follow-up, tools, low-level API | [Agent Core](#agent-core), because the core agent loop lives in this crate. |
-| `packages/agent/README.md` Proxy usage | Use `AgentOptions::stream_fn`, or pass a custom `StreamFn` to the low-level loop functions. |
-| `packages/agent/src/harness/**`, coding-agent CLI, and TUI docs | Not included in this Rust crate. |
-
-### Upstream File Mapping
-
-| Upstream `pi` file | Rust file | Notes |
-| --- | --- | --- |
-| `packages/ai/src/index.ts` | [`src/lib.rs`](src/lib.rs) | Crate root re-exports the scoped Rust API. Image-generation exports and broad provider-specific exports are intentionally omitted. |
-| `packages/ai/src/types.ts` | [`src/types.rs`](src/types.rs) | Message, context, model, tool, usage, event, and compatibility types. Image input/tool-result image content is included; image generation types are out of scope. |
-| `packages/ai/src/stream.ts` | [`src/stream.rs`](src/stream.rs) | `stream`, `complete`, `stream_simple`, and `complete_simple`. |
-| `packages/ai/src/api-registry.ts` | [`src/api_registry.rs`](src/api_registry.rs) | API provider registry and dispatch wrappers. |
-| `packages/ai/src/env-api-keys.ts` | [`src/env_api_keys.rs`](src/env_api_keys.rs) | Environment API key lookup for active providers. |
-| `packages/ai/src/models.ts` | [`src/models.rs`](src/models.rs) | Model lookup, cost calculation, thinking-level helpers, and scoped generated metadata. |
-| `packages/ai/src/session-resources.ts` | [`src/session_resources.rs`](src/session_resources.rs) | Session cleanup registry. |
-| `packages/ai/src/oauth.ts` and `packages/ai/src/utils/oauth/**` | [`src/oauth.rs`](src/oauth.rs) | Anthropic and GitHub Copilot OAuth helpers in scope. OpenAI Codex OAuth is out of scope. |
-| `packages/ai/src/providers/faux.ts` | [`src/providers/faux.rs`](src/providers/faux.rs) | Deterministic faux provider for tests and agent-loop examples. |
-| `packages/ai/src/providers/anthropic.ts` | [`src/providers/anthropic.rs`](src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
-| `packages/ai/src/providers/openai-completions.ts` | [`src/providers/openai_completions.rs`](src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
-| `packages/ai/src/providers/openai-responses.ts` and `packages/ai/src/providers/openai-responses-shared.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming and shared Responses message/tool conversion. |
-| `packages/ai/src/providers/register-builtins.ts` | [`src/providers/register_builtins.rs`](src/providers/register_builtins.rs) | Registers `anthropic-messages`, `openai-completions`, and `openai-responses`. |
-| `packages/ai/src/providers/simple-options.ts` | [`src/providers/simple_options.rs`](src/providers/simple_options.rs) | Common simple-option mapping helpers. |
-| `packages/ai/src/providers/transform-messages.ts` | [`src/providers/transform_messages.rs`](src/providers/transform_messages.rs) | Cross-provider message normalization. |
-| `packages/ai/src/providers/github-copilot-headers.ts` | [`src/providers/github_copilot_headers.rs`](src/providers/github_copilot_headers.rs) | GitHub Copilot dynamic headers. |
-| `packages/ai/src/providers/openai-prompt-cache.ts` | [`src/providers/openai_prompt_cache.rs`](src/providers/openai_prompt_cache.rs) | Prompt cache key helper. |
-| `packages/ai/src/utils/diagnostics.ts` | [`src/utils/diagnostics.rs`](src/utils/diagnostics.rs) | Assistant diagnostics helpers. |
-| `packages/ai/src/utils/event-stream.ts` | [`src/utils/event_stream.rs`](src/utils/event_stream.rs) | Assistant event stream implementation. The root `event_stream` module re-exports this path. |
-| `packages/ai/src/utils/hash.ts` | [`src/utils/hash.rs`](src/utils/hash.rs) | Short hash helper. |
-| `packages/ai/src/utils/headers.ts` | [`src/utils/headers.rs`](src/utils/headers.rs) | Header normalization helper. |
-| `packages/ai/src/utils/json-parse.ts` | [`src/utils/json_parse.rs`](src/utils/json_parse.rs) | Streaming JSON parsing and repair helpers. |
-| `packages/ai/src/utils/overflow.ts` | [`src/utils/overflow.rs`](src/utils/overflow.rs) | Context overflow detection. |
-| `packages/ai/src/utils/sanitize-unicode.ts` | [`src/utils/sanitize_unicode.rs`](src/utils/sanitize_unicode.rs) | Unicode surrogate sanitization. |
-| `packages/ai/src/utils/validation.ts` | [`src/utils/validation.rs`](src/utils/validation.rs) | Tool-call argument validation. |
-| `packages/agent/src/types.ts` | [`src/agent_types.rs`](src/agent_types.rs) | Core agent types, tool traits, loop config, and agent events. |
-| `packages/agent/src/agent-loop.ts` | [`src/agent_loop.rs`](src/agent_loop.rs) | Direct agent loop. |
-| `packages/agent/src/agent.ts` | [`src/agent.rs`](src/agent.rs) | Stateful `Agent` wrapper. |
-| `packages/agent/src/harness/**` | Not included | The full TypeScript harness is outside this port's active scope. |
 
 ## Installation
 
@@ -269,6 +197,64 @@ this Rust port.
 For application-owned state, use `Agent`. For direct loop control, use
 `agent_loop` or `run_agent_loop`.
 
+### Core Concepts
+
+`AgentMessage` is the same portable `Message` enum used by the shared LLM API.
+It can contain normal LLM messages (`User`, `Assistant`, `ToolResult`) and
+`Custom` app-owned messages.
+
+The loop follows the upstream message flow:
+
+```text
+AgentMessage[] -> transform_context() -> AgentMessage[] -> convert_to_llm() -> Message[] -> LLM
+```
+
+`transform_context` is optional and is intended for pruning, compaction, or
+external context injection. `convert_to_llm` is required by the loop config and
+filters or converts app-owned messages before each provider request.
+
+### Event Flow
+
+`prompt_text("Hello")` maps to the upstream `prompt("Hello")` event sequence:
+
+```text
+agent_start
+turn_start
+message_start   user
+message_end     user
+message_start   assistant
+message_update  assistant delta
+message_end     assistant
+turn_end
+agent_end
+```
+
+When the assistant calls tools, the same turn emits `tool_execution_start`,
+optional `tool_execution_update`, `tool_execution_end`, then a tool-result
+`message_start` / `message_end`. If the batch does not terminate, the next turn
+starts and the model receives the tool results.
+
+`Agent::subscribe` listeners are awaited in registration order. `agent_end`
+means no more loop events will be emitted, but `wait_for_idle` only returns
+after awaited listeners for that final event have settled.
+
+### Agent Options
+
+`AgentOptions` maps upstream constructor options to Rust fields:
+
+- `initial_state`: system prompt, model, thinking level, tools, and messages.
+- `convert_to_llm` and `transform_context`: context conversion hooks.
+- `stream_fn`: custom stream function for proxy backends.
+- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
+- `before_tool_call` and `after_tool_call`: tool preflight and postprocess
+  hooks.
+- `prepare_next_turn`: hook that can replace context, model, or thinking level.
+- `session_id`: forwarded through `SimpleStreamOptions`.
+- `options`: Rust home for upstream `onPayload`, `onResponse`, transport,
+  thinking budgets, retry delay, API key, cancellation, and provider options.
+- `steering_mode`, `follow_up_mode`, and `tool_execution`: queue and tool batch
+  execution behavior.
+
 ### Agent Loop
 
 ```rust
@@ -348,6 +334,36 @@ The loop supports upstream steering and follow-up queue semantics. The default
 mode processes one queued item at a time; `all` modes drain every queued item
 before the next model turn. `prepare_next_turn` can update context, model, and
 thinking level before the next request.
+
+### Custom Message Types
+
+Use `Message::Custom` for app-specific agent transcript entries. Custom
+messages are retained in agent state, then filtered or converted by
+`convert_to_llm` before provider calls.
+
+### Agent Tools
+
+Agent tools implement the `AgentTool` trait. `definition()` returns the shared
+`Tool` schema, `label()` provides UI text, `execution_mode()` can force a whole
+batch to run sequentially, `prepare_arguments()` can reshape model arguments
+before validation, and `execute()` performs the tool work.
+
+Tool failures should return an error from `execute()`. The loop catches that
+error and reports a tool-result message with `is_error = true`, matching
+upstream behavior.
+
+### Proxy Usage
+
+For proxy backends, pass a custom `StreamFn` through `AgentOptions::stream_fn`
+or directly to `agent_loop`. The function receives the selected `Model`, the
+converted `Context`, and `SimpleStreamOptions`.
+
+### Low-Level API
+
+Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
+`run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
+loop directly. These are the Rust equivalents of upstream `agentLoop` and
+`agentLoopContinue`.
 
 ## Tools
 
@@ -493,6 +509,25 @@ let context = Context {
     ..Default::default()
 };
 ```
+
+## Image Generation
+
+Image generation is intentionally not included in this Rust port yet. Keep
+using `stream`, `complete`, `stream_simple`, and `complete_simple` for
+chat/text generation with optional image input.
+
+### Basic Image Generation
+
+No Rust API is currently exported for upstream `getImageModel`,
+`getImageModels`, `getImageProviders`, or `generateImages`.
+
+### Notes and Limitations
+
+- Image input for chat/text generation is retained.
+- Tool results can still contain image blocks.
+- Image-generation models do not participate in the active built-in provider
+  surface.
+- PRs to add a scoped Rust image-generation API are welcome.
 
 ## Thinking/Reasoning
 
@@ -842,6 +877,88 @@ Provider additions should generally include:
 5. Unit tests for payload conversion, streaming, errors, and provider-specific
    compatibility.
 6. Documentation updates in this README.
+
+## Upstream Pi Mapping
+
+This crate tracks upstream `pi` behavior for the Rust APIs that correspond to
+the active scope:
+
+| Upstream `pi` area | Rust status |
+| --- | --- |
+| `packages/ai/src/types.ts`, `stream.ts`, `models.ts`, `api-registry.ts` | Ported as shared message/context types, stream helpers, generated model metadata, and API registry. |
+| `packages/ai/src/providers/openai-completions.ts` | Ported for Chat Completions-compatible streaming and simple options. |
+| `packages/ai/src/providers/openai-responses.ts` | Ported for OpenAI Responses streaming and simple options. |
+| `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages streaming and simple options. |
+| `packages/ai/src/providers/faux.ts` | Ported for deterministic provider and agent-loop tests. |
+| `packages/agent/src/agent.ts`, `agent-loop.ts`, `types.ts` | Ported into this crate for core agent state, queueing, lifecycle events, tool execution, hooks, and continuation. |
+| `packages/agent/src/harness/**`, coding-agent CLI, and TUI | Not included in this Rust crate. |
+| Image generation, Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex Responses | Not part of the active built-in provider surface. PRs to add support are welcome. |
+
+The goal is behavioral parity before Rust-specific API polish. Where upstream
+uses TypeScript casts for provider-specific escape hatches, this crate exposes
+the equivalent through typed options where possible and
+`StreamOptions::provider_options` where the upstream behavior is intentionally
+loose.
+
+### README Section Mapping
+
+This README is a Rust adaptation of the upstream `packages/ai/README.md` plus
+the core runtime parts of `packages/agent/README.md`.
+
+| Upstream README | Rust README mapping |
+| --- | --- |
+| `packages/ai/README.md` Supported Providers | [Supported Providers](#supported-providers), narrowed to OpenAI, Anthropic, and GitHub Copilot-compatible routing. |
+| `packages/ai/README.md` Installation | [Installation](#installation), using Cargo and Tokio instead of npm. |
+| `packages/ai/README.md` Quick Start | [Quick Start](#quick-start), with Rust `Context`, `Message`, `Tool`, `stream_simple`, and `complete_simple`. |
+| `packages/ai/README.md` Tools | [Tools](#tools), using JSON Schema values and Rust validation helpers instead of TypeBox. |
+| `packages/ai/README.md` Image Input | [Image Input](#image-input), retained for chat/text generation. |
+| `packages/ai/README.md` Image Generation | [Image Generation](#image-generation), retained as an explicit not-included section because image generation is outside the active Rust provider surface. |
+| `packages/ai/README.md` Thinking/Reasoning | [Thinking/Reasoning](#thinkingreasoning), using Rust thinking-level types and provider options. |
+| `packages/ai/README.md` Stop Reasons | [Stop Reasons](#stop-reasons). |
+| `packages/ai/README.md` Error Handling | [Error Handling](#error-handling), using `CancellationToken` instead of `AbortController`. |
+| `packages/ai/README.md` APIs, Models, and Providers | [APIs, Models, and Providers](#apis-models-and-providers), narrowed to active stream APIs. |
+| `packages/ai/README.md` Cross-Provider Handoffs | [Cross-Provider Handoffs](#cross-provider-handoffs). |
+| `packages/ai/README.md` Context Serialization | [Context Serialization](#context-serialization), using `serde`. |
+| `packages/ai/README.md` Browser Usage | [Browser Usage](#browser-usage), marked not applicable for this native Rust crate. |
+| `packages/ai/README.md` OAuth Providers | [OAuth Providers](#oauth-providers), narrowed to Anthropic and GitHub Copilot. |
+| `packages/ai/README.md` Development | [Development](#development), using Cargo commands. |
+| `packages/agent/README.md` Quick Start, event flow, options, state, methods, steering/follow-up, tools, low-level API | [Agent Core](#agent-core), because the core agent loop lives in this crate. |
+| `packages/agent/README.md` Proxy usage | Use `AgentOptions::stream_fn`, or pass a custom `StreamFn` to the low-level loop functions. |
+| `packages/agent/src/harness/**`, coding-agent CLI, and TUI docs | Not included in this Rust crate. |
+
+### Upstream File Mapping
+
+| Upstream `pi` file | Rust file | Notes |
+| --- | --- | --- |
+| `packages/ai/src/index.ts` | [`src/lib.rs`](src/lib.rs) | Crate root re-exports the scoped Rust API. Image-generation exports and broad provider-specific exports are intentionally omitted. |
+| `packages/ai/src/types.ts` | [`src/types.rs`](src/types.rs) | Message, context, model, tool, usage, event, and compatibility types. Image input/tool-result image content is included; image generation types are out of scope. |
+| `packages/ai/src/stream.ts` | [`src/stream.rs`](src/stream.rs) | `stream`, `complete`, `stream_simple`, and `complete_simple`. |
+| `packages/ai/src/api-registry.ts` | [`src/api_registry.rs`](src/api_registry.rs) | API provider registry and dispatch wrappers. |
+| `packages/ai/src/env-api-keys.ts` | [`src/env_api_keys.rs`](src/env_api_keys.rs) | Environment API key lookup for active providers. |
+| `packages/ai/src/models.ts` | [`src/models.rs`](src/models.rs) | Model lookup, cost calculation, thinking-level helpers, and scoped generated metadata. |
+| `packages/ai/src/session-resources.ts` | [`src/session_resources.rs`](src/session_resources.rs) | Session cleanup registry. |
+| `packages/ai/src/oauth.ts` and `packages/ai/src/utils/oauth/**` | [`src/oauth.rs`](src/oauth.rs) | Anthropic and GitHub Copilot OAuth helpers in scope. OpenAI Codex OAuth is out of scope. |
+| `packages/ai/src/providers/faux.ts` | [`src/providers/faux.rs`](src/providers/faux.rs) | Deterministic faux provider for tests and agent-loop examples. |
+| `packages/ai/src/providers/anthropic.ts` | [`src/providers/anthropic.rs`](src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
+| `packages/ai/src/providers/openai-completions.ts` | [`src/providers/openai_completions.rs`](src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
+| `packages/ai/src/providers/openai-responses.ts` and `packages/ai/src/providers/openai-responses-shared.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming and shared Responses message/tool conversion. |
+| `packages/ai/src/providers/register-builtins.ts` | [`src/providers/register_builtins.rs`](src/providers/register_builtins.rs) | Registers `anthropic-messages`, `openai-completions`, and `openai-responses`. |
+| `packages/ai/src/providers/simple-options.ts` | [`src/providers/simple_options.rs`](src/providers/simple_options.rs) | Common simple-option mapping helpers. |
+| `packages/ai/src/providers/transform-messages.ts` | [`src/providers/transform_messages.rs`](src/providers/transform_messages.rs) | Cross-provider message normalization. |
+| `packages/ai/src/providers/github-copilot-headers.ts` | [`src/providers/github_copilot_headers.rs`](src/providers/github_copilot_headers.rs) | GitHub Copilot dynamic headers. |
+| `packages/ai/src/providers/openai-prompt-cache.ts` | [`src/providers/openai_prompt_cache.rs`](src/providers/openai_prompt_cache.rs) | Prompt cache key helper. |
+| `packages/ai/src/utils/diagnostics.ts` | [`src/utils/diagnostics.rs`](src/utils/diagnostics.rs) | Assistant diagnostics helpers. |
+| `packages/ai/src/utils/event-stream.ts` | [`src/utils/event_stream.rs`](src/utils/event_stream.rs) | Assistant event stream implementation. The root `event_stream` module re-exports this path. |
+| `packages/ai/src/utils/hash.ts` | [`src/utils/hash.rs`](src/utils/hash.rs) | Short hash helper. |
+| `packages/ai/src/utils/headers.ts` | [`src/utils/headers.rs`](src/utils/headers.rs) | Header normalization helper. |
+| `packages/ai/src/utils/json-parse.ts` | [`src/utils/json_parse.rs`](src/utils/json_parse.rs) | Streaming JSON parsing and repair helpers. |
+| `packages/ai/src/utils/overflow.ts` | [`src/utils/overflow.rs`](src/utils/overflow.rs) | Context overflow detection. |
+| `packages/ai/src/utils/sanitize-unicode.ts` | [`src/utils/sanitize_unicode.rs`](src/utils/sanitize_unicode.rs) | Unicode surrogate sanitization. |
+| `packages/ai/src/utils/validation.ts` | [`src/utils/validation.rs`](src/utils/validation.rs) | Tool-call argument validation. |
+| `packages/agent/src/types.ts` | [`src/agent_types.rs`](src/agent_types.rs) | Core agent types, tool traits, loop config, and agent events. |
+| `packages/agent/src/agent-loop.ts` | [`src/agent_loop.rs`](src/agent_loop.rs) | Direct agent loop. |
+| `packages/agent/src/agent.ts` | [`src/agent.rs`](src/agent.rs) | Stateful `Agent` wrapper. |
+| `packages/agent/src/harness/**` | Not included | The full TypeScript harness is outside this port's active scope. |
 
 ## License
 
