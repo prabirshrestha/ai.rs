@@ -11,8 +11,8 @@ surfaces.
   core agent state, direct agent loop, queueing, lifecycle events, tool
   execution, and loop hooks.
 
-The goal is 1:1 behavior with upstream `pi` for the Rust APIs in scope before
-Rust-specific API polish.
+The goal is 1:1 behavior with upstream `pi` for the Rust APIs in scope, mapped
+to Rust naming, ownership, async, and error-handling conventions.
 
 To learn more about `pi`:
 
@@ -24,11 +24,12 @@ To learn more about `pi`:
 ## Share your OSS coding agent sessions
 
 This Rust workspace does not include the TypeScript coding-agent harness,
-session publishing workflow, CLI, or TUI from upstream `pi`.
+session publishing workflow, CLI, or TUI from upstream `pi`. It ports the AI
+and core agent runtime surfaces only.
 
 ## All Crates
 
-| Crate | Upstream package | Description |
+| Crate | Upstream mapping | Description |
 | --- | --- | --- |
 | [`ai`](crates/ai) | [`packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) + core [`packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent) | Unified LLM API plus the core agent loop runtime for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub Copilot-compatible routing. |
 

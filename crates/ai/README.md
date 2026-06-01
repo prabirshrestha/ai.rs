@@ -8,8 +8,9 @@ This crate is the Rust port of the scoped
 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
 surface. The core runtime from
 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent)
-also lives in this crate. The TypeScript coding-agent harness, CLI, and TUI are
-not included.
+also lives in this crate. The README follows the upstream Pi README order, with
+Rust examples and explicit notes where the Rust port's active scope is narrower.
+The TypeScript coding-agent harness, CLI, and TUI are not included.
 
 **Note**: Like upstream `pi-ai`, this crate focuses on models that support tool
 calling, because tool calling is essential for agentic workflows.
@@ -30,21 +31,19 @@ calling, because tool calling is essential for agentic workflows.
   - [Basic Image Generation](#basic-image-generation)
   - [Notes and Limitations](#notes-and-limitations)
 - [Thinking/Reasoning](#thinkingreasoning)
-  - [Unified Interface (stream_simple/complete_simple)](#unified-interface-stream_simplecomplete_simple)
+  - [Unified Interface (streamSimple/completeSimple)](#unified-interface-streamsimplecompletesimple)
   - [Provider-Specific Options (stream/complete)](#provider-specific-options-streamcomplete)
   - [Streaming Thinking Content](#streaming-thinking-content)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
   - [Aborting Requests](#aborting-requests)
   - [Continuing After Abort](#continuing-after-abort)
-  - [Debugging Provider Payloads](#debugging-provider-payloads)
 - [APIs, Models, and Providers](#apis-models-and-providers)
   - [Faux provider for tests](#faux-provider-for-tests)
   - [Providers and Models](#providers-and-models)
   - [Querying Providers and Models](#querying-providers-and-models)
   - [Custom Models](#custom-models)
   - [OpenAI Compatibility Settings](#openai-compatibility-settings)
-  - [Thread Safety](#thread-safety)
   - [Type Safety](#type-safety)
 - [Cross-Provider Handoffs](#cross-provider-handoffs)
   - [How It Works](#how-it-works)
@@ -66,12 +65,18 @@ calling, because tool calling is essential for agentic workflows.
   - [Quick Start](#agent-quick-start)
   - [Core Concepts](#core-concepts)
   - [Event Flow](#event-flow)
+  - [prompt_text() Event Sequence](#prompt_text-event-sequence)
+  - [With Tool Calls](#with-tool-calls)
+  - [continue_run() Event Sequence](#continue_run-event-sequence)
+  - [Event Types](#event-types)
   - [Agent Options](#agent-options)
   - [Agent State](#agent-state)
   - [Methods](#methods)
+  - [Session and Thinking Budgets](#session-and-thinking-budgets)
   - [Steering and Follow-up](#steering-and-follow-up)
   - [Custom Message Types](#custom-message-types)
   - [Tools](#agent-tools)
+  - [Error Handling](#agent-tool-error-handling)
   - [Proxy Usage](#proxy-usage)
   - [Low-Level API](#low-level-api)
 - [Development](#development)
@@ -100,11 +105,13 @@ providers are welcome.
 ```bash
 cargo add ai
 cargo add tokio --features macros,rt-multi-thread
+cargo add futures serde_json
 ```
 
 This crate uses Tokio-compatible async APIs. The examples use
 `#[tokio::main]`, which requires Tokio's `macros` and `rt-multi-thread`
-features.
+features. The examples also use `futures::StreamExt` for stream iteration and
+`serde_json::json` for JSON Schema values.
 
 ## Quick Start
 
@@ -113,35 +120,33 @@ use futures::StreamExt;
 use serde_json::json;
 
 use ai::{
-    complete_simple, get_model, stream, stream_simple, AssistantContent,
-    AssistantMessageEvent, Context, Message, Result, SimpleStreamOptions,
-    Tool, ToolResultContent, ToolResultMessage,
+    complete, get_model, stream, AssistantContent, AssistantMessageEvent, Context, Message,
+    Result, Tool, ToolResultContent, ToolResultMessage,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let model = get_model("openai", "gpt-4o-mini").expect("model");
 
-    let weather_tool = Tool {
-        name: "get_weather".to_string(),
-        description: "Get current weather for a location.".to_string(),
+    let capital_tool = Tool {
+        name: "lookup_capital".to_string(),
+        description: "Look up the capital city for a country.".to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "location": { "type": "string" }
+                "country": { "type": "string" }
             },
-            "required": ["location"]
+            "required": ["country"]
         }),
     };
 
     let mut context = Context {
         system_prompt: Some("You are a helpful assistant.".to_string()),
         messages: vec![Message::user_text("What is the capital of France?")],
-        tools: vec![weather_tool],
+        tools: vec![capital_tool],
     };
 
-    let mut events =
-        stream_simple(model.clone(), context.clone(), Some(SimpleStreamOptions::default()))?;
+    let mut events = stream(model.clone(), context.clone(), None)?;
 
     while let Some(event) = events.next().await {
         match event {
@@ -152,22 +157,23 @@ async fn main() -> Result<()> {
             AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
                 println!("tool: {}({})", tool_call.name, tool_call.arguments);
             }
-            AssistantMessageEvent::Done { reason, message } => {
+            AssistantMessageEvent::Done { reason, .. } => {
                 println!("\nfinished: {reason:?}");
-                context.messages.push(Message::Assistant(message));
             }
             AssistantMessageEvent::Error { error, .. } => eprintln!("{error:?}"),
             _ => {}
         }
     }
 
-    let response =
-        complete_simple(model, context.clone(), Some(SimpleStreamOptions::default())).await?;
+    let final_message = events.result().await?;
+    context.messages.push(Message::Assistant(final_message.clone()));
 
-    for block in response.content {
+    let mut tool_calls = 0;
+    for block in final_message.content {
         match block {
             AssistantContent::Text(text) => println!("{}", text.text),
             AssistantContent::ToolCall(call) => {
+                tool_calls += 1;
                 context.messages.push(Message::ToolResult(ToolResultMessage {
                     tool_call_id: call.id,
                     tool_name: call.name,
@@ -181,8 +187,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Lower-level provider-option API, equivalent to upstream stream()/complete().
-    let _lower_level = stream(get_model("openai", "gpt-4o-mini").unwrap(), context, None)?;
+    if tool_calls > 0 {
+        let continuation = complete(model, context, None).await?;
+        println!("continued with {} content block(s)", continuation.content.len());
+    }
 
     Ok(())
 }
@@ -366,7 +374,9 @@ No Rust API is currently exported for upstream `getImageModel`,
 Many models support thinking or reasoning content. Check `model.reasoning` and
 use `get_supported_thinking_levels` to inspect supported levels.
 
-### Unified Interface (stream_simple/complete_simple)
+### Unified Interface (streamSimple/completeSimple)
+
+Rust exports these as `stream_simple` and `complete_simple`.
 
 ```rust
 use ai::{
@@ -827,6 +837,11 @@ injection. `convert_to_llm` filters or converts app-owned messages.
 
 ### Event Flow
 
+The agent emits events for UI updates. Understanding the event sequence helps
+build responsive interfaces.
+
+#### prompt_text() Event Sequence
+
 When you call `prompt_text("Hello")`, the wrapper emits the same core sequence
 as upstream `prompt("Hello")`:
 
@@ -842,6 +857,8 @@ prompt_text("Hello")
 |- turn_end
 `- agent_end
 ```
+
+#### With Tool Calls
 
 If the assistant calls tools, the loop emits `tool_execution_start`, optional
 `tool_execution_update`, `tool_execution_end`, then a tool-result
@@ -863,6 +880,27 @@ every finalized result in the batch terminates.
 Low-level loop callers can set `should_stop_after_turn` to stop gracefully after
 the current turn completes. It runs after `turn_end`, before steering/follow-up
 queues are polled, and before another model request starts.
+
+#### continue_run() Event Sequence
+
+`continue_run()` resumes from existing context without adding a new message.
+Use it for retries after errors. The last message in context must be a user or
+tool-result message, not an assistant message.
+
+#### Event Types
+
+| Event | Description |
+| --- | --- |
+| `AgentStart` | Agent begins processing |
+| `AgentEnd` | Final event for the run. Awaited subscribers for this event still count toward settlement |
+| `TurnStart` | New turn begins: one LLM call plus tool executions |
+| `TurnEnd` | Turn completes with assistant message and tool results |
+| `MessageStart` | Any message begins: user, assistant, or tool result |
+| `MessageUpdate` | Assistant-only update containing the underlying assistant stream event |
+| `MessageEnd` | Message completes |
+| `ToolExecutionStart` | Tool begins |
+| `ToolExecutionUpdate` | Tool streams progress |
+| `ToolExecutionEnd` | Tool completes |
 
 `Agent::subscribe` listeners are awaited in registration order. `agent_end`
 means no more loop events will be emitted, but `wait_for_idle` and
@@ -915,6 +953,13 @@ Use the state and option mutation helpers to update system prompt, model,
 thinking level, tools, messages, session ID, queues, hooks, and tool execution
 mode. `reset` returns the agent to its initial state.
 
+#### Session and Thinking Budgets
+
+`AgentOptions::session_id` is forwarded to providers that support prompt-cache
+or session affinity behavior. `AgentOptions::options.thinking_budgets` maps
+upstream thinking-budget settings to Rust and is applied by the simple-stream
+option builder before each model call.
+
 #### Control
 
 ```rust
@@ -964,6 +1009,8 @@ Agent tools implement the `AgentTool` trait. `definition()` returns the shared
 `Tool` schema, `label()` provides UI text, `execution_mode()` can force a whole
 batch to run sequentially, `prepare_arguments()` can reshape model arguments
 before validation, and `execute()` performs the tool work.
+
+#### Agent Tool Error Handling
 
 Tool failures should return an error from `execute()`. The loop catches that
 error and reports a tool-result message with `is_error = true`, matching
