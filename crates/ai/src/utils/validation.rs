@@ -526,6 +526,32 @@ mod tests {
     }
 
     #[test]
+    fn still_validates_when_function_constructor_is_unavailable() {
+        let tool = Tool {
+            name: "echo".to_string(),
+            description: "Echo tool".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "number" }
+                },
+                "required": ["count"]
+            }),
+        };
+        let tool_call = ToolCall {
+            id: "tool-1".to_string(),
+            name: "echo".to_string(),
+            arguments: json!({ "count": "42" }),
+            thought_signature: None,
+        };
+
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "count": 42.0 })
+        );
+    }
+
+    #[test]
     fn coerces_serialized_plain_json_schemas_with_ajv_compatible_primitive_rules() {
         let cases = [
             (json!({ "type": "number" }), json!("42"), json!(42.0)),
