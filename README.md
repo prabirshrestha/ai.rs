@@ -1,83 +1,111 @@
 # ai.rs
 
-This is the home of `ai.rs`, the Rust port of the focused
-[`pi`](https://github.com/earendil-works/pi) AI and core agent runtime
-surfaces.
+Simple to use LLM library for Rust with streaming, tool calling, OAuth helpers,
+and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-works/pi).
 
-- [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai):
-  unified LLM API, model lookup, API registry, streaming helpers, provider
-  adapters, OAuth helpers, faux provider, and utility helpers.
-- [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent):
-  core agent state, direct agent loop, queueing, lifecycle events, tool
-  execution, and loop hooks.
+## Using the Library
 
-The goal is a 1:1 behavior mapping with upstream `pi` for the Rust APIs in
-scope, mapped to Rust naming, ownership, async, and error-handling conventions.
+```bash
+cargo add ai
+cargo add tokio --features macros,rt-multi-thread
+cargo add futures
+```
 
-To learn more about `pi`:
+See [crates/ai/README.md](crates/ai/README.md) for the full API reference.
 
-- [Visit pi.dev](https://pi.dev), the upstream project website with demos
-- [Read the upstream repository](https://github.com/earendil-works/pi)
-- [Read upstream `packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
-- [Read upstream `packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent)
+## Choosing an API
 
-## Share your OSS coding agent sessions
+Most applications should start with `stream_simple` for streaming responses and
+`complete_simple` for one-shot responses. They take `SimpleStreamOptions` and
+map common settings like reasoning, cache retention, API keys, retries,
+cancellation, and provider options onto the selected provider. Use `stream` or
+`complete` when you need the lower-level `StreamOptions` shape or direct
+provider-option forwarding.
 
-This Rust workspace does not include the TypeScript coding-agent harness,
-session publishing workflow, CLI, or TUI from upstream `pi`. It ports the AI
-and core agent runtime surfaces only.
+## Examples
 
-## All Crates
+### Streaming
 
-| Crate | Upstream mapping | Description |
-| --- | --- | --- |
-| [`ai`](crates/ai) | [`packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) + core [`packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent) | Unified LLM API plus the core agent loop runtime for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub Copilot-compatible routing. |
+```rust
+use futures::StreamExt;
 
-Upstream `pi` packages not ported as Rust crates in this workspace:
+use ai::{get_model, stream_simple, AssistantMessageEvent, Context, Message, Result};
 
-| Upstream package | Rust status |
-| --- | --- |
-| [`packages/coding-agent`](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | Not included. |
-| [`packages/tui`](https://github.com/earendil-works/pi/tree/main/packages/tui) | Not included. |
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = get_model("openai", "gpt-4o-mini").expect("model");
+    let context = Context {
+        messages: vec![Message::user_text("Write a haiku about Rust.")],
+        ..Default::default()
+    };
 
-For API usage, model lookup, tool calling, streaming, OAuth, agent loop APIs,
-provider scope, image-input support, out-of-scope Pi surfaces, and the detailed
-upstream file mapping, see
-[`crates/ai/README.md`](crates/ai/README.md).
+    let mut events = stream_simple(model, context, None)?;
 
-The TypeScript coding-agent harness, CLI, and TUI from
-[`pi`](https://github.com/earendil-works/pi) are not included. The core agent
-loop is implemented directly inside the `ai` crate.
+    while let Some(event) = events.next().await {
+        if let AssistantMessageEvent::TextDelta { delta, .. } = event {
+            print!("{delta}");
+        }
+    }
 
-## Contributing
+    let message = events.result().await?;
+    println!("\n\nused {} output tokens", message.usage.output);
 
-The current priority is parity with upstream `pi` for the scoped Rust API.
-When adding behavior, prefer a direct upstream mapping first, then Rust-specific
-API polish after the behavior is covered.
+    Ok(())
+}
+```
+
+### Agent Loop
+
+```rust
+use futures::StreamExt;
+
+use ai::{
+    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig,
+    AssistantMessageEvent, Message, Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+    let context = AgentContext {
+        system_prompt: "You are a concise coding assistant.".to_string(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let mut events = agent_loop(
+        vec![Message::user_text("Explain ownership in one paragraph.")],
+        context,
+        AgentLoopConfig::new(model),
+        None,
+        None,
+    );
+
+    while let Some(event) = events.next().await {
+        if let AgentEvent::MessageUpdate {
+            assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
+            ..
+        } = event
+        {
+            print!("{delta}");
+        }
+    }
+
+    Ok(())
+}
+```
 
 ## Development
 
 ```bash
-cargo fmt --all --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p ai
-cargo test --workspace
+mise run fmt
+mise run check
+mise run clippy
+mise run test-ai
+mise run test
+mise run ci
+mise run all
 ```
-
-Useful narrower test commands:
-
-```bash
-cargo test -p ai --lib       # unit tests
-cargo test -p ai --doc       # doc tests
-cargo test -p ai --tests     # integration tests, if present
-```
-
-## Supply-chain hardening
-
-Rust dependency changes are reviewed as code changes. `Cargo.lock` is the
-workspace dependency ground truth, and CI-style local validation should include
-formatting, `cargo check`, clippy, and tests before merging.
 
 ## License
 

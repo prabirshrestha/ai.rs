@@ -1,20 +1,7 @@
-# ai.rs
+# ai
 
-Unified LLM API with automatic model discovery, provider configuration, token
-and cost tracking, streaming events, tool calling, simple context persistence,
-and hand-off to other models mid-session.
-
-The crate name is `ai`. This crate is the Rust port of the scoped
-[`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
-surface. The core runtime from
-[`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent)
-also lives in this crate. This README follows the upstream Pi README order for
-the Rust surfaces that are in scope, with Rust examples and explicit notes where
-the active provider/API scope is narrower. The TypeScript coding-agent harness,
-CLI, TUI, and session-sharing workflow are not included.
-
-**Note**: Like upstream `pi-ai`, this crate focuses on models that support tool
-calling, because tool calling is essential for agentic workflows.
+Simple to use LLM library for Rust with streaming, tool calling, OAuth helpers,
+and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-works/pi).
 
 ## Table of Contents
 
@@ -55,10 +42,9 @@ calling, because tool calling is essential for agentic workflows.
 - [Context Serialization](#context-serialization)
 - [Browser Usage](#browser-usage)
   - [Browser Compatibility Notes](#browser-compatibility-notes)
-  - [Environment Variables](#environment-variables)
+- [Environment Variables](#environment-variables)
   - [Checking Environment Variables](#checking-environment-variables)
 - [OAuth Providers](#oauth-providers)
-  - [Vertex AI](#vertex-ai)
   - [CLI Login](#cli-login)
   - [Programmatic OAuth](#programmatic-oauth)
   - [Login Flow Example](#login-flow-example)
@@ -84,7 +70,6 @@ calling, because tool calling is essential for agentic workflows.
   - [Proxy Usage](#proxy-usage)
   - [Low-Level API](#low-level-api)
 - [Development](#development)
-  - [Upstream Mapping](#upstream-mapping)
   - [Adding a New Provider](#adding-a-new-provider)
 - [License](#license)
 
@@ -93,6 +78,8 @@ calling, because tool calling is essential for agentic workflows.
 - **OpenAI** via Chat Completions and Responses
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
+- **Azure Foundry and other compatible endpoints** through custom models with
+  explicit `base_url`, headers, and compatibility settings
 
 The active built-in stream APIs are:
 
@@ -100,15 +87,18 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
-Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
-Responses, and other broad provider-specific APIs are not part of the active
-built-in provider surface in this port. PRs to add support for additional
-providers are welcome.
+The active built-in model catalog is limited to `openai`, `anthropic`, and
+`github-copilot`. Azure Foundry and other OpenAI-compatible or
+Anthropic-compatible endpoints can be used through custom `Model` definitions
+that select one of the active APIs and set `base_url`, headers, and
+`compat` explicitly.
 
-Image-generation APIs from upstream Pi (`getImageModel`, `getImageModels`,
-`getImageProviders`, and `generateImages`) are intentionally not included yet.
-Chat/image input and image blocks in tool results are still supported by the
-regular chat APIs.
+Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
+and custom compatible routing are not part of the active built-in provider
+surface. PRs to add support for additional providers are welcome.
+
+Image generation is not exposed yet. Chat image input and image blocks in tool
+results are still supported by the regular chat APIs.
 
 ## Installation
 
@@ -210,8 +200,7 @@ async fn main() -> Result<()> {
 
 Tools enable LLMs to interact with external systems. This crate uses JSON
 Schema values for tool definitions and provides validation helpers for tool
-calls. This is the Rust equivalent of upstream Pi's TypeBox-based tool schema
-surface.
+calls.
 
 ### Defining Tools
 
@@ -359,9 +348,7 @@ let context = Context {
 
 ## Image Generation
 
-Upstream Pi documents image-generation APIs in this slot:
-`getImageModel`, `getImageModels`, `getImageProviders`, and `generateImages`.
-Those APIs are intentionally not included in this Rust port yet.
+Image generation is not exposed yet.
 
 ### Basic Image Generation
 
@@ -372,8 +359,7 @@ chat APIs for image input and tool-result image blocks.
 
 The active Rust provider surface is focused on chat/agent behavior for OpenAI
 Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub
-Copilot-compatible routing. PRs to add upstream-compatible image-generation
-support are welcome.
+Copilot-compatible routing.
 
 ## Thinking/Reasoning
 
@@ -410,16 +396,15 @@ let response = complete_simple(
 ### Provider-Specific Options (stream/complete)
 
 `stream_simple` and `complete_simple` are the preferred app-level APIs,
-equivalent to upstream `streamSimple` and `completeSimple`. They take
-`SimpleStreamOptions`, resolve the model's API, and map common options such as
-reasoning, cache retention, API key, cancellation, payload hooks, retry
-settings, and provider options onto the selected provider.
+They take `SimpleStreamOptions`, resolve the model's API, and map common
+options such as reasoning, cache retention, API key, cancellation, payload
+hooks, retry settings, and provider options onto the selected provider.
 
-`stream` and `complete` are the lower-level APIs, equivalent to upstream
-`stream` and `complete`. Use them when you need the non-simple `StreamOptions`
-shape or direct provider-option forwarding. For provider-specific escape
-hatches, place fields in `StreamOptions::provider_options` using upstream
-camelCase names such as `toolChoice`, `serviceTier`, or `thinkingDisplay`.
+`stream` and `complete` are the lower-level APIs. Use them when you need the
+non-simple `StreamOptions` shape or direct provider-option forwarding. For
+provider-specific escape hatches, place fields in
+`StreamOptions::provider_options` using provider option names such as
+`toolChoice`, `serviceTier`, or `thinkingDisplay`.
 
 The crate root also exports scoped direct provider stream functions:
 
@@ -450,8 +435,8 @@ generation ended:
 - `Error` - An error occurred during generation
 - `Aborted` - Request was cancelled
 
-`AssistantMessage` may also include `response_id`, a provider-specific upstream
-response or message identifier when the underlying API exposes one.
+`AssistantMessage` may also include `response_id`, a provider-specific response
+or message identifier when the underlying API exposes one.
 
 ## Error Handling
 
@@ -553,16 +538,18 @@ Notes:
 
 ### Providers and Models
 
-A provider offers models through a specific API. In this scoped port:
+A provider offers models through a specific API. In this crate:
 
 - **Anthropic** models use `anthropic-messages`.
 - **OpenAI** models use `openai-completions` or `openai-responses`.
 - **GitHub Copilot** models use OAuth-backed OpenAI/Anthropic-compatible
   routes.
+- **Azure Foundry** and other compatible endpoints are configured as custom
+  models by choosing an active API, setting `base_url`, and filling
+  `ModelCompat` where the endpoint differs from the default request shape.
 
-Built-in model metadata is loaded from the generated upstream model catalog and
-filtered to the active provider scope: `openai`, `anthropic`, and
-`github-copilot`.
+Built-in model metadata is loaded from the generated model catalog and filtered
+to the active provider scope: `openai`, `anthropic`, and `github-copilot`.
 
 ### Querying Providers and Models
 
@@ -585,11 +572,11 @@ use ai::{
 };
 
 let model = Model {
-    id: "llama-3.1-8b".to_string(),
-    name: "Llama 3.1 8B (Ollama)".to_string(),
+    id: "gpt-4o-mini".to_string(),
+    name: "GPT-4o mini through Azure Foundry".to_string(),
     api: "openai-completions".to_string(),
-    provider: "ollama".to_string(),
-    base_url: "http://localhost:11434/v1".to_string(),
+    provider: "azure-foundry".to_string(),
+    base_url: "https://example.services.ai.azure.com/openai/v1".to_string(),
     input: vec![ModelInput::Text],
     cost: ModelCost::default(),
     ..Default::default()
@@ -605,8 +592,11 @@ let stream = stream_simple(
 )?;
 ```
 
+The same pattern works for local inference servers such as Ollama, vLLM, and LM
+Studio when they expose an OpenAI-compatible chat endpoint.
+
 Some OpenAI-compatible servers do not understand the `developer` role used for
-reasoning-capable models. For those providers, set
+reasoning-capable models. For those endpoints, set
 `compat.supports_developer_role` to `false` so the system prompt is sent as a
 `system` message instead. If the server also does not support
 `reasoning_effort`, set `compat.supports_reasoning_effort` to `false`.
@@ -614,9 +604,9 @@ reasoning-capable models. For those providers, set
 ### OpenAI Compatibility Settings
 
 The `openai-completions` API is implemented by many providers with minor
-differences. The Rust port keeps upstream compatibility metadata on
-`ModelCompat` for explicit custom models, but the active built-in surface does
-not infer broad provider-specific behavior from provider names or base URLs.
+differences. `ModelCompat` stores compatibility metadata for explicit custom
+models, but the active built-in surface does not infer broad provider-specific
+behavior from provider names or base URLs.
 
 Set `model.compat` on custom models when the target OpenAI-compatible endpoint
 needs payload differences such as non-standard reasoning, cache-control,
@@ -635,9 +625,8 @@ dispatch.
 
 ### Type Safety
 
-Rust types replace TypeScript type-level provider/model inference. Public types
-are serializable with `serde` where they represent portable context or message
-state.
+Public types are serializable with `serde` where they represent portable
+context or message state.
 
 ## Cross-Provider Handoffs
 
@@ -697,14 +686,14 @@ let restored: Context = serde_json::from_str(&serialized)?;
 ```
 
 If the context contains images encoded as base64, those are serialized too.
-Serialized user, assistant, and tool-result messages include the same `role`
-fields as upstream Pi, including assistant messages nested in stream events.
+Serialized user, assistant, and tool-result messages include stable `role`
+fields, including assistant messages nested in stream events.
 
 ## Browser Usage
 
-The upstream TypeScript package documents browser bundling. This Rust crate is
-server/native focused and does not provide browser-specific packaging. Pass API
-keys explicitly through options or use environment variables on the server.
+This Rust crate is server/native focused and does not provide browser-specific
+packaging. Pass API keys explicitly through options or use environment
+variables on the server.
 
 ### Browser Compatibility Notes
 
@@ -736,16 +725,10 @@ The OAuth registry includes:
 - **Anthropic** (Claude Pro/Max subscription)
 - **GitHub Copilot** (Copilot subscription)
 
-### Vertex AI
-
-Upstream Pi includes Vertex AI OAuth documentation here. Native Google and
-Vertex AI APIs are not part of the active built-in provider surface in this
-Rust port.
-
 ### CLI Login
 
-This crate exposes login primitives. It does not include the TypeScript CLI
-harness.
+This crate exposes login primitives for applications that want to provide their
+own login UI.
 
 ### Programmatic OAuth
 
@@ -768,18 +751,17 @@ credentials into the API key used by stream options.
 ### Provider Notes
 
 **GitHub Copilot**: OAuth helpers and dynamic request headers are included.
-Some Copilot model ids use upstream vendor names such as Gemini or Grok, but
-they are routed through the active OpenAI/Anthropic-compatible APIs in this
-crate. Native Google, xAI, or other provider APIs are not registered.
+Some Copilot model ids use vendor names, but they are routed through the active
+OpenAI/Anthropic-compatible APIs in this crate. Other native provider APIs are
+not registered.
 
 **Anthropic**: OAuth follows the Claude Pro/Max OAuth flow.
 
 ## Agent Core
 
-Stateful agent support from upstream `@earendil-works/pi-agent-core` is part of
-this crate. It runs model turns, executes registered tools, appends tool
-results, and continues until the assistant stops, an error occurs, or a hook
-asks the loop to stop.
+Stateful agent support is part of this crate. It runs model turns, executes
+registered tools, appends tool results, and continues until the assistant
+stops, an error occurs, or a hook asks the loop to stop.
 
 ### Agent Installation
 
@@ -854,8 +836,7 @@ build responsive interfaces.
 
 #### prompt_text() Event Sequence
 
-When you call `prompt_text("Hello")`, the wrapper emits the same core sequence
-as upstream `prompt("Hello")`:
+When you call `prompt_text("Hello")`, the wrapper emits this core sequence:
 
 ```text
 prompt_text("Hello")
@@ -920,7 +901,7 @@ means no more loop events will be emitted, but `wait_for_idle` and
 
 ### Agent Options
 
-`AgentOptions` maps upstream constructor options to Rust fields:
+`AgentOptions` contains:
 
 - `initial_state`: system prompt, model, thinking level, tools, and messages.
 - `convert_to_llm`: converts agent messages to LLM messages.
@@ -938,9 +919,9 @@ means no more loop events will be emitted, but `wait_for_idle` and
 
 ### Agent State
 
-`AgentState` maps to upstream `AgentState` and contains the system prompt,
-active model, thinking level, tools, message history, streaming status, pending
-tool call IDs, and the latest error message.
+`AgentState` contains the system prompt, active model, thinking level, tools,
+message history, streaming status, pending tool call IDs, and the latest error
+message.
 
 During streaming, `streaming_message` contains the current partial assistant
 message. `is_streaming` remains true until the run fully settles, including
@@ -968,9 +949,8 @@ mode. `reset` returns the agent to its initial state.
 #### Session and Thinking Budgets
 
 `AgentOptions::session_id` is forwarded to providers that support prompt-cache
-or session affinity behavior. `AgentOptions::options.thinking_budgets` maps
-upstream thinking-budget settings to Rust and is applied by the simple-stream
-option builder before each model call.
+or session affinity behavior. `AgentOptions::options.thinking_budgets` is
+applied by the simple-stream option builder before each model call.
 
 #### Control
 
@@ -1025,8 +1005,7 @@ before validation, and `execute()` performs the tool work.
 #### Agent Tool Error Handling
 
 Tool failures should return an error from `execute()`. The loop catches that
-error and reports a tool-result message with `is_error = true`, matching
-upstream behavior.
+error and reports a tool-result message with `is_error = true`.
 
 Return `terminate = true` from `execute()` or `after_tool_call` to hint that
 the agent should stop after the current tool batch. This only takes effect when
@@ -1042,8 +1021,7 @@ converted `Context`, and `SimpleStreamOptions`.
 
 Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
 `run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
-loop directly. These are the Rust equivalents of upstream `agentLoop` and
-`agentLoopContinue`.
+loop directly.
 
 Low-level streams are observational. They preserve event order, but they do not
 wait for async event handling to settle before later producer phases continue.
@@ -1064,32 +1042,6 @@ cargo test --workspace
 
 This crate currently keeps Rust test coverage in module-level unit tests under
 `src`; there is no `crates/ai/tests` integration-test directory at the moment.
-
-### Upstream Mapping
-
-This crate maps the active Rust surface to these upstream Pi files:
-
-| Rust module | Upstream Pi source | Status |
-| --- | --- | --- |
-| `src/stream.rs` | `packages/ai/src/stream.ts` | Ported |
-| `src/api_registry.rs` | `packages/ai/src/api-registry.ts` | Ported |
-| `src/models.rs` | `packages/ai/src/models.ts` | Ported with generated metadata filtered to active providers |
-| `src/env_api_keys.rs` | `packages/ai/src/env-api-keys.ts` | Ported for OpenAI, Anthropic, and GitHub Copilot |
-| `src/providers/openai_completions.rs` | `packages/ai/src/providers/openai-completions.ts` | Ported for scoped OpenAI-compatible chat behavior |
-| `src/providers/openai_responses.rs` | `packages/ai/src/providers/openai-responses.ts` and `openai-responses-shared.ts` | Ported for OpenAI Responses |
-| `src/providers/anthropic.rs` | `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages |
-| `src/providers/faux.rs` | `packages/ai/src/providers/faux.ts` | Ported for tests and deterministic demos |
-| `src/providers/github_copilot_headers.rs` | `packages/ai/src/providers/github-copilot-headers.ts` | Ported for Copilot-compatible routing |
-| `src/providers/simple_options.rs` | `packages/ai/src/providers/simple-options.ts` | Ported |
-| `src/providers/transform_messages.rs` | `packages/ai/src/providers/transform-messages.ts` | Ported |
-| `src/oauth.rs` | Pi OAuth helpers for Anthropic and GitHub Copilot | Ported for active OAuth providers |
-| `src/agent_types.rs` | `packages/agent/src/types.ts` | Ported into this crate |
-| `src/agent_loop.rs` | `packages/agent/src/agent-loop.ts` | Ported into this crate |
-| `src/agent.rs` | `packages/agent/src/agent.ts` | Ported into this crate |
-
-Not included in this Rust port: the TypeScript coding-agent harness, CLI, TUI,
-session sharing workflow, native Cloudflare, Bedrock, Google, Mistral, Azure
-OpenAI Responses, OpenAI Codex Responses, and image-generation APIs.
 
 ### Adding a New Provider
 
@@ -1133,8 +1085,8 @@ image input/tool-result images if applicable, and cross-provider handoff.
 
 #### 6. Agent Integration
 
-No separate harness integration exists in this Rust port. If the provider needs
-agent-specific behavior, update this crate's agent tests and examples directly.
+If the provider needs agent-specific behavior, update this crate's agent tests
+and examples directly.
 
 #### 7. Documentation
 
