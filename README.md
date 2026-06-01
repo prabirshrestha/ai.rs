@@ -1,7 +1,8 @@
 # ai.rs
 
-This is the Rust port of the focused [`pi`](https://github.com/earendil-works/pi)
-AI and core agent runtime surfaces.
+This is the home of `ai.rs`, the Rust port of the focused
+[`pi`](https://github.com/earendil-works/pi) AI and core agent runtime
+surfaces.
 
 - [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai):
   unified LLM API, model lookup, API registry, streaming helpers, provider

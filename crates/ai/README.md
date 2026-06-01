@@ -1,20 +1,15 @@
 # ai
 
 Unified LLM API with automatic model discovery, provider configuration, token
-and cost tracking, streaming events, tool calling, context persistence, and
-handoff to other models mid-session.
+and cost tracking, streaming events, tool calling, simple context persistence,
+and hand-off to other models mid-session.
 
-This crate is a Rust port of the focused
+This crate is the Rust port of the scoped
 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
-and
+surface. The core runtime from
 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent)
-surfaces. Unlike the TypeScript repo, the agent loop lives in this `ai` crate;
-there is no separate harness crate here.
-
-This README follows the upstream
-[`packages/ai/README.md`](https://github.com/earendil-works/pi/tree/main/packages/ai)
-section order as closely as possible, with Rust examples and explicit notes for
-upstream sections that are outside this port's active scope.
+also lives in this crate. The TypeScript coding-agent harness, CLI, and TUI are
+not included.
 
 **Note**: Like upstream `pi-ai`, this crate focuses on models that support tool
 calling, because tool calling is essential for agentic workflows.
@@ -35,8 +30,8 @@ calling, because tool calling is essential for agentic workflows.
   - [Basic Image Generation](#basic-image-generation)
   - [Notes and Limitations](#notes-and-limitations)
 - [Thinking/Reasoning](#thinkingreasoning)
-  - [Unified Interface](#unified-interface-stream_simplecomplete_simple)
-  - [Provider-Specific Options](#provider-specific-options-streamcomplete)
+  - [Unified Interface (stream_simple/complete_simple)](#unified-interface-stream_simplecomplete_simple)
+  - [Provider-Specific Options (stream/complete)](#provider-specific-options-streamcomplete)
   - [Streaming Thinking Content](#streaming-thinking-content)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
@@ -44,7 +39,7 @@ calling, because tool calling is essential for agentic workflows.
   - [Continuing After Abort](#continuing-after-abort)
   - [Debugging Provider Payloads](#debugging-provider-payloads)
 - [APIs, Models, and Providers](#apis-models-and-providers)
-  - [Faux Provider for Tests](#faux-provider-for-tests)
+  - [Faux provider for tests](#faux-provider-for-tests)
   - [Providers and Models](#providers-and-models)
   - [Querying Providers and Models](#querying-providers-and-models)
   - [Custom Models](#custom-models)
@@ -67,29 +62,27 @@ calling, because tool calling is essential for agentic workflows.
   - [Using OAuth Tokens](#using-oauth-tokens)
   - [Provider Notes](#provider-notes)
 - [Agent Core](#agent-core)
+  - [Installation](#agent-installation)
+  - [Quick Start](#agent-quick-start)
   - [Core Concepts](#core-concepts)
   - [Event Flow](#event-flow)
   - [Agent Options](#agent-options)
-  - [Agent Loop](#agent-loop)
   - [Agent State](#agent-state)
-  - [Agent Methods](#agent-methods)
+  - [Methods](#methods)
   - [Steering and Follow-up](#steering-and-follow-up)
   - [Custom Message Types](#custom-message-types)
-  - [Agent Tools](#agent-tools)
+  - [Tools](#agent-tools)
   - [Proxy Usage](#proxy-usage)
   - [Low-Level API](#low-level-api)
 - [Development](#development)
   - [Adding a New Provider](#adding-a-new-provider)
-- [Upstream Pi Mapping](#upstream-pi-mapping)
-  - [README Section Mapping](#readme-section-mapping)
-  - [Upstream File Mapping](#upstream-file-mapping)
 - [License](#license)
 
 ## Supported Providers
 
 - **OpenAI** via Chat Completions and Responses
 - **Anthropic** via Messages
-- **GitHub Copilot** via OAuth-backed OpenAI/Anthropic-compatible routes
+- **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
 
 The active built-in stream APIs are:
 
@@ -102,8 +95,6 @@ Responses, and other broad provider-specific APIs are not part of the active
 built-in provider surface in this port. PRs to add support for additional
 providers are welcome.
 
-The TypeScript coding-agent harness, CLI, and TUI are not included.
-
 ## Installation
 
 ```bash
@@ -111,20 +102,21 @@ cargo add ai
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-This crate uses Tokio streams and `reqwest` internally. Applications normally
-use Tokio as their async runtime. The examples use `#[tokio::main]`, which
-requires the `macros` and `rt-multi-thread` Tokio features.
+This crate uses Tokio-compatible async APIs. The examples use
+`#[tokio::main]`, which requires Tokio's `macros` and `rt-multi-thread`
+features.
 
 ## Quick Start
 
 ```rust
 use futures::StreamExt;
+use serde_json::json;
 
 use ai::{
-    complete_simple, get_model, stream_simple, AssistantContent, AssistantMessageEvent, Context,
-    Message, Result, SimpleStreamOptions, Tool, ToolResultContent, ToolResultMessage,
+    complete_simple, get_model, stream, stream_simple, AssistantContent,
+    AssistantMessageEvent, Context, Message, Result, SimpleStreamOptions,
+    Tool, ToolResultContent, ToolResultMessage,
 };
-use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -150,20 +142,27 @@ async fn main() -> Result<()> {
 
     let mut events =
         stream_simple(model.clone(), context.clone(), Some(SimpleStreamOptions::default()))?;
+
     while let Some(event) = events.next().await {
         match event {
+            AssistantMessageEvent::Start { partial } => {
+                println!("starting with {}", partial.model.id);
+            }
             AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
             AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
                 println!("tool: {}({})", tool_call.name, tool_call.arguments);
             }
-            AssistantMessageEvent::Done { reason, .. } => println!("\nfinished: {reason:?}"),
+            AssistantMessageEvent::Done { reason, message } => {
+                println!("\nfinished: {reason:?}");
+                context.messages.push(Message::Assistant(message));
+            }
             AssistantMessageEvent::Error { error, .. } => eprintln!("{error:?}"),
             _ => {}
         }
     }
 
-    let response = complete_simple(model, context.clone(), Some(SimpleStreamOptions::default())).await?;
-    context.messages.push(Message::Assistant(response.clone()));
+    let response =
+        complete_simple(model, context.clone(), Some(SimpleStreamOptions::default())).await?;
 
     for block in response.content {
         match block {
@@ -182,14 +181,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Lower-level provider-option API, equivalent to upstream stream()/complete().
+    let _lower_level = stream(get_model("openai", "gpt-4o-mini").unwrap(), context, None)?;
+
     Ok(())
 }
 ```
 
 ## Tools
 
-Tools enable LLMs to interact with external systems. This crate uses JSON Schema
-values for tool definitions and provides validation helpers for tool calls.
+Tools enable LLMs to interact with external systems. This crate uses JSON
+Schema values for tool definitions and provides validation helpers for tool
+calls. This is the Rust equivalent of upstream Pi's TypeBox-based tool schema
+surface.
 
 ### Defining Tools
 
@@ -263,14 +267,16 @@ Important notes about partial tool arguments:
 
 - During `ToolCallDelta`, arguments may be incomplete.
 - Fields may be missing or partially parsed.
+- String values may be truncated mid-word.
+- Arrays and nested objects may be incomplete.
 - Always validate final tool arguments before executing external effects.
 - Use `content_index` to associate events with the right assistant content block.
 
 ### Validating Tool Arguments
 
 When using the agent loop, tool arguments are validated before execution. When
-implementing your own loop, use `validate_tool_call` or
-`validate_tool_arguments`.
+implementing your own loop with `stream` or `complete`, use
+`validate_tool_call` or `validate_tool_arguments`.
 
 ```rust
 use ai::{validate_tool_call, Tool, ToolCall};
@@ -280,20 +286,22 @@ let validated = validate_tool_call(&tools, &tool_call)?;
 
 ### Complete Event Reference
 
-| Event | Description |
-| --- | --- |
-| `Start` | Stream begins with the initial partial assistant message. |
-| `TextStart` | Text block starts. |
-| `TextDelta` | Text chunk received. |
-| `TextEnd` | Text block complete. |
-| `ThinkingStart` | Thinking block starts. |
-| `ThinkingDelta` | Thinking chunk received. |
-| `ThinkingEnd` | Thinking block complete. |
-| `ToolCallStart` | Tool call block starts. |
-| `ToolCallDelta` | Tool arguments stream as partial JSON. |
-| `ToolCallEnd` | Tool call is complete. |
-| `Done` | Stream completed with a final assistant message. |
-| `Error` | Provider or cancellation error with partial assistant message. |
+All streaming events emitted during assistant message generation:
+
+| Event | Description | Key Properties |
+| --- | --- | --- |
+| `Start` | Stream begins | `partial`: initial assistant message structure |
+| `TextStart` | Text block starts | `content_index`: position in content array |
+| `TextDelta` | Text chunk received | `delta`, `content_index` |
+| `TextEnd` | Text block complete | `content`, `content_index` |
+| `ThinkingStart` | Thinking block starts | `content_index` |
+| `ThinkingDelta` | Thinking chunk received | `delta`, `content_index` |
+| `ThinkingEnd` | Thinking block complete | `content`, `content_index` |
+| `ToolCallStart` | Tool call begins | `content_index` |
+| `ToolCallDelta` | Tool arguments stream | `delta`, `partial` |
+| `ToolCallEnd` | Tool call complete | `tool_call` |
+| `Done` | Stream complete | `reason`, `message` |
+| `Error` | Error occurred | `reason`, `error` |
 
 Streaming events for different content blocks are not guaranteed to be
 contiguous. Consumers should use `content_index` to associate deltas and end
@@ -307,13 +315,13 @@ transform layer downgrades unsupported image content to text placeholders.
 
 ```rust
 use ai::{
-    get_model, Context, ImageContent, Message, ModelInput, UserContent, UserMessage,
-    UserMessageContent,
+    get_model, Context, ImageContent, Message, ModelInput, UserContent,
+    UserMessage, UserMessageContent,
 };
 
 let model = get_model("openai", "gpt-4o-mini").expect("model");
 if model.input.contains(&ModelInput::Image) {
-    println!("model supports image input");
+    println!("model supports vision");
 }
 
 let context = Context {
@@ -333,9 +341,12 @@ let context = Context {
 
 ## Image Generation
 
-Image generation is intentionally not included in this Rust port yet. Keep
-using `stream`, `complete`, `stream_simple`, and `complete_simple` for
-chat/text generation with optional image input.
+Image generation uses a separate API surface in upstream Pi. It is intentionally
+not included in this Rust port yet.
+
+Do not use `stream`, `complete`, `stream_simple`, or `complete_simple` for
+image generation. Those APIs are for chat/text generation with optional image
+input.
 
 ### Basic Image Generation
 
@@ -358,12 +369,15 @@ use `get_supported_thinking_levels` to inspect supported levels.
 ### Unified Interface (stream_simple/complete_simple)
 
 ```rust
-use ai::{complete_simple, get_model, Context, Message, ModelThinkingLevel, SimpleStreamOptions};
+use ai::{
+    complete_simple, get_model, Context, Message, ModelThinkingLevel,
+    SimpleStreamOptions,
+};
 
 let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
 let options = SimpleStreamOptions {
     reasoning: Some(ModelThinkingLevel::Medium),
-    ..SimpleStreamOptions::default()
+    ..Default::default()
 };
 
 let response = complete_simple(
@@ -379,27 +393,19 @@ let response = complete_simple(
 
 ### Provider-Specific Options (stream/complete)
 
-Use `stream_simple` and `complete_simple` for normal application code. They take
+`stream_simple` and `complete_simple` are the preferred app-level APIs,
+equivalent to upstream `streamSimple` and `completeSimple`. They take
 `SimpleStreamOptions`, resolve the model's API, and map common options such as
-reasoning, cache retention, API key, cancellation, payload hooks, and retry
-settings onto the selected provider.
+reasoning, cache retention, API key, cancellation, payload hooks, retry
+settings, and provider options onto the selected provider.
 
-Use `stream` and `complete` when you need the non-simple `StreamOptions` shape.
-This maps to upstream Pi's lower-level `stream` / `complete` entry points. For
-parity with upstream's provider-specific option casts, place provider-specific
-fields in `StreamOptions::provider_options` using the upstream camelCase names,
-such as OpenAI Chat Completions `toolChoice`, OpenAI Responses `serviceTier`,
-or Anthropic `thinkingDisplay`.
+`stream` and `complete` are the lower-level APIs, equivalent to upstream
+`stream` and `complete`. Use them when you need the non-simple `StreamOptions`
+shape or direct provider-option forwarding. For provider-specific escape
+hatches, place fields in `StreamOptions::provider_options` using upstream
+camelCase names such as `toolChoice`, `serviceTier`, or `thinkingDisplay`.
 
-In short:
-
-- `stream_simple` / `complete_simple`: preferred app-level API, equivalent to
-  upstream `streamSimple` / `completeSimple`.
-- `stream` / `complete`: lower-level API for direct `StreamOptions` and
-  provider-specific option forwarding.
-
-The crate root also exports the scoped direct provider stream functions,
-matching upstream `register-builtins` exports:
+The crate root also exports scoped direct provider stream functions:
 
 - `stream_openai_completions` / `stream_simple_openai_completions`
 - `stream_openai_responses` / `stream_simple_openai_responses`
@@ -419,13 +425,17 @@ Thinking content streams through `ThinkingStart`, `ThinkingDelta`, and
 
 ## Stop Reasons
 
-`StopReason` variants:
+Every `AssistantMessage` includes a `stop_reason` field that indicates how the
+generation ended:
 
-- `Stop`
-- `Length`
-- `ToolUse`
-- `Error`
-- `Aborted`
+- `Stop` - Normal completion
+- `Length` - Output hit the maximum token limit
+- `ToolUse` - Model is calling tools and expects tool results
+- `Error` - An error occurred during generation
+- `Aborted` - Request was cancelled
+
+`AssistantMessage` may also include `response_id`, a provider-specific upstream
+response or message identifier when the underlying API exposes one.
 
 ## Error Handling
 
@@ -434,7 +444,8 @@ and as `Error` values from the `complete_*` helpers.
 
 ### Aborting Requests
 
-Use the cancellation token in `StreamOptions` to abort in-flight requests.
+Use a Tokio cancellation token to abort in-flight requests. Prefer direct
+struct initialization over mutating default options:
 
 ```rust
 use ai::{SimpleStreamOptions, StreamOptions};
@@ -444,10 +455,11 @@ let token = CancellationToken::new();
 let options = SimpleStreamOptions {
     stream: StreamOptions {
         cancellation_token: Some(token.clone()),
-        ..StreamOptions::default()
+        ..Default::default()
     },
-    ..SimpleStreamOptions::default()
+    ..Default::default()
 };
+
 token.cancel();
 ```
 
@@ -460,38 +472,81 @@ can continue cleanly.
 ### Debugging Provider Payloads
 
 Use `StreamOptions::on_payload` and `StreamOptions::on_response` hooks to
-inspect or override provider payloads and observe raw provider responses.
+inspect or override provider payloads and observe raw provider responses. The
+hooks are supported by `stream`, `complete`, `stream_simple`, and
+`complete_simple`.
 
 ## APIs, Models, and Providers
 
-The stream registry is API-based. A model has an `api` field that selects the
-transport shape and a `provider` field that identifies the model provider.
+The crate uses a registry of API implementations. Built-in APIs include:
 
-### Faux Provider for Tests
+- **`anthropic-messages`**: Anthropic Messages API
+- **`openai-completions`**: OpenAI Chat Completions API
+- **`openai-responses`**: OpenAI Responses API
 
-The faux provider is a queued in-process provider for tests. It is useful for
-agent loop tests and deterministic stream behavior.
+### Faux provider for tests
+
+`register_faux_provider()` registers a temporary in-memory provider for tests
+and demos. It is opt-in and not part of the built-in provider set.
 
 ```rust
-use ai::{faux_assistant_message, register_faux_provider};
+use ai::{
+    complete, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
+    register_faux_provider, Context, Message,
+};
 
 let registration = register_faux_provider(None);
-registration.set_responses([faux_assistant_message("hello", None)]);
 let model = registration.get_model();
+let mut context = Context {
+    messages: vec![Message::user_text("Summarize package.json and then call echo")],
+    ..Default::default()
+};
+
+registration.set_responses([faux_assistant_message(
+    vec![
+        faux_thinking("Need to inspect package metadata first."),
+        faux_tool_call("echo", serde_json::json!({ "text": "package.json" })),
+    ],
+    None,
+)]);
+
+let first = complete(model.clone(), context.clone(), None).await?;
+context.messages.push(Message::Assistant(first));
+
+registration.set_responses([faux_assistant_message(
+    vec![faux_text("Here is the summary.")],
+    None,
+)]);
+
+println!("{}", registration.get_pending_response_count());
 registration.unregister();
 ```
 
+Notes:
+
+- Responses are consumed from a queue in request start order.
+- If the queue is empty, the faux provider returns an assistant error message.
+- Use `set_responses` to replace the queue and `append_responses` to add more.
+- `registration.models` exposes all registered faux models.
+- `registration.get_model()` returns the first model, and
+  `registration.get_model_by_id(id)` returns a specific model.
+- Use `faux_assistant_message`, `faux_text`, `faux_thinking`, and
+  `faux_tool_call` to build scripted replies.
+- `registration.unregister()` removes the temporary provider from the global
+  API registry.
+
 ### Providers and Models
+
+A provider offers models through a specific API. In this scoped port:
+
+- **Anthropic** models use `anthropic-messages`.
+- **OpenAI** models use `openai-completions` or `openai-responses`.
+- **GitHub Copilot** models use OAuth-backed OpenAI/Anthropic-compatible
+  routes.
 
 Built-in model metadata is loaded from the generated upstream model catalog and
 filtered to the active provider scope: `openai`, `anthropic`, and
-`github-copilot`. Built-in models use only the active stream APIs:
-`openai-completions`, `openai-responses`, and `anthropic-messages`.
-
-Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
-Responses, and other broad provider-specific APIs are not part of the active
-built-in provider surface in this port. PRs to add support for additional
-providers are welcome.
+`github-copilot`.
 
 ### Querying Providers and Models
 
@@ -499,20 +554,25 @@ providers are welcome.
 use ai::{get_model, get_models, get_providers};
 
 let providers = get_providers();
-let openai_models = get_models("openai");
-let model = get_model("anthropic", "claude-sonnet-4-5");
+let anthropic_models = get_models("anthropic");
+let model = get_model("openai", "gpt-4o-mini");
 ```
 
 ### Custom Models
 
+You can create custom models for local inference servers or custom endpoints:
+
 ```rust
-use ai::{stream_simple, Context, Message, Model, ModelCost, ModelInput, SimpleStreamOptions};
+use ai::{
+    stream_simple, Context, Message, Model, ModelCost, ModelInput,
+    SimpleStreamOptions,
+};
 
 let model = Model {
-    id: "local-model".to_string(),
-    name: "Local Model".to_string(),
+    id: "llama-3.1-8b".to_string(),
+    name: "Llama 3.1 8B (Ollama)".to_string(),
     api: "openai-completions".to_string(),
-    provider: "local".to_string(),
+    provider: "ollama".to_string(),
     base_url: "http://localhost:11434/v1".to_string(),
     input: vec![ModelInput::Text],
     cost: ModelCost::default(),
@@ -529,14 +589,22 @@ let stream = stream_simple(
 )?;
 ```
 
+Some OpenAI-compatible servers do not understand the `developer` role used for
+reasoning-capable models. For those providers, set
+`compat.supports_developer_role` to `false` so the system prompt is sent as a
+`system` message instead. If the server also does not support
+`reasoning_effort`, set `compat.supports_reasoning_effort` to `false`.
+
 ### OpenAI Compatibility Settings
 
-OpenAI-compatible providers can require small payload differences. The Rust port
-keeps upstream compatibility metadata on `ModelCompat` for explicit custom
-models, but the active built-in surface does not infer broad provider-specific
-behavior from provider names or base URLs. Set `model.compat` on custom models
-when the target OpenAI-compatible endpoint needs payload differences such as
-non-standard reasoning, cache-control, max-token, or tool-result behavior.
+The `openai-completions` API is implemented by many providers with minor
+differences. The Rust port keeps upstream compatibility metadata on
+`ModelCompat` for explicit custom models, but the active built-in surface does
+not infer broad provider-specific behavior from provider names or base URLs.
+
+Set `model.compat` on custom models when the target OpenAI-compatible endpoint
+needs payload differences such as non-standard reasoning, cache-control,
+max-token, or tool-result behavior.
 
 ### Thread Safety
 
@@ -545,26 +613,31 @@ lookup functions such as `get_model`, `get_models`, and `get_providers`.
 
 The API and OAuth registries are global registries backed by `OnceLock` plus
 `RwLock`. Lookup and registration functions are safe to call from multiple
-threads, but registration is global mutable state, so applications should
-register custom API/OAuth providers during startup rather than concurrently with
-request dispatch.
+threads, but registration is global mutable state. Applications should register
+custom API/OAuth providers during startup rather than concurrently with request
+dispatch.
 
 ### Type Safety
 
-Rust types replace the TypeScript type-level provider/model inference. Public
-types are serializable with `serde` where they represent portable context or
-message state.
+Rust types replace TypeScript type-level provider/model inference. Public types
+are serializable with `serde` where they represent portable context or message
+state.
 
 ## Cross-Provider Handoffs
 
-Messages use a provider-neutral shape so a conversation can move between
-OpenAI, Anthropic, and GitHub Copilot-compatible models.
+The library supports handoffs between OpenAI, Anthropic, and GitHub
+Copilot-compatible models within the same conversation.
 
 ### How It Works
 
-Before a request is sent, the provider converts the shared `Context` into the
-target API payload. During conversion it normalizes tool call IDs, thinking
-blocks, image content, cache metadata, and provider-specific signatures.
+When messages from one provider are sent to a different provider, the crate
+transforms them for compatibility:
+
+- User and tool-result messages are passed through.
+- Assistant messages from the same provider/API are preserved as-is.
+- Assistant messages from different providers have thinking blocks converted to
+  text with `<thinking>` tags where needed.
+- Tool calls and regular text are preserved.
 
 ### Example: Multi-Provider Conversation
 
@@ -572,42 +645,50 @@ blocks, image content, cache metadata, and provider-specific signatures.
 use ai::{complete_simple, get_model, Context, Message, SimpleStreamOptions};
 
 let mut context = Context {
-    messages: vec![Message::user_text("Plan a migration.")],
+    messages: vec![Message::user_text("What is 25 * 18?")],
     ..Default::default()
 };
 
-let openai = get_model("openai", "gpt-4o-mini").expect("openai model");
-let first = complete_simple(openai, context.clone(), Some(SimpleStreamOptions::default())).await?;
-context.messages.push(Message::Assistant(first));
+let claude = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+let claude_response =
+    complete_simple(claude, context.clone(), Some(SimpleStreamOptions::default())).await?;
+context.messages.push(Message::Assistant(claude_response));
 
-let anthropic = get_model("anthropic", "claude-sonnet-4-5").expect("anthropic model");
-let second = complete_simple(anthropic, context, Some(SimpleStreamOptions::default())).await?;
+let gpt = get_model("openai", "gpt-4o-mini").expect("model");
+context.messages.push(Message::user_text("Is that calculation correct?"));
+let gpt_response =
+    complete_simple(gpt, context.clone(), Some(SimpleStreamOptions::default())).await?;
+context.messages.push(Message::Assistant(gpt_response));
 ```
 
 ### Provider Compatibility
 
-Provider compatibility is handled at conversion time. Unsupported content is
-downgraded or omitted where the target API cannot accept it.
+All active providers can handle shared text, tool calls, tool results including
+images, thinking/reasoning blocks after transformation, and aborted messages
+with partial content.
 
 ## Context Serialization
 
 `Context`, `Message`, assistant content, tool calls, and tool results implement
 `Serialize` and `Deserialize`, so context can be persisted or handed to another
-process. Serialized user, assistant, and tool-result messages include the same
-`role` fields as upstream Pi, including assistant messages nested in stream
-events.
+process.
 
 ```rust
 use ai::Context;
 
-let json = serde_json::to_string(&context)?;
-let restored: Context = serde_json::from_str(&json)?;
+let serialized = serde_json::to_string(&context)?;
+let restored: Context = serde_json::from_str(&serialized)?;
 ```
+
+If the context contains images encoded as base64, those are serialized too.
+Serialized user, assistant, and tool-result messages include the same `role`
+fields as upstream Pi, including assistant messages nested in stream events.
 
 ## Browser Usage
 
 The upstream TypeScript package documents browser bundling. This Rust crate is
-server/native focused and does not provide browser-specific packaging.
+server/native focused and does not provide browser-specific packaging. Pass API
+keys explicitly through options or use environment variables on the server.
 
 ### Browser Compatibility Notes
 
@@ -636,8 +717,8 @@ let keys = find_env_keys("openai");
 
 The OAuth registry includes:
 
-- `anthropic`
-- `github-copilot`
+- **Anthropic** (Claude Pro/Max subscription)
+- **GitHub Copilot** (Copilot subscription)
 
 ### CLI Login
 
@@ -664,132 +745,146 @@ credentials into the API key used by stream options.
 
 ### Provider Notes
 
-GitHub Copilot support includes OAuth helpers and dynamic request headers.
+**GitHub Copilot**: OAuth helpers and dynamic request headers are included.
 Some Copilot model ids use upstream vendor names such as Gemini or Grok, but
 they are routed through the active OpenAI/Anthropic-compatible APIs in this
-crate; native Google, xAI, or other provider APIs are not registered.
-Anthropic OAuth follows the Claude Pro/Max OAuth flow.
+crate. Native Google, xAI, or other provider APIs are not registered.
+
+**Anthropic**: OAuth follows the Claude Pro/Max OAuth flow.
 
 ## Agent Core
 
 Stateful agent support from upstream `@earendil-works/pi-agent-core` is part of
 this crate. It runs model turns, executes registered tools, appends tool
 results, and continues until the assistant stops, an error occurs, or a hook
-asks the loop to stop. The TypeScript harness, CLI, and TUI are not included in
-this Rust port.
+asks the loop to stop.
 
-For application-owned state, use `Agent`. For direct loop control, use
-`agent_loop` or `run_agent_loop`.
+### Agent Installation
+
+No separate crate is required. The agent core lives in `ai`.
+
+```bash
+cargo add ai
+```
+
+### Agent Quick Start
+
+```rust
+use futures::StreamExt;
+
+use ai::{
+    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig,
+    AssistantMessageEvent, Message, Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+    let context = AgentContext {
+        system_prompt: "You are a helpful assistant.".to_string(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let config = AgentLoopConfig::new(model);
+    let prompts = vec![Message::user_text("Hello!")];
+
+    let mut events = agent_loop(prompts, context, config, None, None);
+    while let Some(event) = events.next().await {
+        if let AgentEvent::MessageUpdate {
+            assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
+            ..
+        } = event
+        {
+            print!("{delta}");
+        }
+    }
+
+    Ok(())
+}
+```
 
 ### Core Concepts
 
+#### AgentMessage vs LLM Message
+
 `AgentMessage` is the same portable `Message` enum used by the shared LLM API.
-It can contain normal LLM messages (`User`, `Assistant`, `ToolResult`) and
+It can contain standard LLM messages (`User`, `Assistant`, `ToolResult`) and
 `Custom` app-owned messages.
 
-The loop follows the upstream message flow:
+LLMs only understand user, assistant, and tool-result messages. The
+`convert_to_llm` function bridges this gap by filtering or transforming custom
+messages before each provider call.
+
+#### Message Flow
 
 ```text
 AgentMessage[] -> transform_context() -> AgentMessage[] -> convert_to_llm() -> Message[] -> LLM
+                    (optional)                           (required)
 ```
 
-`transform_context` is optional and is intended for pruning, compaction, or
-external context injection. `convert_to_llm` is required by the loop config and
-filters or converts app-owned messages before each provider request.
+`transform_context` is intended for pruning, compaction, or external context
+injection. `convert_to_llm` filters or converts app-owned messages.
 
 ### Event Flow
 
-`prompt_text("Hello")` maps to the upstream `prompt("Hello")` event sequence:
+When you call `prompt_text("Hello")`, the wrapper emits the same core sequence
+as upstream `prompt("Hello")`:
 
 ```text
-agent_start
-turn_start
-message_start   user
-message_end     user
-message_start   assistant
-message_update  assistant delta
-message_end     assistant
-turn_end
-agent_end
+prompt_text("Hello")
+|- agent_start
+|- turn_start
+|- message_start   user
+|- message_end     user
+|- message_start   assistant
+|- message_update  assistant delta
+|- message_end     assistant
+|- turn_end
+`- agent_end
 ```
 
-When the assistant calls tools, the same turn emits `tool_execution_start`,
-optional `tool_execution_update`, `tool_execution_end`, then a tool-result
+If the assistant calls tools, the loop emits `tool_execution_start`, optional
+`tool_execution_update`, `tool_execution_end`, then a tool-result
 `message_start` / `message_end`. If the batch does not terminate, the next turn
 starts and the model receives the tool results.
 
+Tool execution mode is configurable:
+
+- `Parallel` is the default. Preflight runs sequentially, allowed tools execute
+  concurrently, completion events emit as each tool finalizes, and persisted
+  tool-result messages remain in assistant source order.
+- `Sequential` executes tool calls one by one.
+
+`before_tool_call` runs after `tool_execution_start` and validated argument
+parsing. `after_tool_call` runs after tool execution and before final tool
+events. Tool results can set `terminate = true`; the loop stops early only when
+every finalized result in the batch terminates.
+
+Low-level loop callers can set `should_stop_after_turn` to stop gracefully after
+the current turn completes. It runs after `turn_end`, before steering/follow-up
+queues are polled, and before another model request starts.
+
 `Agent::subscribe` listeners are awaited in registration order. `agent_end`
-means no more loop events will be emitted, but `wait_for_idle` only returns
-after awaited listeners for that final event have settled.
+means no more loop events will be emitted, but `wait_for_idle` and
+`prompt_text` settle only after awaited final listeners finish.
 
 ### Agent Options
 
 `AgentOptions` maps upstream constructor options to Rust fields:
 
 - `initial_state`: system prompt, model, thinking level, tools, and messages.
-- `convert_to_llm` and `transform_context`: context conversion hooks.
+- `convert_to_llm`: converts agent messages to LLM messages.
+- `transform_context`: prunes, compacts, or injects context before conversion.
+- `steering_mode` and `follow_up_mode`: queue handling behavior.
 - `stream_fn`: custom stream function for proxy backends.
-- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
-- `before_tool_call` and `after_tool_call`: tool preflight and postprocess
-  hooks.
-- `prepare_next_turn`: hook that can replace context, model, or thinking level.
 - `session_id`: forwarded through `SimpleStreamOptions`.
-- `options`: Rust home for upstream `onPayload`, `onResponse`, transport,
-  thinking budgets, retry delay, API key, cancellation, and provider options.
-- `steering_mode`, `follow_up_mode`, and `tool_execution`: queue and tool batch
-  execution behavior.
-
-### Agent Loop
-
-```rust
-use futures::StreamExt;
-
-use ai::{
-    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig, Message, Result,
-};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let model = get_model("openai", "gpt-4o-mini").expect("model");
-    let context = AgentContext {
-        system_prompt: "You are a concise assistant.".to_string(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
-    let config = AgentLoopConfig::new(model);
-    let prompts = vec![Message::user_text("What is the capital of France?")];
-
-    let mut events = agent_loop(prompts, context, config, None, None);
-    while let Some(event) = events.next().await {
-        match event {
-            AgentEvent::MessageEnd { message } => println!("{message:?}"),
-            AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                println!("running tool: {tool_name}");
-            }
-            _ => {}
-        }
-    }
-
-    let _new_messages = events.result().await?;
-    Ok(())
-}
-```
-
-Core loop hooks track upstream `pi` semantics:
-
-- `transform_context` runs before `convert_to_llm`.
-- `before_tool_call` receives already-validated arguments. Its `args` field is
-  shared mutable state so hooks can mutate arguments before execution, matching
-  upstream JavaScript object-reference behavior; the loop does not revalidate
-  after that mutation.
-- `after_tool_call` can replace content/details/error state and can set
-  `terminate`; a tool batch terminates only when every finalized result has
-  `terminate = true`.
-- On `AgentLoopConfig`, `prepare_next_turn` can replace the next context,
-  model, or thinking level before steering/follow-up polling starts another
-  provider request. On `AgentOptions`, `prepare_next_turn` mirrors upstream
-  `Agent.prepareNextTurn`: it receives only the active cancellation token and
-  can return the same turn update.
+- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
+- `tool_execution`: parallel or sequential tool execution.
+- `before_tool_call` and `after_tool_call`: preflight and postprocess hooks.
+- `prepare_next_turn`: updates context, model, or thinking level before another
+  turn starts.
+- `options`: transport, retry, cancellation, payload hooks, provider options,
+  thinking budgets, and API key defaults.
 
 ### Agent State
 
@@ -797,27 +892,65 @@ Core loop hooks track upstream `pi` semantics:
 active model, thinking level, tools, message history, streaming status, pending
 tool call IDs, and the latest error message.
 
-### Agent Methods
+During streaming, `streaming_message` contains the current partial assistant
+message. `is_streaming` remains true until the run fully settles, including
+awaited `agent_end` subscribers.
 
-`Agent` maps the upstream stateful wrapper:
+### Methods
 
-- `prompt_text` and `prompt_messages` start a run with new user or message
-  input.
-- `continue_run` resumes from existing context after a user or tool-result
-  message.
-- State mutation helpers update messages, tools, model, thinking level, session
-  ID, and agent options.
-- Subscription helpers emit the same core event categories as upstream:
-  `agent_start`, `turn_start`, `message_start`, `message_update`,
-  `message_end`, `tool_execution_start`, `tool_execution_update`,
-  `tool_execution_end`, `turn_end`, and `agent_end`.
+#### Prompting
+
+```rust
+agent.prompt_text("Hello", Vec::new()).await?;
+agent.prompt_messages(vec![Message::user_text("Hello")]).await?;
+agent.continue_run().await?;
+```
+
+`continue_run` resumes from current context. The last message must be a user or
+tool-result message.
+
+#### State Management
+
+Use the state and option mutation helpers to update system prompt, model,
+thinking level, tools, messages, session ID, queues, hooks, and tool execution
+mode. `reset` returns the agent to its initial state.
+
+#### Control
+
+```rust
+agent.abort().await;
+agent.wait_for_idle().await;
+```
+
+#### Events
+
+```rust
+use std::sync::Arc;
+
+let listener_id = agent.subscribe(Arc::new(|event, signal| {
+    Box::pin(async move {
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            flush_session_state(signal).await;
+        }
+    })
+})).await;
+
+agent.unsubscribe(listener_id).await;
+```
 
 ### Steering and Follow-up
 
-The loop supports upstream steering and follow-up queue semantics. The default
-mode processes one queued item at a time; `all` modes drain every queued item
-before the next model turn. `prepare_next_turn` can update context, model, and
-thinking level before the next request.
+Steering messages let you interrupt the agent while it is running. Follow-up
+messages let you queue work after the agent would otherwise stop.
+
+When steering messages are detected after a turn completes:
+
+1. All tool calls from the current assistant message have already finished.
+2. Steering messages are injected.
+3. The LLM responds on the next turn.
+
+Follow-up messages are checked only when there are no more tool calls and no
+steering messages.
 
 ### Custom Message Types
 
@@ -836,6 +969,10 @@ Tool failures should return an error from `execute()`. The loop catches that
 error and reports a tool-result message with `is_error = true`, matching
 upstream behavior.
 
+Return `terminate = true` from `execute()` or `after_tool_call` to hint that
+the agent should stop after the current tool batch. This only takes effect when
+every finalized tool result in the batch is terminating.
+
 ### Proxy Usage
 
 For proxy backends, pass a custom `StreamFn` through `AgentOptions::stream_fn`
@@ -849,6 +986,10 @@ Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
 loop directly. These are the Rust equivalents of upstream `agentLoop` and
 `agentLoopContinue`.
 
+Low-level streams are observational. They preserve event order, but they do not
+wait for async event handling to settle before later producer phases continue.
+Use `Agent` when message processing must be a barrier before tool preflight.
+
 ## Development
 
 ```bash
@@ -856,113 +997,64 @@ cargo fmt --all --check
 cargo check -p ai --all-targets
 cargo clippy -p ai --all-targets -- -D warnings
 cargo test -p ai
+cargo test -p ai --lib
+cargo test -p ai --doc
+cargo test -p ai --tests
 cargo test --workspace
 ```
 
-Useful narrower test commands:
-
-```bash
-cargo test -p ai --lib       # unit tests
-cargo test -p ai --doc       # doc tests
-cargo test -p ai --tests     # integration tests, if present
-```
-
-This crate currently keeps its Rust test coverage in module-level unit tests
-under `src`, matching the current scoped port layout.
+This crate currently keeps Rust test coverage in module-level unit tests under
+`src`; there is no `crates/ai/tests` integration-test directory at the moment.
 
 ### Adding a New Provider
 
-Provider additions should generally include:
+Adding a new LLM provider generally requires changes across multiple files:
 
-1. Core type or compatibility metadata updates in `src/types.rs`.
-2. Provider implementation under `src/providers/`.
-3. API registry integration in `src/providers/register_builtins.rs`.
-4. Model metadata updates.
-5. Unit tests for payload conversion, streaming, errors, and provider-specific
-   compatibility.
-6. Documentation updates in this README.
+#### 1. Core Types (`src/types.rs`)
 
-## Upstream Pi Mapping
+- Add the API identifier if the provider needs a new transport shape.
+- Create provider-specific options where direct provider calls need typed
+  options.
+- Add or extend compatibility metadata only when the payload behavior differs.
 
-This crate tracks upstream `pi` behavior for the Rust APIs that correspond to
-the active scope:
+#### 2. Provider Implementation (`src/providers/`)
 
-| Upstream `pi` area | Rust status |
-| --- | --- |
-| `packages/ai/src/types.ts`, `stream.ts`, `models.ts`, `api-registry.ts` | Ported as shared message/context types, stream helpers, generated model metadata, and API registry. |
-| `packages/ai/src/providers/openai-completions.ts` | Ported for Chat Completions-compatible streaming and simple options. |
-| `packages/ai/src/providers/openai-responses.ts` | Ported for OpenAI Responses streaming and simple options. |
-| `packages/ai/src/providers/anthropic.ts` | Ported for Anthropic Messages streaming and simple options. |
-| `packages/ai/src/providers/faux.ts` | Ported for deterministic provider and agent-loop tests. |
-| `packages/agent/src/agent.ts`, `agent-loop.ts`, `types.ts` | Ported into this crate for core agent state, queueing, lifecycle events, tool execution, hooks, and continuation. |
-| `packages/agent/src/harness/**`, coding-agent CLI, and TUI | Not included in this Rust crate. |
-| Image generation, Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex Responses | Not part of the active built-in provider surface. PRs to add support are welcome. |
+Create a provider module that exports:
 
-The goal is behavioral parity before Rust-specific API polish. Where upstream
-uses TypeScript casts for provider-specific escape hatches, this crate exposes
-the equivalent through typed options where possible and
-`StreamOptions::provider_options` where the upstream behavior is intentionally
-loose.
+- `stream_<provider>()`
+- `stream_simple_<provider>()`
+- Provider-specific options
+- Message conversion from `Context` to provider payload
+- Tool conversion if the provider supports tools
+- Response parsing into standardized assistant events
 
-### README Section Mapping
+#### 3. API Registry Integration (`src/providers/register_builtins.rs`)
 
-This README is a Rust adaptation of the upstream `packages/ai/README.md` plus
-the core runtime parts of `packages/agent/README.md`.
+- Register the API with `register_api_provider`.
+- Add root-level exports in `src/lib.rs` when the provider should be public.
+- Add credential detection in `env_api_keys.rs` if the provider uses env keys.
 
-| Upstream README | Rust README mapping |
-| --- | --- |
-| `packages/ai/README.md` Supported Providers | [Supported Providers](#supported-providers), narrowed to OpenAI, Anthropic, and GitHub Copilot-compatible routing. |
-| `packages/ai/README.md` Installation | [Installation](#installation), using Cargo and Tokio instead of npm. |
-| `packages/ai/README.md` Quick Start | [Quick Start](#quick-start), with Rust `Context`, `Message`, `Tool`, `stream_simple`, and `complete_simple`. |
-| `packages/ai/README.md` Tools | [Tools](#tools), using JSON Schema values and Rust validation helpers instead of TypeBox. |
-| `packages/ai/README.md` Image Input | [Image Input](#image-input), retained for chat/text generation. |
-| `packages/ai/README.md` Image Generation | [Image Generation](#image-generation), retained as an explicit not-included section because image generation is outside the active Rust provider surface. |
-| `packages/ai/README.md` Thinking/Reasoning | [Thinking/Reasoning](#thinkingreasoning), using Rust thinking-level types and provider options. |
-| `packages/ai/README.md` Stop Reasons | [Stop Reasons](#stop-reasons). |
-| `packages/ai/README.md` Error Handling | [Error Handling](#error-handling), using `CancellationToken` instead of `AbortController`. |
-| `packages/ai/README.md` APIs, Models, and Providers | [APIs, Models, and Providers](#apis-models-and-providers), narrowed to active stream APIs. |
-| `packages/ai/README.md` Cross-Provider Handoffs | [Cross-Provider Handoffs](#cross-provider-handoffs). |
-| `packages/ai/README.md` Context Serialization | [Context Serialization](#context-serialization), using `serde`. |
-| `packages/ai/README.md` Browser Usage | [Browser Usage](#browser-usage), marked not applicable for this native Rust crate. |
-| `packages/ai/README.md` OAuth Providers | [OAuth Providers](#oauth-providers), narrowed to Anthropic and GitHub Copilot. |
-| `packages/ai/README.md` Development | [Development](#development), using Cargo commands. |
-| `packages/agent/README.md` Quick Start, event flow, options, state, methods, steering/follow-up, tools, low-level API | [Agent Core](#agent-core), because the core agent loop lives in this crate. |
-| `packages/agent/README.md` Proxy usage | Use `AgentOptions::stream_fn`, or pass a custom `StreamFn` to the low-level loop functions. |
-| `packages/agent/src/harness/**`, coding-agent CLI, and TUI docs | Not included in this Rust crate. |
+#### 4. Model Generation
 
-### Upstream File Mapping
+- Update model metadata generation or checked-in generated model metadata.
+- Map provider capability, cost, input, context-window, and reasoning fields to
+  the shared `Model` type.
 
-| Upstream `pi` file | Rust file | Notes |
-| --- | --- | --- |
-| `packages/ai/src/index.ts` | [`src/lib.rs`](src/lib.rs) | Crate root re-exports the scoped Rust API. Image-generation exports and broad provider-specific exports are intentionally omitted. |
-| `packages/ai/src/types.ts` | [`src/types.rs`](src/types.rs) | Message, context, model, tool, usage, event, and compatibility types. Image input/tool-result image content is included; image generation types are out of scope. |
-| `packages/ai/src/stream.ts` | [`src/stream.rs`](src/stream.rs) | `stream`, `complete`, `stream_simple`, and `complete_simple`. |
-| `packages/ai/src/api-registry.ts` | [`src/api_registry.rs`](src/api_registry.rs) | API provider registry and dispatch wrappers. |
-| `packages/ai/src/env-api-keys.ts` | [`src/env_api_keys.rs`](src/env_api_keys.rs) | Environment API key lookup for active providers. |
-| `packages/ai/src/models.ts` | [`src/models.rs`](src/models.rs) | Model lookup, cost calculation, thinking-level helpers, and scoped generated metadata. |
-| `packages/ai/src/session-resources.ts` | [`src/session_resources.rs`](src/session_resources.rs) | Session cleanup registry. |
-| `packages/ai/src/oauth.ts` and `packages/ai/src/utils/oauth/**` | [`src/oauth.rs`](src/oauth.rs) | Anthropic and GitHub Copilot OAuth helpers in scope. OpenAI Codex OAuth is out of scope. |
-| `packages/ai/src/providers/faux.ts` | [`src/providers/faux.rs`](src/providers/faux.rs) | Deterministic faux provider for tests and agent-loop examples. |
-| `packages/ai/src/providers/anthropic.ts` | [`src/providers/anthropic.rs`](src/providers/anthropic.rs) | Anthropic Messages-compatible streaming. |
-| `packages/ai/src/providers/openai-completions.ts` | [`src/providers/openai_completions.rs`](src/providers/openai_completions.rs) | OpenAI Chat Completions-compatible streaming. |
-| `packages/ai/src/providers/openai-responses.ts` and `packages/ai/src/providers/openai-responses-shared.ts` | [`src/providers/openai_responses.rs`](src/providers/openai_responses.rs) | OpenAI Responses-compatible streaming and shared Responses message/tool conversion. |
-| `packages/ai/src/providers/register-builtins.ts` | [`src/providers/register_builtins.rs`](src/providers/register_builtins.rs) | Registers `anthropic-messages`, `openai-completions`, and `openai-responses`. |
-| `packages/ai/src/providers/simple-options.ts` | [`src/providers/simple_options.rs`](src/providers/simple_options.rs) | Common simple-option mapping helpers. |
-| `packages/ai/src/providers/transform-messages.ts` | [`src/providers/transform_messages.rs`](src/providers/transform_messages.rs) | Cross-provider message normalization. |
-| `packages/ai/src/providers/github-copilot-headers.ts` | [`src/providers/github_copilot_headers.rs`](src/providers/github_copilot_headers.rs) | GitHub Copilot dynamic headers. |
-| `packages/ai/src/providers/openai-prompt-cache.ts` | [`src/providers/openai_prompt_cache.rs`](src/providers/openai_prompt_cache.rs) | Prompt cache key helper. |
-| `packages/ai/src/utils/diagnostics.ts` | [`src/utils/diagnostics.rs`](src/utils/diagnostics.rs) | Assistant diagnostics helpers. |
-| `packages/ai/src/utils/event-stream.ts` | [`src/utils/event_stream.rs`](src/utils/event_stream.rs) | Assistant event stream implementation. The root `event_stream` module re-exports this path. |
-| `packages/ai/src/utils/hash.ts` | [`src/utils/hash.rs`](src/utils/hash.rs) | Short hash helper. |
-| `packages/ai/src/utils/headers.ts` | [`src/utils/headers.rs`](src/utils/headers.rs) | Header normalization helper. |
-| `packages/ai/src/utils/json-parse.ts` | [`src/utils/json_parse.rs`](src/utils/json_parse.rs) | Streaming JSON parsing and repair helpers. |
-| `packages/ai/src/utils/overflow.ts` | [`src/utils/overflow.rs`](src/utils/overflow.rs) | Context overflow detection. |
-| `packages/ai/src/utils/sanitize-unicode.ts` | [`src/utils/sanitize_unicode.rs`](src/utils/sanitize_unicode.rs) | Unicode surrogate sanitization. |
-| `packages/ai/src/utils/validation.ts` | [`src/utils/validation.rs`](src/utils/validation.rs) | Tool-call argument validation. |
-| `packages/agent/src/types.ts` | [`src/agent_types.rs`](src/agent_types.rs) | Core agent types, tool traits, loop config, and agent events. |
-| `packages/agent/src/agent-loop.ts` | [`src/agent_loop.rs`](src/agent_loop.rs) | Direct agent loop. |
-| `packages/agent/src/agent.ts` | [`src/agent.rs`](src/agent.rs) | Stateful `Agent` wrapper. |
-| `packages/agent/src/harness/**` | Not included | The full TypeScript harness is outside this port's active scope. |
+#### 5. Tests
+
+Create or update tests for streaming, tool use, token usage, abort behavior,
+context overflow, empty messages, Unicode handling, tool-result edge cases,
+image input/tool-result images if applicable, and cross-provider handoff.
+
+#### 6. Agent Integration
+
+No separate harness integration exists in this Rust port. If the provider needs
+agent-specific behavior, update this crate's agent tests and examples directly.
+
+#### 7. Documentation
+
+Update this README with provider scope, authentication, provider-specific
+options, and environment variables.
 
 ## License
 
