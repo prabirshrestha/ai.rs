@@ -8,9 +8,10 @@ The crate name is `ai`. This crate is the Rust port of the scoped
 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai)
 surface. The core runtime from
 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi/tree/main/packages/agent)
-also lives in this crate. The README follows the upstream Pi README order, with
-Rust examples and explicit notes where the Rust port's active scope is narrower.
-The TypeScript coding-agent harness, CLI, and TUI are not included.
+also lives in this crate. This README follows the upstream Pi README order for
+the Rust surfaces that are in scope, with Rust examples and explicit notes where
+the active provider/API scope is narrower. The TypeScript coding-agent harness,
+CLI, TUI, and session-sharing workflow are not included.
 
 **Note**: Like upstream `pi-ai`, this crate focuses on models that support tool
 calling, because tool calling is essential for agentic workflows.
@@ -27,9 +28,6 @@ calling, because tool calling is essential for agentic workflows.
   - [Validating Tool Arguments](#validating-tool-arguments)
   - [Complete Event Reference](#complete-event-reference)
 - [Image Input](#image-input)
-- [Image Generation](#image-generation)
-  - [Basic Image Generation](#basic-image-generation)
-  - [Notes and Limitations](#notes-and-limitations)
 - [Thinking/Reasoning](#thinkingreasoning)
   - [Unified Interface (streamSimple/completeSimple)](#unified-interface-streamsimplecompletesimple)
   - [Provider-Specific Options (stream/complete)](#provider-specific-options-streamcomplete)
@@ -102,6 +100,11 @@ Cloudflare, Bedrock, Google, Mistral, Azure OpenAI Responses, OpenAI Codex
 Responses, and other broad provider-specific APIs are not part of the active
 built-in provider surface in this port. PRs to add support for additional
 providers are welcome.
+
+Image-generation APIs from upstream Pi (`getImageModel`, `getImageModels`,
+`getImageProviders`, and `generateImages`) are intentionally not included yet.
+Chat/image input and image blocks in tool results are still supported by the
+regular chat APIs.
 
 ## Installation
 
@@ -349,28 +352,6 @@ let context = Context {
     ..Default::default()
 };
 ```
-
-## Image Generation
-
-Image generation uses a separate API surface in upstream Pi. It is intentionally
-not included in this Rust port yet.
-
-Do not use `stream`, `complete`, `stream_simple`, or `complete_simple` for
-image generation. Those APIs are for chat/text generation with optional image
-input.
-
-### Basic Image Generation
-
-No Rust API is currently exported for upstream `getImageModel`,
-`getImageModels`, `getImageProviders`, or `generateImages`.
-
-### Notes and Limitations
-
-- Image input for chat/text generation is retained.
-- Tool results can still contain image blocks.
-- Image-generation models do not participate in the active built-in provider
-  surface.
-- PRs to add a scoped Rust image-generation API are welcome.
 
 ## Thinking/Reasoning
 

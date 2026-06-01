@@ -11,8 +11,8 @@ surfaces.
   core agent state, direct agent loop, queueing, lifecycle events, tool
   execution, and loop hooks.
 
-The goal is 1:1 behavior with upstream `pi` for the Rust APIs in scope, mapped
-to Rust naming, ownership, async, and error-handling conventions.
+The goal is a 1:1 behavior mapping with upstream `pi` for the Rust APIs in
+scope, mapped to Rust naming, ownership, async, and error-handling conventions.
 
 To learn more about `pi`:
 
@@ -34,7 +34,8 @@ and core agent runtime surfaces only.
 | [`ai`](crates/ai) | [`packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) + core [`packages/agent`](https://github.com/earendil-works/pi/tree/main/packages/agent) | Unified LLM API plus the core agent loop runtime for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub Copilot-compatible routing. |
 
 For API usage, model lookup, tool calling, streaming, OAuth, agent loop APIs,
-provider scope, and the detailed upstream file mapping, see
+provider scope, image-input support, out-of-scope Pi surfaces, and the detailed
+upstream file mapping, see
 [`crates/ai/README.md`](crates/ai/README.md).
 
 The TypeScript coding-agent harness, CLI, and TUI from
