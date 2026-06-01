@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_cross_model_thinking_to_text_for_copilot_anthropic_handoff() {
+    fn converts_thinking_blocks_to_plain_text_when_source_model_differs() {
         let model = copilot_claude_model();
         let source = AssistantMessage {
             content: vec![
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_tool_call_thought_signatures_when_migrating_between_models() {
+    fn removes_thought_signature_from_tool_calls_when_migrating_between_models() {
         let model = copilot_claude_model();
         let transformed = transform_messages(
             &[
@@ -500,7 +500,38 @@ mod tests {
     }
 
     #[test]
-    fn adds_synthetic_results_for_trailing_orphaned_tool_calls_after_normalization() {
+    fn adds_synthetic_tool_results_for_trailing_orphaned_tool_calls() {
+        let model = copilot_claude_model();
+        let transformed = transform_messages(
+            &[
+                Message::user_text("read the file"),
+                Message::Assistant(assistant_message(vec![AssistantContent::ToolCall(
+                    ToolCall {
+                        id: "call_123|fc_123".to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({ "path": "README.md" }),
+                        thought_signature: None,
+                    },
+                )])),
+            ],
+            &model,
+            normalize_for_anthropic,
+        );
+
+        let Message::ToolResult(result) = transformed.last().expect("last message") else {
+            panic!("expected trailing synthetic tool result");
+        };
+        assert_eq!(result.tool_call_id, "call_123_fc_123");
+        assert_eq!(result.tool_name, "read");
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            vec![ToolResultContent::text("No result provided")]
+        );
+    }
+
+    #[test]
+    fn adds_synthetic_results_only_for_trailing_tool_calls_that_are_still_missing_results() {
         let model = copilot_claude_model();
         let transformed = transform_messages(
             &[

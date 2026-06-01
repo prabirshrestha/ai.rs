@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn coerces_serialized_plain_json_schemas_with_primitive_rules() {
+    fn coerces_serialized_plain_json_schemas_with_ajv_compatible_primitive_rules() {
         let cases = [
             (json!({ "type": "number" }), json!("42"), json!(42.0)),
             (json!({ "type": "number" }), json!(true), json!(1.0)),
