@@ -648,6 +648,67 @@ pub struct Tool {
     pub parameters: Value,
 }
 
+impl Tool {
+    pub fn builder(name: impl Into<String>) -> ToolBuilder {
+        ToolBuilder {
+            name: name.into(),
+            description: None,
+            parameters: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolBuilder {
+    name: String,
+    description: Option<String>,
+    parameters: Option<Value>,
+}
+
+impl ToolBuilder {
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn parameters(mut self, parameters: Value) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
+    pub fn build(self) -> Result<Tool> {
+        let name = self.name.trim().to_string();
+        if name.is_empty() {
+            return Err(crate::Error::Validation(
+                "tool name must not be empty".to_string(),
+            ));
+        }
+
+        let description = self
+            .description
+            .map(|description| description.trim().to_string())
+            .filter(|description| !description.is_empty())
+            .ok_or_else(|| {
+                crate::Error::Validation("tool description must not be empty".to_string())
+            })?;
+
+        let parameters = self
+            .parameters
+            .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+        if !parameters.is_object() {
+            return Err(crate::Error::Validation(
+                "tool parameters must be a JSON object".to_string(),
+            ));
+        }
+
+        Ok(Tool {
+            name,
+            description,
+            parameters,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Context {
@@ -1080,6 +1141,51 @@ mod tests {
         assert_eq!(context.system_prompt.as_deref(), Some("You are concise."));
         assert_eq!(context.messages, vec![Message::user_text("hi")]);
         assert_eq!(context.tools, vec![tool]);
+    }
+
+    #[test]
+    fn tool_builder_creates_tool_with_parameters() {
+        let tool = Tool::builder("lookup")
+            .description("Lookup a value.")
+            .parameters(json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string" }
+                },
+                "required": ["key"]
+            }))
+            .build()
+            .expect("tool");
+
+        assert_eq!(tool.name, "lookup");
+        assert_eq!(tool.description, "Lookup a value.");
+        assert_eq!(tool.parameters["type"], json!("object"));
+    }
+
+    #[test]
+    fn tool_builder_defaults_to_empty_object_schema() {
+        let tool = Tool::builder("ping")
+            .description("Ping the tool.")
+            .build()
+            .expect("tool");
+
+        assert_eq!(
+            tool.parameters,
+            json!({ "type": "object", "properties": {} })
+        );
+    }
+
+    #[test]
+    fn tool_builder_validates_required_fields() {
+        assert!(Tool::builder("").description("desc").build().is_err());
+        assert!(Tool::builder("lookup").build().is_err());
+        assert!(
+            Tool::builder("lookup")
+                .description("desc")
+                .parameters(json!("not an object"))
+                .build()
+                .is_err()
+        );
     }
 
     #[test]

@@ -127,17 +127,16 @@ async fn main() -> Result<()> {
     let openai = openai::from_env()?;
     let model = openai.model("gpt-5.5").build()?;
 
-    let capital_tool = Tool {
-        name: "lookup_capital".to_string(),
-        description: "Look up the capital city for a country.".to_string(),
-        parameters: json!({
+    let capital_tool = Tool::builder("lookup_capital")
+        .description("Look up the capital city for a country.")
+        .parameters(json!({
             "type": "object",
             "properties": {
                 "country": { "type": "string" }
             },
             "required": ["country"]
-        }),
-    };
+        }))
+        .build()?;
 
     let mut context = Context::builder()
         .system_prompt("You are a helpful assistant.")
@@ -207,10 +206,9 @@ calls.
 use ai::Tool;
 use serde_json::json;
 
-let weather_tool = Tool {
-    name: "get_weather".to_string(),
-    description: "Get current weather for a location.".to_string(),
-    parameters: json!({
+let weather_tool = Tool::builder("get_weather")
+    .description("Get current weather for a location.")
+    .parameters(json!({
         "type": "object",
         "properties": {
             "location": { "type": "string" },
@@ -221,8 +219,8 @@ let weather_tool = Tool {
             }
         },
         "required": ["location"]
-    }),
-};
+    }))
+    .build()?;
 ```
 
 ### Handling Tool Calls
