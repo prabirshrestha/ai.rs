@@ -165,6 +165,9 @@ impl OpenAiLanguageModelApi {
         {
             options.api_key = self.api_key.clone();
         }
+        if options.http_client.is_none() {
+            options.http_client = self.http_client.clone();
+        }
         options
     }
 
@@ -185,7 +188,6 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
         context: Context,
         options: StreamOptions,
     ) -> Result<AssistantMessageEventStream> {
-        let _http_client = &self.http_client;
         let options = self.with_api_key(options);
         match self.api {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_openai_completions(
@@ -207,7 +209,6 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
         context: Context,
         options: SimpleStreamOptions,
     ) -> Result<AssistantMessageEventStream> {
-        let _http_client = &self.http_client;
         let options = self.with_api_key_simple(options);
         match self.api {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_simple_openai_completions(

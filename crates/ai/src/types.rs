@@ -161,6 +161,7 @@ pub struct StreamOptions {
     pub websocket_connect_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
+    pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
     pub provider_options: HashMap<String, Value>,
 }
