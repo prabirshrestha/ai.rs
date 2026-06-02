@@ -99,7 +99,7 @@ fn register_builtins() {
     );
 }
 
-fn openai_completions_options_from_stream_options(
+pub(crate) fn openai_completions_options_from_stream_options(
     options: StreamOptions,
 ) -> openai_completions::OpenAICompletionsOptions {
     let tool_choice = provider_option(&options, &["toolChoice"]).cloned();
@@ -111,7 +111,7 @@ fn openai_completions_options_from_stream_options(
     }
 }
 
-fn openai_responses_options_from_stream_options(
+pub(crate) fn openai_responses_options_from_stream_options(
     options: StreamOptions,
 ) -> openai_responses::OpenAIResponsesOptions {
     let reasoning_effort = openai_reasoning_effort(&options);
