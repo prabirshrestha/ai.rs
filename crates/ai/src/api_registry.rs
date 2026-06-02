@@ -88,15 +88,6 @@ pub fn get_api_provider(api: &str) -> Option<ApiProvider> {
         .map(|entry| entry.provider.clone())
 }
 
-pub fn get_api_providers() -> Vec<ApiProvider> {
-    registry()
-        .read()
-        .expect("api registry poisoned")
-        .iter()
-        .map(|entry| entry.provider.clone())
-        .collect()
-}
-
 pub fn unregister_api_providers(source_id: &str) {
     registry()
         .write()

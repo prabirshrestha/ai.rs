@@ -531,8 +531,8 @@ Notes:
   `registration.get_model_by_id(id)` returns a specific model.
 - Use `faux_assistant_message`, `faux_text`, `faux_thinking`, and
   `faux_tool_call` to build scripted replies.
-- `registration.unregister()` removes the temporary provider from the global
-  API registry.
+- `registration.unregister()` removes the temporary provider from internal
+  test dispatch.
 
 ### Providers and Models
 

@@ -2,7 +2,7 @@ pub mod agent;
 pub mod agent_error;
 pub mod agent_loop;
 pub mod agent_types;
-pub mod api_registry;
+mod api_registry;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
@@ -24,10 +24,6 @@ pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
 };
 pub use agent_types::*;
-pub use api_registry::{
-    ApiProvider, ApiStreamFunction, ApiStreamSimpleFunction, clear_api_providers, get_api_provider,
-    get_api_providers, register_api_provider, unregister_api_providers,
-};
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use event_stream::{
