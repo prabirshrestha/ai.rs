@@ -699,6 +699,14 @@ pub struct Model {
     pub(crate) language_api: Option<Arc<dyn LanguageModelApi>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRef {
+    pub provider_id: ProviderId,
+    pub api_id: Api,
+    pub id: String,
+}
+
 impl std::fmt::Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Model")
@@ -771,8 +779,22 @@ impl Model {
         &self.api
     }
 
+    pub fn model_ref(&self) -> ModelRef {
+        ModelRef::from(self)
+    }
+
     pub fn language_api(&self) -> Option<Arc<dyn LanguageModelApi>> {
         self.language_api.clone()
+    }
+}
+
+impl From<&Model> for ModelRef {
+    fn from(model: &Model) -> Self {
+        Self {
+            provider_id: model.provider.clone(),
+            api_id: model.api.clone(),
+            id: model.id.clone(),
+        }
     }
 }
 
@@ -1045,5 +1067,24 @@ mod tests {
         assert_eq!(value["messages"][1]["role"], json!("assistant"));
         assert_eq!(value["messages"][2]["role"], json!("toolResult"));
         assert_eq!(restored, context);
+    }
+
+    #[test]
+    fn model_ref_serializes_provider_api_and_model_id() {
+        let model = Model {
+            id: "gpt-5.5".to_string(),
+            api: "openai-responses".to_string(),
+            provider: "openai".to_string(),
+            ..Model::default()
+        };
+
+        assert_eq!(
+            serde_json::to_value(model.model_ref()).unwrap(),
+            json!({
+                "providerId": "openai",
+                "apiId": "openai-responses",
+                "id": "gpt-5.5"
+            })
+        );
     }
 }
