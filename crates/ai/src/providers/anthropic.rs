@@ -1728,7 +1728,8 @@ mod tests {
 
     #[test]
     fn sends_thinking_type_disabled_for_claude_opus_4_8_when_thinking_is_off() {
-        let model = crate::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
+        let model =
+            crate::models::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
         let payload = build_anthropic_payload(
             &model,
             &Context {
@@ -2010,7 +2011,8 @@ mod tests {
 
     #[test]
     fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_opus_4_8() {
-        let model = crate::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
+        let model =
+            crate::models::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
         assert_eq!(
             model.compat.anthropic_messages.force_adaptive_thinking,
             Some(true)
@@ -2043,7 +2045,7 @@ mod tests {
     #[test]
     fn marks_built_in_anthropic_messages_models_that_use_adaptive_thinking() {
         for model_id in ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"] {
-            let model = crate::get_model("anthropic", model_id).expect("adaptive model");
+            let model = crate::models::get_model("anthropic", model_id).expect("adaptive model");
             assert_eq!(
                 model.compat.anthropic_messages.force_adaptive_thinking,
                 Some(true)

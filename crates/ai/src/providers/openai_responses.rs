@@ -2060,7 +2060,7 @@ mod tests {
             "gpt-5.4-nano",
             "gpt-5.5",
         ] {
-            let model = crate::get_model("openai", model_id).expect(model_id);
+            let model = crate::models::get_model("openai", model_id).expect(model_id);
             let context = Context {
                 system_prompt: Some("sys".to_string()),
                 messages: vec![Message::user_text("hi")],
@@ -2094,7 +2094,7 @@ mod tests {
             "gpt-5.4-pro",
             "gpt-5.5-pro",
         ] {
-            let model = crate::get_model("openai", model_id).expect(model_id);
+            let model = crate::models::get_model("openai", model_id).expect(model_id);
             let context = Context {
                 system_prompt: Some("sys".to_string()),
                 messages: vec![Message::user_text("hi")],

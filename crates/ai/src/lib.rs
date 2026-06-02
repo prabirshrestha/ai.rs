@@ -6,7 +6,7 @@ pub mod api_registry;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
-pub mod models;
+mod models;
 pub mod oauth;
 pub mod provider;
 pub mod providers;
@@ -35,8 +35,7 @@ pub use event_stream::{
     create_assistant_message_event_stream,
 };
 pub use models::{
-    calculate_cost, clamp_thinking_level, get_model, get_models, get_providers,
-    get_supported_thinking_levels, models_are_equal,
+    calculate_cost, clamp_thinking_level, get_supported_thinking_levels, models_are_equal,
 };
 pub use oauth::{
     AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthApiKey, OAuthAuthCallback,

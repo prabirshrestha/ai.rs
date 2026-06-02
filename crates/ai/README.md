@@ -30,7 +30,6 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - [APIs, Models, and Providers](#apis-models-and-providers)
   - [Faux provider for tests](#faux-provider-for-tests)
   - [Providers and Models](#providers-and-models)
-  - [Querying Providers and Models](#querying-providers-and-models)
   - [Custom Models](#custom-models)
   - [OpenAI Compatibility Settings](#openai-compatibility-settings)
   - [Thread Safety](#thread-safety)
@@ -549,7 +548,8 @@ A provider offers models through a specific API. In this crate:
 
 Built-in provider handles create executable model values. Model IDs are strings,
 so applications can use newly released model names without waiting for a crate
-update.
+update. Applications that need a model catalog should keep it in application
+state and build models through configured provider handles.
 
 ### Providers And Models
 

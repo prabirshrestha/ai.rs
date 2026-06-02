@@ -106,6 +106,7 @@ impl ModelRegistry {
             .cloned()
     }
 
+    #[cfg(test)]
     fn get_providers(&self) -> Vec<String> {
         self.providers
             .iter()
@@ -127,21 +128,22 @@ fn registry() -> &'static RwLock<ModelRegistry> {
     REGISTRY.get_or_init(|| RwLock::new(builtin_models()))
 }
 
-pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
+pub(crate) fn get_model(provider: &str, model_id: &str) -> Option<Model> {
     registry()
         .read()
         .expect("model registry poisoned")
         .get_model(provider, model_id)
 }
 
-pub fn get_providers() -> Vec<String> {
+#[cfg(test)]
+pub(crate) fn get_providers() -> Vec<String> {
     registry()
         .read()
         .expect("model registry poisoned")
         .get_providers()
 }
 
-pub fn get_models(provider: &str) -> Vec<Model> {
+pub(crate) fn get_models(provider: &str) -> Vec<Model> {
     registry()
         .read()
         .expect("model registry poisoned")
