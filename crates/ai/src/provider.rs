@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use reqwest::header::{HeaderName, HeaderValue};
+
 use crate::event_stream::AssistantMessageEventStream;
 use crate::types::{
     Context, Model, ModelCompat, ModelCost, ModelInput, SimpleStreamOptions, StreamOptions,
@@ -107,6 +109,23 @@ impl ModelBuilder {
     pub fn compat(mut self, compat: ModelCompat) -> Self {
         self.model.compat = compat;
         self
+    }
+
+    pub fn headers(mut self, headers: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.model.headers.extend(headers);
+        self
+    }
+
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        let value = value.into();
+        let _parsed_name = name
+            .parse::<HeaderName>()
+            .map_err(|error| crate::Error::Provider(format!("invalid header name: {error}")))?;
+        let _parsed_value = HeaderValue::from_str(&value)
+            .map_err(|error| crate::Error::InvalidHeaderValue(name.clone(), error))?;
+        self.model.headers.insert(name, value);
+        Ok(self)
     }
 
     pub fn build(self) -> Result<Model> {

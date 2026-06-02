@@ -29,11 +29,11 @@ provider-option forwarding.
 ```rust
 use futures::StreamExt;
 
-use ai::{get_model, stream_simple, AssistantMessageEvent, Context, Message, Result};
+use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = get_model("openai", "gpt-4o-mini").expect("model");
+    let model = openai::from_env()?.model("gpt-5.5").build()?;
     let context = Context {
         messages: vec![Message::user_text("Write a haiku about Rust.")],
         ..Default::default()
@@ -60,13 +60,13 @@ async fn main() -> Result<()> {
 use futures::StreamExt;
 
 use ai::{
-    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig,
+    agent_loop, providers::anthropic, AgentContext, AgentEvent, AgentLoopConfig,
     AssistantMessageEvent, Message, Result,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+    let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
     let context = AgentContext {
         system_prompt: "You are a concise coding assistant.".to_string(),
         messages: Vec::new(),

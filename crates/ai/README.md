@@ -78,7 +78,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - **OpenAI** via Chat Completions and Responses
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
-- **Azure Foundry and other compatible endpoints** through custom models with
+- **Azure Foundry and other compatible endpoints** through provider handles with
   explicit `base_url`, headers, and compatibility settings
 
 The active built-in stream APIs are:
@@ -87,11 +87,10 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
-The active built-in model catalog is limited to `openai`, `anthropic`, and
-`github-copilot`. Azure Foundry and other OpenAI-compatible or
-Anthropic-compatible endpoints can be used through custom `Model` definitions
-that select one of the active APIs and set `base_url`, headers, and
-`compat` explicitly.
+The active built-in provider handles are focused on `openai` and `anthropic`.
+Azure Foundry, Ollama, vLLM, and other compatible endpoints can use configured
+provider handles with explicit `base_url`, HTTP headers, and compatibility
+settings.
 
 Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
@@ -120,13 +119,13 @@ use futures::StreamExt;
 use serde_json::json;
 
 use ai::{
-    complete, get_model, stream, AssistantContent, AssistantMessageEvent, Context, Message,
-    Result, Tool, ToolResultContent, ToolResultMessage,
+    complete, providers::openai, stream, AssistantContent, AssistantMessageEvent, Context,
+    Message, Result, Tool, ToolResultContent, ToolResultMessage,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = get_model("openai", "gpt-4o-mini").expect("model");
+    let model = openai::from_env()?.model("gpt-5.5").build()?;
 
     let capital_tool = Tool {
         name: "lookup_capital".to_string(),
@@ -322,11 +321,11 @@ transform layer downgrades unsupported image content to text placeholders.
 
 ```rust
 use ai::{
-    get_model, Context, ImageContent, Message, ModelInput, UserContent,
+    providers::openai, Context, ImageContent, Message, ModelInput, UserContent,
     UserMessage, UserMessageContent,
 };
 
-let model = get_model("openai", "gpt-4o-mini").expect("model");
+let model = openai::from_env()?.model("gpt-5.5").build()?;
 if model.input.contains(&ModelInput::Image) {
     println!("model supports vision");
 }
@@ -372,11 +371,11 @@ Rust exports these as `stream_simple` and `complete_simple`.
 
 ```rust
 use ai::{
-    complete_simple, get_model, Context, Message, ModelThinkingLevel,
+    complete_simple, providers::anthropic, Context, Message, ModelThinkingLevel,
     SimpleStreamOptions,
 };
 
-let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
 let options = SimpleStreamOptions {
     reasoning: Some(ModelThinkingLevel::Medium),
     ..Default::default()
@@ -548,39 +547,37 @@ A provider offers models through a specific API. In this crate:
   models by choosing an active API, setting `base_url`, and filling
   `ModelCompat` where the endpoint differs from the default request shape.
 
-Built-in model metadata is loaded from the generated model catalog and filtered
-to the active provider scope: `openai`, `anthropic`, and `github-copilot`.
+Built-in provider handles create executable model values. Model IDs are strings,
+so applications can use newly released model names without waiting for a crate
+update.
 
-### Querying Providers and Models
+### Providers And Models
 
 ```rust
-use ai::{get_model, get_models, get_providers};
+use ai::{providers::openai, Provider};
 
-let providers = get_providers();
-let anthropic_models = get_models("anthropic");
-let model = get_model("openai", "gpt-4o-mini");
+let provider = openai::from_env()?;
+let capabilities = provider.capabilities();
+let model = provider.model("gpt-5.5").build()?;
 ```
 
-### Custom Models
+### Custom Provider Models
 
-You can create custom models for local inference servers or custom endpoints:
+You can create provider-bound models for local inference servers or custom
+endpoints:
 
 ```rust
 use ai::{
-    stream_simple, Context, Message, Model, ModelCost, ModelInput,
-    SimpleStreamOptions,
+    providers::openai, stream_simple, Context, Message, SimpleStreamOptions,
 };
 
-let model = Model {
-    id: "gpt-4o-mini".to_string(),
-    name: "GPT-4o mini through Azure Foundry".to_string(),
-    api: "openai-completions".to_string(),
-    provider: "azure-foundry".to_string(),
-    base_url: "https://example.services.ai.azure.com/openai/v1".to_string(),
-    input: vec![ModelInput::Text],
-    cost: ModelCost::default(),
-    ..Default::default()
-};
+let provider = openai::builder()
+    .provider_id("azure-foundry")
+    .api_key("...")
+    .base_url("https://example.services.ai.azure.com/openai/v1")
+    .chat_completions()
+    .build()?;
+let model = provider.model("gpt-5.5").build()?;
 
 let stream = stream_simple(
     model,
@@ -596,10 +593,9 @@ The same pattern works for local inference servers such as Ollama, vLLM, and LM
 Studio when they expose an OpenAI-compatible chat endpoint.
 
 Some OpenAI-compatible servers do not understand the `developer` role used for
-reasoning-capable models. For those endpoints, set
-`compat.supports_developer_role` to `false` so the system prompt is sent as a
-`system` message instead. If the server also does not support
-`reasoning_effort`, set `compat.supports_reasoning_effort` to `false`.
+reasoning-capable models. For those endpoints, build the model with compat
+metadata so the system prompt is sent as a `system` message instead. If the
+server also does not support `reasoning_effort`, disable that compat flag too.
 
 ### OpenAI Compatibility Settings
 
@@ -608,20 +604,15 @@ differences. `ModelCompat` stores compatibility metadata for explicit custom
 models, but the active built-in surface does not infer broad provider-specific
 behavior from provider names or base URLs.
 
-Set `model.compat` on custom models when the target OpenAI-compatible endpoint
+Set model-builder compat metadata when the target OpenAI-compatible endpoint
 needs payload differences such as non-standard reasoning, cache-control,
 max-token, or tool-result behavior.
 
 ### Thread Safety
 
-The built-in model catalog is loaded once and exposed through clone-returning
-lookup functions such as `get_model`, `get_models`, and `get_providers`.
-
-The API and OAuth registries are global registries backed by `OnceLock` plus
-`RwLock`. Lookup and registration functions are safe to call from multiple
-threads, but registration is global mutable state. Applications should register
-custom API/OAuth providers during startup rather than concurrently with request
-dispatch.
+Provider handles are regular cloneable values. Build them during application
+startup, pass them where needed, and create executable model values with
+`provider.model(id).build()?`.
 
 ### Type Safety
 
@@ -647,19 +638,19 @@ transforms them for compatibility:
 ### Example: Multi-Provider Conversation
 
 ```rust
-use ai::{complete_simple, get_model, Context, Message, SimpleStreamOptions};
+use ai::{complete_simple, providers::{anthropic, openai}, Context, Message, SimpleStreamOptions};
 
 let mut context = Context {
     messages: vec![Message::user_text("What is 25 * 18?")],
     ..Default::default()
 };
 
-let claude = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+let claude = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
 let claude_response =
     complete_simple(claude, context.clone(), Some(SimpleStreamOptions::default())).await?;
 context.messages.push(Message::Assistant(claude_response));
 
-let gpt = get_model("openai", "gpt-4o-mini").expect("model");
+let gpt = openai::from_env()?.model("gpt-5.5").build()?;
 context.messages.push(Message::user_text("Is that calculation correct?"));
 let gpt_response =
     complete_simple(gpt, context.clone(), Some(SimpleStreamOptions::default())).await?;
@@ -777,13 +768,13 @@ cargo add ai
 use futures::StreamExt;
 
 use ai::{
-    agent_loop, get_model, AgentContext, AgentEvent, AgentLoopConfig,
+    agent_loop, providers::anthropic, AgentContext, AgentEvent, AgentLoopConfig,
     AssistantMessageEvent, Message, Result,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = get_model("anthropic", "claude-sonnet-4-5").expect("model");
+    let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
     let context = AgentContext {
         system_prompt: "You are a helpful assistant.".to_string(),
         messages: Vec::new(),
@@ -1065,17 +1056,18 @@ Create a provider module that exports:
 - Tool conversion if the provider supports tools
 - Response parsing into standardized assistant events
 
-#### 3. API Registry Integration (`src/providers/register_builtins.rs`)
+#### 3. Provider Factory
 
-- Register the API with `register_api_provider`.
+- Implement `Provider` for the configured provider handle.
+- Return model builders from `model(id)` and future capability builders.
 - Add root-level exports in `src/lib.rs` when the provider should be public.
-- Add credential detection in `env_api_keys.rs` if the provider uses env keys.
 
-#### 4. Model Generation
+#### 4. Runtime API
 
-- Update model metadata generation or checked-in generated model metadata.
-- Map provider capability, cost, input, context-window, and reasoning fields to
-  the shared `Model` type.
+- Implement the capability runtime trait carried by the built model, such as
+  `LanguageModelApi`.
+- Map provider capability, cost, input, context-window, and reasoning metadata
+  onto the shared `Model` type.
 
 #### 5. Tests
 
