@@ -9,9 +9,10 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::Result;
+use crate::provider::LanguageModelApi;
 
 pub type Api = String;
-pub type Provider = String;
+pub type ProviderId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -338,7 +339,7 @@ impl UserMessage {
 pub struct AssistantMessage {
     pub content: Vec<AssistantContent>,
     pub api: Api,
-    pub provider: Provider,
+    pub provider: ProviderId,
     pub model: String,
     pub response_model: Option<String>,
     pub response_id: Option<String>,
@@ -475,7 +476,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
             role: Option<String>,
             content: Vec<AssistantContent>,
             api: Api,
-            provider: Provider,
+            provider: ProviderId,
             model: String,
             response_model: Option<String>,
             response_id: Option<String>,
@@ -673,13 +674,13 @@ pub struct ModelCost {
     pub cache_write: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
     pub name: String,
     pub api: Api,
-    pub provider: Provider,
+    pub provider: ProviderId,
     pub base_url: String,
     pub reasoning: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -693,6 +694,73 @@ pub struct Model {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub compat: ModelCompat,
+    #[serde(skip)]
+    pub(crate) language_api: Option<Arc<dyn LanguageModelApi>>,
+}
+
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Model")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("api", &self.api)
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("reasoning", &self.reasoning)
+            .field("thinking_level_map", &self.thinking_level_map)
+            .field("input", &self.input)
+            .field("cost", &self.cost)
+            .field("context_window", &self.context_window)
+            .field("max_tokens", &self.max_tokens)
+            .field("headers", &self.headers)
+            .field("compat", &self.compat)
+            .finish()
+    }
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            api: String::new(),
+            provider: String::new(),
+            base_url: String::new(),
+            reasoning: false,
+            thinking_level_map: HashMap::new(),
+            input: Vec::new(),
+            cost: ModelCost::default(),
+            context_window: 0,
+            max_tokens: 0,
+            headers: HashMap::new(),
+            compat: ModelCompat::default(),
+            language_api: None,
+        }
+    }
+}
+
+impl PartialEq for Model {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.api == other.api
+            && self.provider == other.provider
+            && self.base_url == other.base_url
+            && self.reasoning == other.reasoning
+            && self.thinking_level_map == other.thinking_level_map
+            && self.input == other.input
+            && self.cost == other.cost
+            && self.context_window == other.context_window
+            && self.max_tokens == other.max_tokens
+            && self.headers == other.headers
+            && self.compat == other.compat
+    }
+}
+
+impl Model {
+    pub fn language_api(&self) -> Option<Arc<dyn LanguageModelApi>> {
+        self.language_api.clone()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

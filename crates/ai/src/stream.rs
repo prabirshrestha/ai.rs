@@ -30,6 +30,11 @@ pub fn stream(
     context: Context,
     options: Option<StreamOptions>,
 ) -> Result<AssistantMessageEventStream> {
+    if let Some(api) = model.language_api() {
+        let options = with_env_api_key(&model, options.unwrap_or_default());
+        return api.stream(model, context, options);
+    }
+
     ensure_builtins_registered();
     let provider =
         get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
@@ -52,6 +57,11 @@ pub fn stream_simple(
     context: Context,
     options: Option<SimpleStreamOptions>,
 ) -> Result<AssistantMessageEventStream> {
+    if let Some(api) = model.language_api() {
+        let options = with_env_api_key_simple(&model, options.unwrap_or_default());
+        return api.stream_simple(model, context, options);
+    }
+
     ensure_builtins_registered();
     let provider =
         get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;

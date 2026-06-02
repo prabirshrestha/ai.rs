@@ -8,6 +8,7 @@ pub mod error;
 pub mod event_stream;
 pub mod models;
 pub mod oauth;
+pub mod provider;
 pub mod providers;
 pub mod session_resources;
 pub mod stream;
@@ -49,6 +50,7 @@ pub use oauth::{
     poll_oauth_device_code_flow, refresh_anthropic_token, refresh_github_copilot_token,
     refresh_oauth_token, register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
+pub use provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 pub use providers::anthropic::{AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay};
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,

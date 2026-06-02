@@ -20,6 +20,12 @@ pub enum Error {
     #[error("unsupported api: {0}")]
     UnsupportedApi(String),
 
+    #[error("provider {provider} does not support {capability}")]
+    UnsupportedCapability {
+        provider: String,
+        capability: &'static str,
+    },
+
     #[error("No API provider registered for api: {0}")]
     NoApiProvider(String),
 
@@ -40,3 +46,12 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn unsupported_capability(provider: impl Into<String>, capability: &'static str) -> Self {
+        Self::UnsupportedCapability {
+            provider: provider.into(),
+            capability,
+        }
+    }
+}
