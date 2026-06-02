@@ -659,6 +659,48 @@ pub struct Context {
     pub tools: Vec<Tool>,
 }
 
+impl Context {
+    pub fn builder() -> ContextBuilder {
+        ContextBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContextBuilder {
+    context: Context,
+}
+
+impl ContextBuilder {
+    pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.context.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    pub fn message(mut self, message: Message) -> Self {
+        self.context.messages.push(message);
+        self
+    }
+
+    pub fn messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
+        self.context.messages.extend(messages);
+        self
+    }
+
+    pub fn tool(mut self, tool: Tool) -> Self {
+        self.context.tools.push(tool);
+        self
+    }
+
+    pub fn tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
+        self.context.tools.extend(tools);
+        self
+    }
+
+    pub fn build(self) -> Context {
+        self.context
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelInput {
@@ -1041,6 +1083,24 @@ mod tests {
 
         assert_eq!(value["type"], json!("done"));
         assert_eq!(value["message"]["role"], json!("assistant"));
+    }
+
+    #[test]
+    fn context_builder_collects_system_messages_and_tools() {
+        let tool = Tool {
+            name: "lookup".to_string(),
+            description: "Lookup a value.".to_string(),
+            parameters: json!({ "type": "object" }),
+        };
+        let context = Context::builder()
+            .system_prompt("You are concise.")
+            .message(Message::user_text("hi"))
+            .tool(tool.clone())
+            .build();
+
+        assert_eq!(context.system_prompt.as_deref(), Some("You are concise."));
+        assert_eq!(context.messages, vec![Message::user_text("hi")]);
+        assert_eq!(context.tools, vec![tool]);
     }
 
     #[test]

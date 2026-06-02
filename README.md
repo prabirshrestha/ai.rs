@@ -38,10 +38,9 @@ use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Messa
 #[tokio::main]
 async fn main() -> Result<()> {
     let model = openai::from_env()?.model("gpt-5.5").build()?;
-    let context = Context {
-        messages: vec![Message::user_text("Write a haiku about Rust.")],
-        ..Default::default()
-    };
+    let context = Context::builder()
+        .message(Message::user_text("Write a haiku about Rust."))
+        .build();
 
     let mut events = stream_simple(model, context, None)?;
 

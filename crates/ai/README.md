@@ -138,11 +138,11 @@ async fn main() -> Result<()> {
         }),
     };
 
-    let mut context = Context {
-        system_prompt: Some("You are a helpful assistant.".to_string()),
-        messages: vec![Message::user_text("What is the capital of France?")],
-        tools: vec![capital_tool],
-    };
+    let mut context = Context::builder()
+        .system_prompt("You are a helpful assistant.")
+        .message(Message::user_text("What is the capital of France?"))
+        .tool(capital_tool)
+        .build();
 
     let mut events = stream(model.clone(), context.clone(), None)?;
 
