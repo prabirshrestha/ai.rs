@@ -60,6 +60,7 @@ pub use providers::faux::{
     RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
     register_faux_provider,
 };
+pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
 pub use providers::openai_completions::OpenAICompletionsOptions;
 pub use providers::openai_responses::OpenAIResponsesOptions;

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod faux;
+pub mod github_copilot;
 pub mod github_copilot_headers;
 pub mod openai;
 pub mod openai_completions;
