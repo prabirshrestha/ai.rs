@@ -81,7 +81,7 @@ pub fn clamp_thinking_level(model: &Model, level: ModelThinkingLevel) -> ModelTh
 
 pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => a.id == b.id && a.provider == b.provider,
+        (Some(a), Some(b)) => a.id == b.id && a.provider == b.provider && a.api == b.api,
         _ => false,
     }
 }
@@ -207,6 +207,22 @@ mod tests {
             Some(true)
         );
         assert!(get_providers().contains(&"anthropic".to_string()));
+    }
+
+    #[test]
+    fn model_equality_distinguishes_api_mode() {
+        let responses = Model {
+            id: "gpt-5.5".to_string(),
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            ..Model::default()
+        };
+        let chat = Model {
+            api: "openai-completions".to_string(),
+            ..responses.clone()
+        };
+
+        assert!(!models_are_equal(Some(&responses), Some(&chat)));
     }
 
     #[test]
