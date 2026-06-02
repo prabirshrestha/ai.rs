@@ -142,3 +142,28 @@ impl ModelBuilder {
         Ok(self.model)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::providers::openai;
+
+    use super::*;
+
+    #[test]
+    fn dyn_provider_can_build_and_clone_language_models() {
+        let provider: Box<dyn Provider> = Box::new(
+            openai::builder()
+                .api_key("test-key")
+                .chat_completions()
+                .build()
+                .expect("provider"),
+        );
+        let cloned = dyn_clone::clone_box(&*provider);
+
+        let model = cloned.model("gpt-5.5").build().expect("model");
+
+        assert_eq!(model.id(), "gpt-5.5");
+        assert_eq!(model.provider_id(), "openai");
+        assert_eq!(model.api_id(), "openai-completions");
+    }
+}
