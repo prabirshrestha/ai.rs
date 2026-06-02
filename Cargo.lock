@@ -18,6 +18,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "dyn-clone",
  "futures",
  "regex",
  "reqwest",
@@ -190,6 +191,12 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "find-msvc-tools"

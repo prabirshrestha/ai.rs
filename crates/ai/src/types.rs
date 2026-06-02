@@ -759,6 +759,18 @@ impl PartialEq for Model {
 }
 
 impl Model {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn api_id(&self) -> &str {
+        &self.api
+    }
+
     pub fn language_api(&self) -> Option<Arc<dyn LanguageModelApi>> {
         self.language_api.clone()
     }

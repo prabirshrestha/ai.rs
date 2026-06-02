@@ -14,7 +14,7 @@ pub struct ProviderCapabilities {
     pub image_models: bool,
 }
 
-pub trait Provider: Send + Sync + 'static {
+pub trait Provider: dyn_clone::DynClone + Send + Sync + 'static {
     fn id(&self) -> &str;
 
     fn capabilities(&self) -> ProviderCapabilities;
@@ -24,7 +24,9 @@ pub trait Provider: Send + Sync + 'static {
     }
 }
 
-pub trait LanguageModelApi: Send + Sync + 'static {
+dyn_clone::clone_trait_object!(Provider);
+
+pub trait LanguageModelApi: dyn_clone::DynClone + Send + Sync + 'static {
     fn id(&self) -> &str;
 
     fn stream(
@@ -41,6 +43,8 @@ pub trait LanguageModelApi: Send + Sync + 'static {
         options: SimpleStreamOptions,
     ) -> Result<AssistantMessageEventStream>;
 }
+
+dyn_clone::clone_trait_object!(LanguageModelApi);
 
 #[derive(Clone)]
 pub struct ModelBuilder {
