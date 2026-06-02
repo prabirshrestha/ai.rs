@@ -24,6 +24,10 @@ provider-option forwarding.
 
 ## Examples
 
+Provider handles are available for OpenAI, Anthropic, and GitHub Copilot. Use
+`providers::openai::builder()` for OpenAI-compatible endpoints such as Ollama,
+vLLM, and Azure Foundry.
+
 ### Streaming
 
 ```rust

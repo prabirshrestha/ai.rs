@@ -87,10 +87,10 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
-The active built-in provider handles are focused on `openai` and `anthropic`.
-Azure Foundry, Ollama, vLLM, and other compatible endpoints can use configured
-provider handles with explicit `base_url`, HTTP headers, and compatibility
-settings.
+The active built-in provider handles are focused on `openai`, `anthropic`, and
+`github_copilot`. Azure Foundry, Ollama, vLLM, and other compatible endpoints
+can use configured provider handles with explicit `base_url`, HTTP headers, and
+compatibility settings.
 
 Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
@@ -554,11 +554,14 @@ update.
 ### Providers And Models
 
 ```rust
-use ai::{providers::openai, Provider};
+use ai::{providers::{github_copilot, openai}, Provider};
 
 let provider = openai::from_env()?;
 let capabilities = provider.capabilities();
 let model = provider.model("gpt-5.5").build()?;
+
+let copilot = github_copilot::from_env()?;
+let claude = copilot.model("claude-opus-4.5").build()?;
 ```
 
 ### Custom Provider Models
