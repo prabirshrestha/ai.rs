@@ -794,18 +794,17 @@ mod tests {
                     sender.push(AssistantMessageEvent::Start {
                         partial: assistant_text_message(&model, ""),
                     });
-                    loop {
-                        if token.as_ref().is_some_and(|token| token.is_cancelled()) {
-                            let mut message = assistant_text_message(&model, "Aborted");
-                            message.stop_reason = StopReason::Aborted;
-                            message.error_message = Some("Aborted".to_string());
-                            sender.push(AssistantMessageEvent::Error {
-                                reason: StopReason::Aborted,
-                                error: message,
-                            });
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    if let Some(token) = token {
+                        token.cancelled().await;
+                        let mut message = assistant_text_message(&model, "Aborted");
+                        message.stop_reason = StopReason::Aborted;
+                        message.error_message = Some("Aborted".to_string());
+                        sender.push(AssistantMessageEvent::Error {
+                            reason: StopReason::Aborted,
+                            error: message,
+                        });
+                    } else {
+                        std::future::pending::<()>().await;
                     }
                 });
                 Ok(stream)
