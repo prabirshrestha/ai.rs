@@ -37,7 +37,8 @@ use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Messa
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder()
         .message(Message::user_text("Write a haiku about Rust."))
         .build();
@@ -69,7 +70,8 @@ use ai::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
+    let anthropic = anthropic::from_env()?;
+    let model = anthropic.model("claude-sonnet-4-5").build()?;
     let context = AgentContext {
         system_prompt: "You are a concise coding assistant.".to_string(),
         messages: Vec::new(),

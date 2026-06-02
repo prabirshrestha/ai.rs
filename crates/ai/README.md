@@ -124,7 +124,8 @@ use ai::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
 
     let capital_tool = Tool {
         name: "lookup_capital".to_string(),
@@ -324,7 +325,8 @@ use ai::{
     UserMessage, UserMessageContent,
 };
 
-let model = openai::from_env()?.model("gpt-5.5").build()?;
+let openai = openai::from_env()?;
+let model = openai.model("gpt-5.5").build()?;
 if model.input.contains(&ModelInput::Image) {
     println!("model supports vision");
 }
@@ -374,7 +376,8 @@ use ai::{
     SimpleStreamOptions,
 };
 
-let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
+let anthropic = anthropic::from_env()?;
+let model = anthropic.model("claude-sonnet-4-5").build()?;
 let options = SimpleStreamOptions {
     reasoning: Some(ModelThinkingLevel::Medium),
     ..Default::default()
@@ -648,12 +651,14 @@ let mut context = Context {
     ..Default::default()
 };
 
-let claude = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
+let anthropic = anthropic::from_env()?;
+let claude = anthropic.model("claude-sonnet-4-5").build()?;
 let claude_response =
     complete_simple(claude, context.clone(), Some(SimpleStreamOptions::default())).await?;
 context.messages.push(Message::Assistant(claude_response));
 
-let gpt = openai::from_env()?.model("gpt-5.5").build()?;
+let openai = openai::from_env()?;
+let gpt = openai.model("gpt-5.5").build()?;
 context.messages.push(Message::user_text("Is that calculation correct?"));
 let gpt_response =
     complete_simple(gpt, context.clone(), Some(SimpleStreamOptions::default())).await?;
@@ -777,7 +782,8 @@ use ai::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
+    let anthropic = anthropic::from_env()?;
+    let model = anthropic.model("claude-sonnet-4-5").build()?;
     let context = AgentContext {
         system_prompt: "You are a helpful assistant.".to_string(),
         messages: Vec::new(),
