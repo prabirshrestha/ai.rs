@@ -351,13 +351,6 @@ async fn stream_assistant_response(
 
     let mut options = config.options.clone();
     options.stream.cancellation_token = cancellation_token.clone();
-    if let Some(get_api_key) = &config.get_api_key
-        && let Some(api_key) = get_api_key(config.model.provider.clone())
-            .await
-            .filter(|key| !key.is_empty())
-    {
-        options.stream.api_key = Some(api_key);
-    }
 
     let mut response = if let Some(stream_fn) = stream_fn {
         stream_fn(config.model.clone(), llm_context, options).await?

@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::agent_types::{
     AfterToolCallFn, AgentContext, AgentEvent, AgentEventListener, AgentEventSink, AgentLoopConfig,
-    AgentLoopTurnUpdate, AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool, GetApiKeyFn,
+    AgentLoopTurnUpdate, AgentMessage, BeforeToolCallFn, ConvertToLlmFn, DynAgentTool,
     PrepareNextTurnContext, PrepareNextTurnFn, QueueMode, StreamFn, ToolExecutionMode,
     TransformContextFn, default_convert_to_llm, user_message,
 };
@@ -79,7 +79,6 @@ pub struct AgentOptions {
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub stream_fn: Option<StreamFn>,
-    pub get_api_key: Option<GetApiKeyFn>,
     pub prepare_next_turn: Option<AgentPrepareNextTurnFn>,
     pub before_tool_call: Option<BeforeToolCallFn>,
     pub after_tool_call: Option<AfterToolCallFn>,
@@ -97,7 +96,6 @@ impl AgentOptions {
             convert_to_llm: None,
             transform_context: None,
             stream_fn: None,
-            get_api_key: None,
             prepare_next_turn: None,
             before_tool_call: None,
             after_tool_call: None,
@@ -164,7 +162,6 @@ pub struct Agent {
     convert_to_llm: Option<ConvertToLlmFn>,
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
-    get_api_key: Option<GetApiKeyFn>,
     prepare_next_turn: Option<AgentPrepareNextTurnFn>,
     before_tool_call: Option<BeforeToolCallFn>,
     after_tool_call: Option<AfterToolCallFn>,
@@ -186,7 +183,6 @@ impl Agent {
             convert_to_llm: options.convert_to_llm,
             transform_context: options.transform_context,
             stream_fn: options.stream_fn,
-            get_api_key: options.get_api_key,
             prepare_next_turn: options.prepare_next_turn,
             before_tool_call: options.before_tool_call,
             after_tool_call: options.after_tool_call,
@@ -563,7 +559,6 @@ impl Agent {
                 .clone()
                 .unwrap_or_else(default_convert_to_llm),
             transform_context: self.transform_context.clone(),
-            get_api_key: self.get_api_key.clone(),
             should_stop_after_turn: None,
             prepare_next_turn: self.prepare_next_turn.clone().map(|prepare_next_turn| {
                 Arc::new(

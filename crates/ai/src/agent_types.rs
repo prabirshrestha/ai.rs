@@ -125,8 +125,6 @@ pub type TransformContextFn = Arc<
         + Send
         + Sync,
 >;
-pub type GetApiKeyFn =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
 pub type MessageQueueFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<AgentMessage>> + Send>> + Send + Sync>;
 pub type ShouldStopAfterTurnFn = Arc<
@@ -165,7 +163,6 @@ pub struct AgentLoopConfig {
     pub options: SimpleStreamOptions,
     pub convert_to_llm: ConvertToLlmFn,
     pub transform_context: Option<TransformContextFn>,
-    pub get_api_key: Option<GetApiKeyFn>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnFn>,
     pub prepare_next_turn: Option<PrepareNextTurnFn>,
     pub get_steering_messages: Option<MessageQueueFn>,
@@ -182,7 +179,6 @@ impl AgentLoopConfig {
             options: SimpleStreamOptions::default(),
             convert_to_llm: default_convert_to_llm(),
             transform_context: None,
-            get_api_key: None,
             should_stop_after_turn: None,
             prepare_next_turn: None,
             get_steering_messages: None,
