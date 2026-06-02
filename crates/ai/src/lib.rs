@@ -51,7 +51,9 @@ pub use oauth::{
     refresh_oauth_token, register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
 pub use provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
-pub use providers::anthropic::{AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay};
+pub use providers::anthropic::{
+    Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay,
+};
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
     FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,

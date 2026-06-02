@@ -126,7 +126,9 @@ pub(crate) fn openai_responses_options_from_stream_options(
     }
 }
 
-fn anthropic_options_from_stream_options(options: StreamOptions) -> anthropic::AnthropicOptions {
+pub(crate) fn anthropic_options_from_stream_options(
+    options: StreamOptions,
+) -> anthropic::AnthropicOptions {
     let thinking_enabled = provider_bool(&options, &["thinkingEnabled"]);
     let thinking_budget_tokens = provider_u32(&options, &["thinkingBudgetTokens"]);
     let effort = provider_anthropic_effort(&options, &["effort"]);

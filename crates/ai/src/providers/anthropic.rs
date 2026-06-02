@@ -2,12 +2,15 @@ use futures::{StreamExt, pin_mut};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
+use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
+use crate::providers::register_builtins;
 use crate::providers::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
 };
@@ -25,6 +28,180 @@ use crate::{Error, Result};
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 const CLAUDE_CODE_VERSION: &str = "2.1.75";
+const DEFAULT_PROVIDER_ID: &str = "anthropic";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
+
+#[derive(Clone)]
+pub struct Anthropic {
+    provider_id: String,
+    api_key: Option<String>,
+    base_url: String,
+    http_client: Option<reqwest::Client>,
+}
+
+impl Anthropic {
+    pub fn builder() -> AnthropicBuilder {
+        AnthropicBuilder::default()
+    }
+
+    pub fn from_env() -> Result<Self> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
+        Ok(Self::builder().api_key(api_key).build()?)
+    }
+
+    pub fn model(&self, id: &str) -> ModelBuilder {
+        <Self as Provider>::model(self, id)
+    }
+}
+
+impl Provider for Anthropic {
+    fn id(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            language_models: true,
+            image_models: false,
+        }
+    }
+
+    fn model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(AnthropicLanguageModelApi {
+            api_key: self.api_key.clone(),
+            http_client: self.http_client.clone(),
+        });
+        let mut builder = ModelBuilder::new(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![crate::ModelInput::Text, crate::ModelInput::Image]);
+
+        if let Some(catalog_model) = crate::models::get_model(&self.provider_id, id) {
+            builder = builder
+                .name(catalog_model.name)
+                .reasoning(catalog_model.reasoning)
+                .input(catalog_model.input)
+                .cost(catalog_model.cost)
+                .context_window(catalog_model.context_window)
+                .max_tokens(catalog_model.max_tokens)
+                .compat(catalog_model.compat);
+        }
+
+        builder
+    }
+}
+
+#[derive(Default)]
+pub struct AnthropicBuilder {
+    provider_id: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    http_client: Option<reqwest::Client>,
+}
+
+impl AnthropicBuilder {
+    pub fn provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    pub fn http_client(mut self, http_client: reqwest::Client) -> Self {
+        self.http_client = Some(http_client);
+        self
+    }
+
+    pub fn build(self) -> Result<Anthropic> {
+        Ok(Anthropic {
+            provider_id: self
+                .provider_id
+                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
+            api_key: self.api_key,
+            base_url: self
+                .base_url
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            http_client: self.http_client,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct AnthropicLanguageModelApi {
+    api_key: Option<String>,
+    http_client: Option<reqwest::Client>,
+}
+
+impl AnthropicLanguageModelApi {
+    fn with_api_key(&self, mut options: StreamOptions) -> StreamOptions {
+        if options
+            .api_key
+            .as_deref()
+            .is_none_or(|api_key| api_key.trim().is_empty())
+        {
+            options.api_key = self.api_key.clone();
+        }
+        if options.http_client.is_none() {
+            options.http_client = self.http_client.clone();
+        }
+        options
+    }
+
+    fn with_api_key_simple(&self, mut options: SimpleStreamOptions) -> SimpleStreamOptions {
+        options.stream = self.with_api_key(options.stream);
+        options
+    }
+}
+
+impl LanguageModelApi for AnthropicLanguageModelApi {
+    fn id(&self) -> &str {
+        "anthropic-messages"
+    }
+
+    fn stream(
+        &self,
+        model: Model,
+        context: Context,
+        options: StreamOptions,
+    ) -> Result<crate::AssistantMessageEventStream> {
+        Ok(stream_anthropic(
+            model,
+            context,
+            register_builtins::anthropic_options_from_stream_options(self.with_api_key(options)),
+        ))
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions,
+    ) -> Result<crate::AssistantMessageEventStream> {
+        Ok(stream_simple_anthropic(
+            model,
+            context,
+            self.with_api_key_simple(options),
+        ))
+    }
+}
+
+pub fn builder() -> AnthropicBuilder {
+    Anthropic::builder()
+}
+
+pub fn from_env() -> Result<Anthropic> {
+    Anthropic::from_env()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnthropicEffort {
@@ -263,7 +440,11 @@ async fn run_stream(
         Ok(headers) => headers,
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
-    let client = reqwest::Client::new();
+    let client = options
+        .base
+        .http_client
+        .clone()
+        .unwrap_or_else(reqwest::Client::new);
     let response_result = send_with_retries(&options.base, || {
         client
             .post(request_url.as_str())
@@ -1238,6 +1419,29 @@ mod tests {
             max_tokens: 1024,
             ..Default::default()
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_carries_runtime_dispatch() {
+        let anthropic = builder()
+            .provider_id("test-anthropic-runtime")
+            .build()
+            .expect("provider");
+        let mut model = anthropic.model("claude-test").build().expect("model");
+        model.api = "not-registered".to_string();
+
+        let mut stream =
+            crate::stream_simple(model, Context::default(), None).expect("runtime stream");
+        let event = stream.next().await.expect("error event");
+        let AssistantMessageEvent::Error { reason, error } = event else {
+            panic!("expected error event");
+        };
+
+        assert_eq!(reason, StopReason::Error);
+        assert_eq!(
+            error.error_message.as_deref(),
+            Some("No API key for provider: test-anthropic-runtime")
+        );
     }
 
     #[test]
