@@ -717,7 +717,7 @@ pub struct ModelCost {
     pub cache_write: f64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -766,27 +766,6 @@ impl std::fmt::Debug for Model {
             .field("headers", &self.headers)
             .field("compat", &self.compat)
             .finish()
-    }
-}
-
-impl Default for Model {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            api: String::new(),
-            provider: String::new(),
-            base_url: String::new(),
-            reasoning: false,
-            thinking_level_map: HashMap::new(),
-            input: Vec::new(),
-            cost: ModelCost::default(),
-            context_window: 0,
-            max_tokens: 0,
-            headers: HashMap::new(),
-            compat: ModelCompat::default(),
-            language_api: None,
-        }
     }
 }
 

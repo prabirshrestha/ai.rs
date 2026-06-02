@@ -185,11 +185,7 @@ async fn run_stream(
         Ok(headers) => headers,
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
-    let client = options
-        .base
-        .http_client
-        .clone()
-        .unwrap_or_else(reqwest::Client::new);
+    let client = options.base.http_client.clone().unwrap_or_default();
     let response = match send_with_retries(&options.base, || {
         client
             .post(request_url.as_str())

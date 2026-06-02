@@ -19,17 +19,12 @@ pub struct GitHubCopilot {
     http_client: Option<reqwest::Client>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GitHubCopilotApi {
     AnthropicMessages,
     OpenAiChatCompletions,
+    #[default]
     OpenAiResponses,
-}
-
-impl Default for GitHubCopilotApi {
-    fn default() -> Self {
-        Self::OpenAiResponses
-    }
 }
 
 impl GitHubCopilotApi {
@@ -60,7 +55,7 @@ impl GitHubCopilot {
         let api_key = get_env_api_key(DEFAULT_PROVIDER_ID)
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
-        Ok(Self::builder().api_key(api_key).build()?)
+        Self::builder().api_key(api_key).build()
     }
 
     pub fn model(&self, id: &str) -> ModelBuilder {

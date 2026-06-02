@@ -49,7 +49,7 @@ impl Anthropic {
             .ok()
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
-        Ok(Self::builder().api_key(api_key).build()?)
+        Self::builder().api_key(api_key).build()
     }
 
     pub fn model(&self, id: &str) -> ModelBuilder {
@@ -440,11 +440,7 @@ async fn run_stream(
         Ok(headers) => headers,
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
-    let client = options
-        .base
-        .http_client
-        .clone()
-        .unwrap_or_else(reqwest::Client::new);
+    let client = options.base.http_client.clone().unwrap_or_default();
     let response_result = send_with_retries(&options.base, || {
         client
             .post(request_url.as_str())
