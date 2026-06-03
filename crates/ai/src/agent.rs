@@ -1,11 +1,12 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     AssistantContent, AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions,
     StopReason, TextContent, ThinkingBudgets, Transport, Usage,
 };
+use parking_lot::Mutex as SyncMutex;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +19,6 @@ use crate::agent_types::{
 };
 use crate::{AgentError, AgentResult};
 
-pub type AgentListenerId = u64;
 pub type AgentPrepareNextTurnFn = Arc<
     dyn Fn(
             Option<CancellationToken>,
@@ -27,6 +27,29 @@ pub type AgentPrepareNextTurnFn = Arc<
         > + Send
         + Sync,
 >;
+
+pub struct AgentSubscription {
+    listeners: Arc<SyncMutex<Vec<AgentEventListener>>>,
+    listener: Option<AgentEventListener>,
+}
+
+impl AgentSubscription {
+    pub fn unsubscribe(mut self) -> bool {
+        let Some(listener) = self.listener.take() else {
+            return false;
+        };
+        let mut listeners = self.listeners.lock();
+        if let Some(pos) = listeners
+            .iter()
+            .position(|candidate| Arc::ptr_eq(candidate, &listener))
+        {
+            listeners.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 fn default_agent_model() -> Model {
     Model {
@@ -155,8 +178,7 @@ impl PendingMessageQueue {
 
 pub struct Agent {
     state: Arc<Mutex<AgentState>>,
-    listeners: Arc<Mutex<Vec<(AgentListenerId, AgentEventListener)>>>,
-    next_listener_id: Arc<AtomicU64>,
+    listeners: Arc<SyncMutex<Vec<AgentEventListener>>>,
     steering_queue: Arc<Mutex<PendingMessageQueue>>,
     follow_up_queue: Arc<Mutex<PendingMessageQueue>>,
     convert_to_llm: Option<ConvertToLlmFn>,
@@ -176,8 +198,7 @@ impl Agent {
     pub fn new(options: AgentOptions) -> Self {
         Self {
             state: Arc::new(Mutex::new(options.initial_state)),
-            listeners: Arc::new(Mutex::new(Vec::new())),
-            next_listener_id: Arc::new(AtomicU64::new(1)),
+            listeners: Arc::new(SyncMutex::new(Vec::new())),
             steering_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.steering_mode))),
             follow_up_queue: Arc::new(Mutex::new(PendingMessageQueue::new(options.follow_up_mode))),
             convert_to_llm: options.convert_to_llm,
@@ -266,17 +287,23 @@ impl Agent {
         *self.tool_execution.lock().await
     }
 
-    pub async fn subscribe(&self, listener: AgentEventListener) -> AgentListenerId {
-        let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
-        self.listeners.lock().await.push((id, listener));
-        id
+    pub fn subscribe<F, Fut>(&self, listener: F) -> AgentSubscription
+    where
+        F: Fn(AgentEvent, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = AgentResult<()>> + Send + 'static,
+    {
+        let listener: AgentEventListener =
+            Arc::new(move |event, token| Box::pin(listener(event, token)));
+        self.subscribe_boxed(listener)
     }
 
-    pub async fn unsubscribe(&self, id: AgentListenerId) -> bool {
-        let mut listeners = self.listeners.lock().await;
-        let before = listeners.len();
-        listeners.retain(|(listener_id, _)| *listener_id != id);
-        listeners.len() != before
+    fn subscribe_boxed(&self, listener: AgentEventListener) -> AgentSubscription {
+        let listeners = self.listeners.clone();
+        listeners.lock().push(listener.clone());
+        AgentSubscription {
+            listeners,
+            listener: Some(listener),
+        }
     }
 
     pub async fn steer(&self, message: AgentMessage) {
@@ -630,11 +657,11 @@ impl Agent {
                         _ => {}
                     }
                 }
-                let listeners = listeners.lock().await.clone();
+                let listeners = listeners.lock().clone();
                 let token = active_token.lock().await.clone().ok_or_else(|| {
                     AgentError::Other("agent listener invoked outside active run".to_string())
                 })?;
-                for (_, listener) in listeners {
+                for listener in listeners {
                     listener(event.clone(), token.clone()).await?;
                 }
                 Ok(())
@@ -884,25 +911,22 @@ mod tests {
         let agent = Agent::default();
         let event_count = Arc::new(AtomicUsize::new(0));
 
-        let listener = agent
-            .subscribe(Arc::new({
+        let unsubscribe = agent.subscribe({
+            let event_count = Arc::clone(&event_count);
+            move |_event, _token| {
                 let event_count = Arc::clone(&event_count);
-                move |_event, _token| {
-                    let event_count = Arc::clone(&event_count);
-                    async move {
-                        event_count.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    }
-                    .boxed()
+                async move {
+                    event_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         agent.set_system_prompt("Test prompt").await;
         assert_eq!(event_count.load(Ordering::SeqCst), 0);
         assert_eq!(agent.state().await.system_prompt, "Test prompt");
 
-        assert!(agent.unsubscribe(listener).await);
+        assert!(unsubscribe.unsubscribe());
         agent.set_system_prompt("Another prompt").await;
         assert_eq!(event_count.load(Ordering::SeqCst), 0);
     }
@@ -947,24 +971,21 @@ mod tests {
         let barrier = Arc::new(tokio::sync::Notify::new());
         let listener_finished = Arc::new(StdMutex::new(false));
 
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let barrier = Arc::clone(&barrier);
+            let listener_finished = Arc::clone(&listener_finished);
+            move |event, _token| {
                 let barrier = Arc::clone(&barrier);
                 let listener_finished = Arc::clone(&listener_finished);
-                move |event, _token| {
-                    let barrier = Arc::clone(&barrier);
-                    let listener_finished = Arc::clone(&listener_finished);
-                    async move {
-                        if matches!(event, AgentEvent::AgentEnd { .. }) {
-                            barrier.notified().await;
-                            *listener_finished.lock().unwrap() = true;
-                        }
-                        Ok(())
+                async move {
+                    if matches!(event, AgentEvent::AgentEnd { .. }) {
+                        barrier.notified().await;
+                        *listener_finished.lock().unwrap() = true;
                     }
-                    .boxed()
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         let prompt = tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -990,26 +1011,23 @@ mod tests {
         }));
         let barrier = Arc::new(tokio::sync::Notify::new());
 
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let barrier = Arc::clone(&barrier);
+            move |event, _token| {
                 let barrier = Arc::clone(&barrier);
-                move |event, _token| {
-                    let barrier = Arc::clone(&barrier);
-                    async move {
-                        if matches!(
-                            event,
-                            AgentEvent::MessageEnd {
-                                message: Message::Assistant(_)
-                            }
-                        ) {
-                            barrier.notified().await;
+                async move {
+                    if matches!(
+                        event,
+                        AgentEvent::MessageEnd {
+                            message: Message::Assistant(_)
                         }
-                        Ok(())
+                    ) {
+                        barrier.notified().await;
                     }
-                    .boxed()
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         let prompt = tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -1038,21 +1056,18 @@ mod tests {
         }));
         let received_token = Arc::new(StdMutex::new(None));
 
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let received_token = Arc::clone(&received_token);
+            move |event, token| {
                 let received_token = Arc::clone(&received_token);
-                move |event, token| {
-                    let received_token = Arc::clone(&received_token);
-                    async move {
-                        if matches!(event, AgentEvent::AgentStart) {
-                            *received_token.lock().unwrap() = Some(token);
-                        }
-                        Ok(())
+                async move {
+                    if matches!(event, AgentEvent::AgentStart) {
+                        *received_token.lock().unwrap() = Some(token);
                     }
-                    .boxed()
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         let prompt = tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -1082,30 +1097,27 @@ mod tests {
             ..AgentOptions::default()
         });
         let events = Arc::new(StdMutex::new(Vec::new()));
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let events = Arc::clone(&events);
+            move |event, _token| {
                 let events = Arc::clone(&events);
-                move |event, _token| {
-                    let events = Arc::clone(&events);
-                    async move {
-                        events.lock().unwrap().push(match event {
-                            AgentEvent::AgentStart => "agent_start",
-                            AgentEvent::TurnStart => "turn_start",
-                            AgentEvent::MessageStart { .. } => "message_start",
-                            AgentEvent::MessageEnd { .. } => "message_end",
-                            AgentEvent::TurnEnd { .. } => "turn_end",
-                            AgentEvent::AgentEnd { .. } => "agent_end",
-                            AgentEvent::MessageUpdate { .. } => "message_update",
-                            AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
-                            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
-                            AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
-                        });
-                        Ok(())
-                    }
-                    .boxed()
+                async move {
+                    events.lock().unwrap().push(match event {
+                        AgentEvent::AgentStart => "agent_start",
+                        AgentEvent::TurnStart => "turn_start",
+                        AgentEvent::MessageStart { .. } => "message_start",
+                        AgentEvent::MessageEnd { .. } => "message_end",
+                        AgentEvent::TurnEnd { .. } => "turn_end",
+                        AgentEvent::AgentEnd { .. } => "agent_end",
+                        AgentEvent::MessageUpdate { .. } => "message_update",
+                        AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                        AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+                        AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                    });
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         agent
             .prompt_text("hello", Vec::new())
@@ -1380,35 +1392,31 @@ mod tests {
         }));
 
         let pending_during_events = Arc::new(StdMutex::new(Vec::new()));
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let pending_during_events = Arc::clone(&pending_during_events);
+            let agent = Arc::clone(&agent);
+            move |event, _token| {
                 let pending_during_events = Arc::clone(&pending_during_events);
                 let agent = Arc::clone(&agent);
-                move |event, _token| {
-                    let pending_during_events = Arc::clone(&pending_during_events);
-                    let agent = Arc::clone(&agent);
-                    async move {
-                        if matches!(
-                            event,
-                            AgentEvent::ToolExecutionStart { .. }
-                                | AgentEvent::ToolExecutionEnd { .. }
-                        ) {
-                            let state = agent.state().await;
-                            pending_during_events.lock().unwrap().push((
-                                match event {
-                                    AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
-                                    AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
-                                    _ => unreachable!(),
-                                },
-                                state.pending_tool_calls.iter().cloned().collect::<Vec<_>>(),
-                            ));
-                        }
-                        Ok(())
+                async move {
+                    if matches!(
+                        event,
+                        AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. }
+                    ) {
+                        let state = agent.state().await;
+                        pending_during_events.lock().unwrap().push((
+                            match event {
+                                AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                                AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                                _ => unreachable!(),
+                            },
+                            state.pending_tool_calls.iter().cloned().collect::<Vec<_>>(),
+                        ));
                     }
-                    .boxed()
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         agent
             .prompt_text("Calculate 123 * 456 using the calculator tool.", Vec::new())
@@ -1500,30 +1508,27 @@ mod tests {
             ..AgentOptions::default()
         });
         let events = Arc::new(StdMutex::new(Vec::new()));
-        agent
-            .subscribe(Arc::new({
+        agent.subscribe({
+            let events = Arc::clone(&events);
+            move |event, _token| {
                 let events = Arc::clone(&events);
-                move |event, _token| {
-                    let events = Arc::clone(&events);
-                    async move {
-                        events.lock().unwrap().push(match event {
-                            AgentEvent::AgentStart => "agent_start",
-                            AgentEvent::TurnStart => "turn_start",
-                            AgentEvent::MessageStart { .. } => "message_start",
-                            AgentEvent::MessageUpdate { .. } => "message_update",
-                            AgentEvent::MessageEnd { .. } => "message_end",
-                            AgentEvent::TurnEnd { .. } => "turn_end",
-                            AgentEvent::AgentEnd { .. } => "agent_end",
-                            AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
-                            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
-                            AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
-                        });
-                        Ok(())
-                    }
-                    .boxed()
+                async move {
+                    events.lock().unwrap().push(match event {
+                        AgentEvent::AgentStart => "agent_start",
+                        AgentEvent::TurnStart => "turn_start",
+                        AgentEvent::MessageStart { .. } => "message_start",
+                        AgentEvent::MessageUpdate { .. } => "message_update",
+                        AgentEvent::MessageEnd { .. } => "message_end",
+                        AgentEvent::TurnEnd { .. } => "turn_end",
+                        AgentEvent::AgentEnd { .. } => "agent_end",
+                        AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+                        AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+                        AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+                    });
+                    Ok(())
                 }
-            }))
-            .await;
+            }
+        });
 
         agent
             .prompt_text("Count from 1 to 5.", Vec::new())

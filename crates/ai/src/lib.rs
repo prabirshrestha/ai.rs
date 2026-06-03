@@ -18,7 +18,7 @@ pub mod utils;
 #[cfg(test)]
 pub(crate) mod test_env;
 
-pub use agent::{Agent, AgentListenerId, AgentOptions, AgentPrepareNextTurnFn, AgentState};
+pub use agent::{Agent, AgentOptions, AgentPrepareNextTurnFn, AgentState, AgentSubscription};
 pub use agent_error::{AgentError, AgentResult};
 pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,

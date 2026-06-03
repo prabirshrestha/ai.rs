@@ -962,17 +962,15 @@ agent.wait_for_idle().await;
 #### Events
 
 ```rust
-use std::sync::Arc;
+let subscription = agent.subscribe(|event, cancellation_token| async move {
+    if matches!(event, AgentEvent::AgentEnd { .. }) {
+        flush_session_state(cancellation_token).await?;
+    }
 
-let listener_id = agent.subscribe(Arc::new(|event, signal| {
-    Box::pin(async move {
-        if matches!(event, AgentEvent::AgentEnd { .. }) {
-            flush_session_state(signal).await;
-        }
-    })
-})).await;
+    Ok(())
+});
 
-agent.unsubscribe(listener_id).await;
+subscription.unsubscribe();
 ```
 
 ### Steering and Follow-up
