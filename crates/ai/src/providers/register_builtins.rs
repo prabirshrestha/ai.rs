@@ -41,7 +41,7 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantEventStream> {
-                    Ok(anthropic::stream_simple_anthropic(model, context, options))
+                    anthropic::stream_simple_anthropic(model, context, options)
                 },
             ),
         },
@@ -64,9 +64,7 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantEventStream> {
-                    Ok(openai_completions::stream_simple_openai_completions(
-                        model, context, options,
-                    ))
+                    openai_completions::stream_simple_openai_completions(model, context, options)
                 },
             ),
         },
@@ -89,9 +87,7 @@ fn register_builtins() {
                  context: Context,
                  options: SimpleStreamOptions|
                  -> Result<AssistantEventStream> {
-                    Ok(openai_responses::stream_simple_openai_responses(
-                        model, context, options,
-                    ))
+                    openai_responses::stream_simple_openai_responses(model, context, options)
                 },
             ),
         },

@@ -55,7 +55,7 @@ pub fn stream_simple_openai_completions(
     model: Model,
     context: Context,
     options: SimpleStreamOptions,
-) -> crate::AssistantEventStream {
+) -> crate::Result<crate::AssistantEventStream> {
     let api_key = options
         .stream
         .api_key
@@ -63,8 +63,7 @@ pub fn stream_simple_openai_completions(
         .filter(|key| !key.trim().is_empty());
 
     let Some(api_key) = api_key else {
-        let provider = model.provider.clone();
-        return immediate_error(model, &format!("No API key for provider: {provider}"));
+        return Err(crate::Error::MissingApiKey(model.provider));
     };
 
     let base = build_base_options(&model, &options, api_key);
@@ -73,7 +72,7 @@ pub fn stream_simple_openai_completions(
         (clamped != ModelThinkingLevel::Off).then_some(clamped)
     });
 
-    stream_openai_completions(
+    Ok(stream_openai_completions(
         model,
         context,
         OpenAICompletionsOptions {
@@ -81,7 +80,7 @@ pub fn stream_simple_openai_completions(
             tool_choice: simple_tool_choice(&options),
             reasoning_effort,
         },
-    )
+    ))
 }
 
 fn simple_tool_choice(options: &SimpleStreamOptions) -> Option<Value> {
@@ -1363,18 +1362,6 @@ fn request_base_url(model: &Model) -> Result<String> {
     Ok(model.base_url.clone())
 }
 
-fn immediate_error(model: Model, message: &str) -> crate::AssistantEventStream {
-    let (mut sender, stream) = crate::create_assistant_message_event_stream();
-    let mut output = AssistantMessage::empty_for(&model);
-    output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_string());
-    sender.push(AssistantMessageEvent::Error {
-        reason: StopReason::Error,
-        error: output,
-    });
-    stream
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1507,22 +1494,18 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn stream_simple_missing_api_key_names_provider() {
-        let stream = stream_simple_openai_completions(
+    #[test]
+    fn stream_simple_missing_api_key_names_provider() {
+        let error = match stream_simple_openai_completions(
             model(),
             Context::default(),
             SimpleStreamOptions::default(),
-        );
-        let message = crate::stream::final_message_from_stream(stream)
-            .await
-            .unwrap();
+        ) {
+            Ok(_) => panic!("missing API key should fail before stream creation"),
+            Err(error) => error,
+        };
 
-        assert_eq!(message.stop_reason, StopReason::Error);
-        assert_eq!(
-            message.error_message.as_deref(),
-            Some("No API key for provider: openai")
-        );
+        assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "openai"));
     }
 
     #[test]
@@ -3121,7 +3104,8 @@ mod tests {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .expect("stream");
 
         let message = crate::stream::final_message_from_stream(stream)
             .await

@@ -248,14 +248,14 @@ impl LanguageModelApi for GitHubCopilotLanguageModelApi {
         let options = self.with_api_key_simple(options);
         match self.api {
             GitHubCopilotApi::AnthropicMessages => {
-                Ok(anthropic::stream_simple_anthropic(model, context, options))
+                anthropic::stream_simple_anthropic(model, context, options)
             }
-            GitHubCopilotApi::OpenAiChatCompletions => Ok(
-                openai_completions::stream_simple_openai_completions(model, context, options),
-            ),
-            GitHubCopilotApi::OpenAiResponses => Ok(
-                openai_responses::stream_simple_openai_responses(model, context, options),
-            ),
+            GitHubCopilotApi::OpenAiChatCompletions => {
+                openai_completions::stream_simple_openai_completions(model, context, options)
+            }
+            GitHubCopilotApi::OpenAiResponses => {
+                openai_responses::stream_simple_openai_responses(model, context, options)
+            }
         }
     }
 }

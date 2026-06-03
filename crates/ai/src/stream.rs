@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stream_simple_returns_missing_api_key_error_stream_from_provider() {
+    async fn stream_simple_returns_missing_api_key_error_from_provider() {
         let _guard = ENV_LOCK.lock().await;
         let openai = SavedEnv::capture("OPENAI_API_KEY");
         unsafe {
@@ -300,27 +300,11 @@ mod tests {
         }
         crate::providers::register_builtins::register_builtin_api_providers();
 
-        let mut stream = stream_simple(test_model("openai-responses"), Context::default(), None)
-            .expect("stream_simple should dispatch to provider");
-
-        let event = futures::StreamExt::next(&mut stream)
-            .await
-            .expect("missing API key should be emitted as an error event")
-            .expect("stream event");
-        let AssistantMessageEvent::Error { reason, error } = event else {
-            panic!("expected missing API key error event");
+        let error = match stream_simple(test_model("openai-responses"), Context::default(), None) {
+            Ok(_) => panic!("missing API key should fail before stream creation"),
+            Err(error) => error,
         };
-        assert_eq!(reason, StopReason::Error);
-        assert_eq!(
-            error.error_message.as_deref(),
-            Some("No API key for provider: openai")
-        );
-        let message = error;
-        assert_eq!(message.stop_reason, StopReason::Error);
-        assert_eq!(
-            message.error_message.as_deref(),
-            Some("No API key for provider: openai")
-        );
+        assert!(matches!(error, Error::MissingApiKey(provider) if provider == "openai"));
 
         openai.restore();
     }

@@ -187,11 +187,7 @@ impl LanguageModelApi for AnthropicLanguageModelApi {
         context: Context,
         options: SimpleStreamOptions,
     ) -> Result<crate::AssistantEventStream> {
-        Ok(stream_simple_anthropic(
-            model,
-            context,
-            self.with_api_key_simple(options),
-        ))
+        stream_simple_anthropic(model, context, self.with_api_key_simple(options))
     }
 }
 
@@ -276,20 +272,19 @@ pub fn stream_simple_anthropic(
     model: Model,
     context: Context,
     options: SimpleStreamOptions,
-) -> crate::AssistantEventStream {
+) -> crate::Result<crate::AssistantEventStream> {
     let api_key = options
         .stream
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
     let Some(api_key) = api_key else {
-        let provider = model.provider.clone();
-        return immediate_error(model, &format!("No API key for provider: {provider}"));
+        return Err(crate::Error::MissingApiKey(model.provider));
     };
     let base = build_base_options(&model, &options, api_key);
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
-        return stream_anthropic(
+        return Ok(stream_anthropic(
             model,
             context,
             AnthropicOptions {
@@ -297,11 +292,11 @@ pub fn stream_simple_anthropic(
                 thinking_enabled: Some(false),
                 ..Default::default()
             },
-        );
+        ));
     };
 
     if model.compat.anthropic_messages.force_adaptive_thinking == Some(true) {
-        return stream_anthropic(
+        return Ok(stream_anthropic(
             model.clone(),
             context,
             AnthropicOptions {
@@ -310,7 +305,7 @@ pub fn stream_simple_anthropic(
                 effort: Some(map_thinking_level_to_effort(&model, reasoning)),
                 ..Default::default()
             },
-        );
+        ));
     }
 
     let adjusted = adjust_max_tokens_for_thinking(
@@ -321,7 +316,7 @@ pub fn stream_simple_anthropic(
     );
     let mut adjusted_base = base;
     adjusted_base.max_tokens = adjusted.max_tokens;
-    stream_anthropic(
+    Ok(stream_anthropic(
         model,
         context,
         AnthropicOptions {
@@ -330,7 +325,7 @@ pub fn stream_simple_anthropic(
             thinking_budget_tokens: Some(adjusted.thinking_budget),
             ..Default::default()
         },
-    )
+    ))
 }
 
 pub fn stream_anthropic(
@@ -1374,18 +1369,6 @@ fn from_claude_code_name(name: &str, tools: &[Tool], is_oauth: bool) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-fn immediate_error(model: Model, message: &str) -> crate::AssistantEventStream {
-    let (mut sender, stream) = crate::create_assistant_message_event_stream();
-    let mut output = AssistantMessage::empty_for(&model);
-    output.stop_reason = StopReason::Error;
-    output.error_message = Some(message.to_string());
-    sender.push(AssistantMessageEvent::Error {
-        reason: StopReason::Error,
-        error: output,
-    });
-    stream
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -1428,21 +1411,12 @@ mod tests {
         let mut model = anthropic.model("claude-test").build().expect("model");
         model.api = "not-registered".to_string();
 
-        let mut stream =
-            crate::stream_simple(model, Context::default(), None).expect("runtime stream");
-        let event = stream
-            .next()
-            .await
-            .expect("error event")
-            .expect("stream event");
-        let AssistantMessageEvent::Error { reason, error } = event else {
-            panic!("expected error event");
+        let error = match crate::stream_simple(model, Context::default(), None) {
+            Ok(_) => panic!("missing API key should fail before stream creation"),
+            Err(error) => error,
         };
-
-        assert_eq!(reason, StopReason::Error);
-        assert_eq!(
-            error.error_message.as_deref(),
-            Some("No API key for provider: test-anthropic-runtime")
+        assert!(
+            matches!(error, crate::Error::MissingApiKey(provider) if provider == "test-anthropic-runtime")
         );
     }
 
@@ -1507,22 +1481,18 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn stream_simple_missing_api_key_names_provider() {
-        let stream = stream_simple_anthropic(
+    #[test]
+    fn stream_simple_missing_api_key_names_provider() {
+        let error = match stream_simple_anthropic(
             anthropic_model("claude-sonnet-4-5"),
             Context::default(),
             SimpleStreamOptions::default(),
-        );
-        let message = crate::stream::final_message_from_stream(stream)
-            .await
-            .unwrap();
+        ) {
+            Ok(_) => panic!("missing API key should fail before stream creation"),
+            Err(error) => error,
+        };
 
-        assert_eq!(message.stop_reason, StopReason::Error);
-        assert_eq!(
-            message.error_message.as_deref(),
-            Some("No API key for provider: anthropic")
-        );
+        assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "anthropic"));
     }
 
     fn assistant_with_thinking(signature: &str) -> crate::types::Message {

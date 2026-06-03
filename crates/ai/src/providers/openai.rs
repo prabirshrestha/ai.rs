@@ -211,12 +211,12 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
     ) -> Result<AssistantEventStream> {
         let options = self.with_api_key_simple(options);
         match self.api {
-            OpenAiApi::ChatCompletions => Ok(openai_completions::stream_simple_openai_completions(
-                model, context, options,
-            )),
-            OpenAiApi::Responses => Ok(openai_responses::stream_simple_openai_responses(
-                model, context, options,
-            )),
+            OpenAiApi::ChatCompletions => {
+                openai_completions::stream_simple_openai_completions(model, context, options)
+            }
+            OpenAiApi::Responses => {
+                openai_responses::stream_simple_openai_responses(model, context, options)
+            }
         }
     }
 }
@@ -231,9 +231,7 @@ pub fn from_env() -> Result<OpenAi> {
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
-
-    use crate::types::{AssistantMessageEvent, Context, StopReason};
+    use crate::types::Context;
 
     use super::*;
 
@@ -246,21 +244,12 @@ mod tests {
         let mut model = openai.model("gpt-test").build().expect("model");
         model.api = "not-registered".to_string();
 
-        let mut stream =
-            crate::stream_simple(model, Context::default(), None).expect("runtime stream");
-        let event = stream
-            .next()
-            .await
-            .expect("error event")
-            .expect("stream event");
-        let AssistantMessageEvent::Error { reason, error } = event else {
-            panic!("expected error event");
+        let error = match crate::stream_simple(model, Context::default(), None) {
+            Ok(_) => panic!("missing API key should fail before stream creation"),
+            Err(error) => error,
         };
-
-        assert_eq!(reason, StopReason::Error);
-        assert_eq!(
-            error.error_message.as_deref(),
-            Some("No API key for provider: test-openai-runtime")
+        assert!(
+            matches!(error, crate::Error::MissingApiKey(provider) if provider == "test-openai-runtime")
         );
     }
 }
