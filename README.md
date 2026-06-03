@@ -80,7 +80,12 @@ async fn main() -> Result<()> {
 ```rust
 use ai::providers::openai;
 
-let openai_responses = openai::from_env()?;
+let openai_responses_from_env = openai::from_env()?;
+
+let openai_responses_with_key = openai::builder()
+    .api_key(Some("sk-..."))
+    .responses()
+    .build()?;
 ```
 
 #### OpenAI Chat Completions
@@ -88,7 +93,12 @@ let openai_responses = openai::from_env()?;
 ```rust
 use ai::providers::openai;
 
-let openai_chat = openai::builder()
+let openai_chat_with_key = openai::builder()
+    .api_key(Some("sk-..."))
+    .chat_completions()
+    .build()?;
+
+let ollama_chat = openai::builder()
     .base_url("http://localhost:11434/v1")
     .chat_completions()
     .build()?;
@@ -99,7 +109,11 @@ let openai_chat = openai::builder()
 ```rust
 use ai::providers::anthropic;
 
-let anthropic = anthropic::from_env()?;
+let anthropic_from_env = anthropic::from_env()?;
+
+let anthropic_with_key = anthropic::builder()
+    .api_key("sk-ant-...")
+    .build()?;
 ```
 
 ### Agent Loop
