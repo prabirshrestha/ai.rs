@@ -106,7 +106,10 @@ impl OpenAiBuilder {
     }
 
     pub fn api_key(mut self, api_key: Option<&str>) -> Self {
-        self.api_key = Some(api_key.unwrap_or_default().to_string());
+        self.api_key = api_key
+            .map(str::trim)
+            .filter(|api_key| !api_key.is_empty())
+            .map(str::to_string);
         self
     }
 
@@ -263,6 +266,38 @@ mod tests {
     async fn compatible_base_url_allows_no_auth_by_default() {
         let openai = builder()
             .provider_id("ollama")
+            .base_url("http://127.0.0.1:9/v1")
+            .chat_completions()
+            .build()
+            .expect("provider");
+        let model = openai.model("gemma3").build().expect("model");
+
+        let stream = crate::stream_simple(model, Context::default(), None);
+
+        assert!(stream.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compatible_base_url_allows_explicit_missing_api_key() {
+        let openai = builder()
+            .provider_id("ollama")
+            .api_key(None)
+            .base_url("http://127.0.0.1:9/v1")
+            .chat_completions()
+            .build()
+            .expect("provider");
+        let model = openai.model("gemma3").build().expect("model");
+
+        let stream = crate::stream_simple(model, Context::default(), None);
+
+        assert!(stream.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compatible_base_url_treats_blank_api_key_as_missing() {
+        let openai = builder()
+            .provider_id("ollama")
+            .api_key(Some("  "))
             .base_url("http://127.0.0.1:9/v1")
             .chat_completions()
             .build()

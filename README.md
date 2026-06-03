@@ -159,6 +159,9 @@ async fn main() -> Result<()> {
 }
 ```
 
+Keep the subscription handle alive while the listener should receive events.
+Dropping the handle also unsubscribes.
+
 ### Low-Level Agent Loop
 
 ```rust
