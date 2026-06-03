@@ -102,6 +102,95 @@ pub struct OAuthLoginCallbacks {
     pub cancellation_token: Option<CancellationToken>,
 }
 
+impl OAuthLoginCallbacks {
+    pub fn builder() -> OAuthLoginCallbacksBuilder {
+        OAuthLoginCallbacksBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct OAuthLoginCallbacksBuilder {
+    on_auth: Option<OAuthAuthCallback>,
+    on_device_code: Option<OAuthDeviceCodeCallback>,
+    on_prompt: Option<OAuthPromptCallback>,
+    on_progress: Option<OAuthProgressCallback>,
+    on_manual_code_input: Option<OAuthManualCodeInputCallback>,
+    on_select: Option<OAuthSelectCallback>,
+    cancellation_token: Option<CancellationToken>,
+}
+
+impl OAuthLoginCallbacksBuilder {
+    pub fn on_auth<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(OAuthAuthInfo) + Send + Sync + 'static,
+    {
+        self.on_auth = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn on_device_code<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(OAuthDeviceCodeInfo) + Send + Sync + 'static,
+    {
+        self.on_device_code = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn on_prompt<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(OAuthPrompt) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String>> + Send + 'static,
+    {
+        self.on_prompt = Some(Arc::new(move |prompt| Box::pin(callback(prompt))));
+        self
+    }
+
+    pub fn on_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        self.on_progress = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn on_manual_code_input<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String>> + Send + 'static,
+    {
+        self.on_manual_code_input = Some(Arc::new(move || Box::pin(callback())));
+        self
+    }
+
+    pub fn on_select<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(OAuthSelectPrompt) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<String>>> + Send + 'static,
+    {
+        self.on_select = Some(Arc::new(move |prompt| Box::pin(callback(prompt))));
+        self
+    }
+
+    pub fn cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    pub fn build(self) -> OAuthLoginCallbacks {
+        OAuthLoginCallbacks {
+            on_auth: self.on_auth,
+            on_device_code: self.on_device_code.unwrap_or_else(|| Arc::new(|_| {})),
+            on_prompt: self
+                .on_prompt
+                .unwrap_or_else(|| Arc::new(|_| Box::pin(async { Ok(String::new()) }))),
+            on_progress: self.on_progress,
+            on_manual_code_input: self.on_manual_code_input,
+            on_select: self.on_select,
+            cancellation_token: self.cancellation_token,
+        }
+    }
+}
+
 pub type OAuthProviderId = String;
 pub type OAuthProvider = Arc<dyn OAuthProviderInterface>;
 
@@ -1456,6 +1545,43 @@ mod tests {
         assert!(anthropic.uses_callback_server());
     }
 
+    #[tokio::test]
+    async fn oauth_login_callbacks_builder_accepts_plain_closures() {
+        let callbacks = OAuthLoginCallbacks::builder()
+            .on_device_code(|_| {})
+            .on_prompt(|prompt| async move { Ok(prompt.placeholder.unwrap_or_default()) })
+            .on_manual_code_input(|| async { Ok("manual".to_string()) })
+            .on_select(|prompt| async move {
+                Ok(prompt.options.first().map(|option| option.id.clone()))
+            })
+            .build();
+
+        let prompt = (callbacks.on_prompt)(OAuthPrompt {
+            message: "prompt".to_string(),
+            placeholder: Some("default".to_string()),
+            allow_empty: true,
+        })
+        .await
+        .expect("prompt result");
+        assert_eq!(prompt, "default");
+
+        let manual = callbacks.on_manual_code_input.expect("manual callback")()
+            .await
+            .expect("manual result");
+        assert_eq!(manual, "manual");
+
+        let selected = callbacks.on_select.expect("select callback")(OAuthSelectPrompt {
+            message: "select".to_string(),
+            options: vec![OAuthSelectOption {
+                id: "first".to_string(),
+                label: "First".to_string(),
+            }],
+        })
+        .await
+        .expect("select result");
+        assert_eq!(selected.as_deref(), Some("first"));
+    }
+
     #[test]
     fn parses_anthropic_authorization_inputs() {
         assert_eq!(parse_authorization_input(""), AuthorizationInput::default());
@@ -1539,15 +1665,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_provider_login_requires_auth_callback() {
-        let callbacks = OAuthLoginCallbacks {
-            on_auth: None,
-            on_device_code: Arc::new(|_| {}),
-            on_prompt: Arc::new(|_| Box::pin(async { Ok("unused".to_string()) })),
-            on_progress: None,
-            on_manual_code_input: None,
-            on_select: None,
-            cancellation_token: None,
-        };
+        let callbacks = OAuthLoginCallbacks::builder().build();
 
         let error = anthropic_oauth_provider()
             .login(callbacks)
@@ -1563,24 +1681,20 @@ mod tests {
     async fn anthropic_login_cancellation_does_not_fall_back_to_prompt() {
         let cancellation_token = CancellationToken::new();
         let prompt_calls = Arc::new(Mutex::new(0_usize));
-        let callbacks = OAuthLoginCallbacks {
-            on_auth: Some({
+        let callbacks = OAuthLoginCallbacks::builder()
+            .on_auth({
                 let cancellation_token = cancellation_token.clone();
-                Arc::new(move |_| cancellation_token.cancel())
-            }),
-            on_device_code: Arc::new(|_| {}),
-            on_prompt: {
+                move |_| cancellation_token.cancel()
+            })
+            .on_prompt({
                 let prompt_calls = Arc::clone(&prompt_calls);
-                Arc::new(move |_| {
+                move |_| {
                     *prompt_calls.lock().expect("prompt lock poisoned") += 1;
-                    Box::pin(async { Err(Error::Provider("prompt should not run".to_string())) })
-                })
-            },
-            on_progress: None,
-            on_manual_code_input: None,
-            on_select: None,
-            cancellation_token: Some(cancellation_token),
-        };
+                    async { Err(Error::Provider("prompt should not run".to_string())) }
+                }
+            })
+            .cancellation_token(cancellation_token)
+            .build();
 
         let error = tokio::time::timeout(Duration::from_secs(2), login_anthropic(callbacks))
             .await
@@ -1924,21 +2038,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn login_callback_prompt_can_be_constructed() {
         let seen_prompt = Arc::new(Mutex::new(None));
-        let callbacks = OAuthLoginCallbacks {
-            on_auth: None,
-            on_device_code: Arc::new(|_| {}),
-            on_prompt: {
+        let callbacks = OAuthLoginCallbacks::builder()
+            .on_prompt({
                 let seen_prompt = Arc::clone(&seen_prompt);
-                Arc::new(move |prompt| {
+                move |prompt| {
                     *seen_prompt.lock().expect("prompt lock poisoned") = Some(prompt);
-                    Box::pin(async { Err(Error::Provider("stop before network".to_string())) })
-                })
-            },
-            on_progress: None,
-            on_manual_code_input: None,
-            on_select: None,
-            cancellation_token: None,
-        };
+                    async { Err(Error::Provider("stop before network".to_string())) }
+                }
+            })
+            .build();
 
         let error = login_github_copilot(callbacks).await.unwrap_err();
 

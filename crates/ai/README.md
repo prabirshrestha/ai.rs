@@ -752,6 +752,24 @@ let provider = get_oauth_provider("github-copilot").expect("provider");
 Use `login_anthropic` or `login_github_copilot` with `OAuthLoginCallbacks` to
 drive the login UI from your application.
 
+```rust
+use ai::{providers::github_copilot, OAuthLoginCallbacks, Result};
+
+async fn login() -> Result<()> {
+    let callbacks = OAuthLoginCallbacks::builder()
+        .on_device_code(|info| {
+            eprintln!("Open {} and enter {}", info.verification_uri, info.user_code);
+        })
+        .on_prompt(|_| async { Ok(String::new()) })
+        .build();
+
+    let credentials = github_copilot::oauth().login(callbacks).await?;
+    // Persist credentials here.
+
+    Ok(())
+}
+```
+
 ### Using OAuth Tokens
 
 Use provider-specific helpers to turn stored credentials into the API key used
