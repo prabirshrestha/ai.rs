@@ -75,15 +75,29 @@ async fn main() -> Result<()> {
 
 ### Provider Handles
 
+#### OpenAI Responses
+
 ```rust
-use ai::providers::{anthropic, openai};
+use ai::providers::openai;
 
 let openai_responses = openai::from_env()?;
+```
+
+#### OpenAI Chat Completions
+
+```rust
+use ai::providers::openai;
 
 let openai_chat = openai::builder()
     .base_url("http://localhost:11434/v1")
     .chat_completions()
     .build()?;
+```
+
+#### Anthropic
+
+```rust
+use ai::providers::anthropic;
 
 let anthropic = anthropic::from_env()?;
 ```
