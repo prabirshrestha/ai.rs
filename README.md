@@ -116,7 +116,50 @@ let anthropic_with_key = anthropic::builder()
     .build()?;
 ```
 
-### Agent Loop
+### Agent
+
+Use `Agent` when you want conversation state, awaited event subscribers,
+abort, and steering/follow-up queues.
+
+```rust
+use ai::{providers::anthropic, Agent, AgentEvent, AgentOptions, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let anthropic = anthropic::from_env()?;
+    let model = anthropic.model("claude-sonnet-4-5").build()?;
+    let agent = Agent::new(AgentOptions::new(model));
+
+    agent
+        .set_system_prompt("You are a concise coding assistant.")
+        .await;
+
+    let subscription = agent.subscribe(async |event, cancellation_token| {
+        if cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
+        if let AgentEvent::MessageUpdate {
+            assistant_message_event: ai::AssistantMessageEvent::TextDelta { delta, .. },
+            ..
+        } = event
+        {
+            print!("{delta}");
+        }
+
+        Ok(())
+    });
+
+    agent
+        .prompt_text("Explain ownership in one paragraph.", Vec::new())
+        .await?;
+
+    subscription.unsubscribe();
+    Ok(())
+}
+```
+
+### Low-Level Agent Loop
 
 ```rust
 use futures::StreamExt;
