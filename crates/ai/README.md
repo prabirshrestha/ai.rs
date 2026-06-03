@@ -30,6 +30,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - [APIs, Models, and Providers](#apis-models-and-providers)
   - [Faux provider for tests](#faux-provider-for-tests)
   - [Providers and Models](#providers-and-models)
+  - [Querying Providers and Models](#querying-providers-and-models)
   - [Custom Models](#custom-models)
   - [OpenAI Compatibility Settings](#openai-compatibility-settings)
   - [Thread Safety](#thread-safety)
@@ -41,7 +42,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - [Context Serialization](#context-serialization)
 - [Browser Usage](#browser-usage)
   - [Browser Compatibility Notes](#browser-compatibility-notes)
-- [Environment Variables](#environment-variables)
+  - [Environment Variables](#environment-variables)
   - [Checking Environment Variables](#checking-environment-variables)
 - [OAuth Providers](#oauth-providers)
   - [CLI Login](#cli-login)
@@ -539,6 +540,11 @@ Provider handles build executable models. Built-in language model APIs include:
 New application code should prefer provider handles and custom provider
 implementations instead of registering global providers.
 
+### Faux provider for tests
+
+`register_faux_provider()` registers a temporary in-memory provider for tests.
+It is opt-in and not part of the built-in provider set.
+
 ### Providers and Models
 
 A provider offers models through a specific API. In this crate:
@@ -556,7 +562,7 @@ so applications can use newly released model names without waiting for a crate
 update. Applications that need a model catalog should keep it in application
 state and build models through configured provider handles.
 
-### Providers And Models
+### Querying Providers and Models
 
 ```rust
 use ai::{providers::{github_copilot, openai}, Provider};
@@ -569,7 +575,7 @@ let copilot = github_copilot::from_env()?;
 let claude = copilot.model("claude-opus-4.5").build()?;
 ```
 
-### Custom Provider Models
+### Custom Models
 
 You can create provider-bound models for local inference servers or custom
 endpoints:
