@@ -173,14 +173,14 @@ use ai::{
 };
 
 fn providers() -> Result<()> {
-    let _openai_responses = openai::from_env()?;
+    let openai_responses = openai::from_env()?;
 
-    let _openai_chat = openai::builder()
+    let openai_chat = openai::builder()
         .base_url("http://localhost:11434/v1")
         .chat_completions()
         .build()?;
 
-    let _anthropic = anthropic::from_env()?;
+    let anthropic = anthropic::from_env()?;
 
     Ok(())
 }
