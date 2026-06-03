@@ -35,15 +35,6 @@ impl GitHubCopilotApi {
             Self::OpenAiResponses => "openai-responses",
         }
     }
-
-    fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "anthropic-messages" => Some(Self::AnthropicMessages),
-            "openai-completions" => Some(Self::OpenAiChatCompletions),
-            "openai-responses" => Some(Self::OpenAiResponses),
-            _ => None,
-        }
-    }
 }
 
 impl GitHubCopilot {
@@ -76,15 +67,7 @@ impl Provider for GitHubCopilot {
     }
 
     fn model(&self, id: &str) -> ModelBuilder {
-        let catalog_model = crate::models::get_model(&self.provider_id, id);
-        let api = self
-            .api
-            .or_else(|| {
-                catalog_model
-                    .as_ref()
-                    .and_then(|model| GitHubCopilotApi::from_id(&model.api))
-            })
-            .unwrap_or_default();
+        let api = self.api.unwrap_or_default();
         let runtime = Arc::new(GitHubCopilotLanguageModelApi {
             api,
             api_key: self.api_key.clone(),
@@ -93,25 +76,12 @@ impl Provider for GitHubCopilot {
         let base_url = self
             .base_url
             .clone()
-            .or_else(|| catalog_model.as_ref().map(|model| model.base_url.clone()))
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let mut builder = ModelBuilder::new(&self.provider_id, id, runtime)
+        ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(base_url)
-            .input(vec![ModelInput::Text, ModelInput::Image]);
-
-        if let Some(catalog_model) = catalog_model {
-            builder = builder
-                .name(catalog_model.name)
-                .reasoning(catalog_model.reasoning)
-                .input(catalog_model.input)
-                .cost(catalog_model.cost)
-                .context_window(catalog_model.context_window)
-                .max_tokens(catalog_model.max_tokens)
-                .headers(catalog_model.headers)
-                .compat(catalog_model.compat);
-        }
-
-        builder
+            .input(vec![ModelInput::Text, ModelInput::Image])
+            .context_window(1_000_000)
+            .max_tokens(16_384)
     }
 }
 
@@ -273,20 +243,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_model_uses_catalog_api_and_metadata() {
+    fn default_model_uses_responses_api_without_catalog_metadata() {
         let provider = builder().api_key("test-token").build().expect("provider");
         let model = provider.model("claude-opus-4.5").build().expect("model");
 
         assert_eq!(model.provider_id(), "github-copilot");
-        assert_eq!(model.api_id(), "anthropic-messages");
+        assert_eq!(model.api_id(), "openai-responses");
         assert_eq!(model.base_url, DEFAULT_BASE_URL);
-        assert_eq!(
-            model
-                .headers
-                .get("Copilot-Integration-Id")
-                .map(String::as_str),
-            Some("vscode-chat")
-        );
+        assert!(model.headers.is_empty());
     }
 
     #[test]

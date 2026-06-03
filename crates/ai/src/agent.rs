@@ -1083,10 +1083,11 @@ mod tests {
             provider: "openai".to_string(),
             ..Default::default()
         };
+        let message = Message::user_text("Hello");
         let options = AgentOptions::builder(model.clone())
             .system_prompt("You are precise.")
             .thinking_level(ModelThinkingLevel::High)
-            .message(Message::user_text("Hello"))
+            .message(message.clone())
             .session_id("session-123")
             .tool_execution(ToolExecutionMode::Sequential)
             .build();
@@ -1097,10 +1098,7 @@ mod tests {
             options.initial_state.thinking_level,
             ModelThinkingLevel::High
         );
-        assert_eq!(
-            options.initial_state.messages,
-            vec![Message::user_text("Hello")]
-        );
+        assert_eq!(options.initial_state.messages, vec![message]);
         assert_eq!(options.session_id.as_deref(), Some("session-123"));
         assert_eq!(options.tool_execution, ToolExecutionMode::Sequential);
     }

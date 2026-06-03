@@ -557,10 +557,9 @@ A provider offers models through a specific API. In this crate:
   models by choosing an active API, setting `base_url`, and filling
   `ModelCompat` where the endpoint differs from the default request shape.
 
-Built-in provider handles create executable model values. Model IDs are strings,
-so applications can use newly released model names without waiting for a crate
-update. Applications that need a model catalog should keep it in application
-state and build models through configured provider handles.
+Built-in provider handles create executable model values directly from string
+IDs. There is no built-in model catalog; applications that need one should keep
+it in application state and build models through configured provider handles.
 
 ### Querying Providers and Models
 
@@ -571,7 +570,10 @@ let provider = openai::from_env()?;
 let capabilities = provider.capabilities();
 let model = provider.model("gpt-5.5").build()?;
 
-let copilot = github_copilot::from_env()?;
+let copilot = github_copilot::builder()
+    .api_key("...")
+    .anthropic_messages()
+    .build()?;
 let claude = copilot.model("claude-opus-4.5").build()?;
 ```
 

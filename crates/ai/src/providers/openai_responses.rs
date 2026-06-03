@@ -1287,6 +1287,22 @@ mod tests {
         }
     }
 
+    fn reasoning_model_with_off_support(id: &str) -> Model {
+        let mut model = model();
+        model.id = id.to_string();
+        model
+            .thinking_level_map
+            .insert("off".to_string(), Some("none".to_string()));
+        model
+    }
+
+    fn reasoning_model_without_off_support(id: &str) -> Model {
+        let mut model = model();
+        model.id = id.to_string();
+        model.thinking_level_map.insert("off".to_string(), None);
+        model
+    }
+
     #[test]
     fn should_handle_empty_content_array() {
         let model = model();
@@ -2034,7 +2050,7 @@ mod tests {
             "gpt-5.4-nano",
             "gpt-5.5",
         ] {
-            let model = crate::models::get_model("openai", model_id).expect(model_id);
+            let model = reasoning_model_with_off_support(model_id);
             let context = Context {
                 system_prompt: Some("sys".to_string()),
                 messages: vec![Message::user_text("hi")],
@@ -2068,7 +2084,7 @@ mod tests {
             "gpt-5.4-pro",
             "gpt-5.5-pro",
         ] {
-            let model = crate::models::get_model("openai", model_id).expect(model_id);
+            let model = reasoning_model_without_off_support(model_id);
             let context = Context {
                 system_prompt: Some("sys".to_string()),
                 messages: vec![Message::user_text("hi")],

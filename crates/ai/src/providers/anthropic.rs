@@ -74,22 +74,11 @@ impl Provider for Anthropic {
             api_key: self.api_key.clone(),
             http_client: self.http_client.clone(),
         });
-        let mut builder = ModelBuilder::new(&self.provider_id, id, runtime)
+        ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(self.base_url.clone())
-            .input(vec![crate::ModelInput::Text, crate::ModelInput::Image]);
-
-        if let Some(catalog_model) = crate::models::get_model(&self.provider_id, id) {
-            builder = builder
-                .name(catalog_model.name)
-                .reasoning(catalog_model.reasoning)
-                .input(catalog_model.input)
-                .cost(catalog_model.cost)
-                .context_window(catalog_model.context_window)
-                .max_tokens(catalog_model.max_tokens)
-                .compat(catalog_model.compat);
-        }
-
-        builder
+            .input(vec![crate::ModelInput::Text, crate::ModelInput::Image])
+            .context_window(1_000_000)
+            .max_tokens(16_384)
     }
 }
 
@@ -1701,8 +1690,8 @@ mod tests {
 
     #[test]
     fn sends_thinking_type_disabled_for_claude_opus_4_8_when_thinking_is_off() {
-        let model =
-            crate::models::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
         let payload = build_anthropic_payload(
             &model,
             &Context {
@@ -1984,8 +1973,11 @@ mod tests {
 
     #[test]
     fn maps_xhigh_reasoning_to_effort_xhigh_for_claude_opus_4_8() {
-        let model =
-            crate::models::get_model("anthropic", "claude-opus-4-8").expect("claude-opus-4-8");
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        model
+            .thinking_level_map
+            .insert("xhigh".to_string(), Some("xhigh".to_string()));
         assert_eq!(
             model.compat.anthropic_messages.force_adaptive_thinking,
             Some(true)
@@ -2013,17 +2005,6 @@ mod tests {
             json!({ "type": "adaptive", "display": "summarized" })
         );
         assert_eq!(payload["output_config"], json!({ "effort": "xhigh" }));
-    }
-
-    #[test]
-    fn marks_built_in_anthropic_messages_models_that_use_adaptive_thinking() {
-        for model_id in ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6"] {
-            let model = crate::models::get_model("anthropic", model_id).expect("adaptive model");
-            assert_eq!(
-                model.compat.anthropic_messages.force_adaptive_thinking,
-                Some(true)
-            );
-        }
     }
 
     #[test]

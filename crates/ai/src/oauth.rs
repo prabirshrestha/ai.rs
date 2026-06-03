@@ -15,7 +15,6 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::get_models;
 use crate::types::Model;
 use crate::{Error, Result};
 
@@ -530,10 +529,6 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     let credentials =
         refresh_github_copilot_token(&refresh_token, enterprise_domain.as_deref()).await?;
 
-    if let Some(on_progress) = &callbacks.on_progress {
-        on_progress("Enabling models...".to_string());
-    }
-    enable_all_github_copilot_models(&credentials.access, enterprise_domain.as_deref()).await;
     Ok(credentials)
 }
 
@@ -1068,38 +1063,6 @@ async fn poll_for_github_access_token(
         },
     )
     .await
-}
-
-async fn enable_all_github_copilot_models(token: &str, enterprise_domain: Option<&str>) {
-    let models = get_models("github-copilot");
-    let futures = models.into_iter().map(|model| {
-        let model_id = model.id;
-        async move { enable_github_copilot_model(token, &model_id, enterprise_domain).await }
-    });
-    futures::future::join_all(futures).await;
-}
-
-async fn enable_github_copilot_model(
-    token: &str,
-    model_id: &str,
-    enterprise_domain: Option<&str>,
-) -> bool {
-    let base_url = get_github_copilot_base_url(Some(token), enterprise_domain);
-    let url = format!("{base_url}/models/{model_id}/policy");
-    let client = reqwest::Client::new();
-    client
-        .post(url)
-        .headers(match copilot_headers(Some(token)) {
-            Ok(headers) => headers,
-            Err(_) => return false,
-        })
-        .header("Content-Type", "application/json")
-        .header("openai-intent", "chat-policy")
-        .header("x-interaction-type", "chat-policy")
-        .json(&serde_json::json!({ "state": "enabled" }))
-        .send()
-        .await
-        .is_ok_and(|response| response.status().is_success())
 }
 
 fn get_base_url_from_token(token: &str) -> Option<String> {

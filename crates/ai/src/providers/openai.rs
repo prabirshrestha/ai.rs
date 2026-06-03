@@ -71,22 +71,11 @@ impl Provider for OpenAi {
             allow_missing_api_key: self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL,
             http_client: self.http_client.clone(),
         });
-        let mut builder = ModelBuilder::new(&self.provider_id, id, runtime)
+        ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(self.base_url.clone())
-            .input(vec![ModelInput::Text, ModelInput::Image]);
-
-        if let Some(catalog_model) = crate::models::get_model(&self.provider_id, id) {
-            builder = builder
-                .name(catalog_model.name)
-                .reasoning(catalog_model.reasoning)
-                .input(catalog_model.input)
-                .cost(catalog_model.cost)
-                .context_window(catalog_model.context_window)
-                .max_tokens(catalog_model.max_tokens)
-                .compat(catalog_model.compat);
-        }
-
-        builder
+            .input(vec![ModelInput::Text, ModelInput::Image])
+            .context_window(1_000_000)
+            .max_tokens(16_384)
     }
 }
 
