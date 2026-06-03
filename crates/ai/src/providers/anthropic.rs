@@ -173,7 +173,7 @@ impl LanguageModelApi for AnthropicLanguageModelApi {
         model: Model,
         context: Context,
         options: StreamOptions,
-    ) -> Result<crate::AssistantMessageEventStream> {
+    ) -> Result<crate::AssistantEventStream> {
         Ok(stream_anthropic(
             model,
             context,
@@ -186,7 +186,7 @@ impl LanguageModelApi for AnthropicLanguageModelApi {
         model: Model,
         context: Context,
         options: SimpleStreamOptions,
-    ) -> Result<crate::AssistantMessageEventStream> {
+    ) -> Result<crate::AssistantEventStream> {
         Ok(stream_simple_anthropic(
             model,
             context,
@@ -276,7 +276,7 @@ pub fn stream_simple_anthropic(
     model: Model,
     context: Context,
     options: SimpleStreamOptions,
-) -> crate::AssistantMessageEventStream {
+) -> crate::AssistantEventStream {
     let api_key = options
         .stream
         .api_key
@@ -337,11 +337,14 @@ pub fn stream_anthropic(
     model: Model,
     context: Context,
     options: AnthropicOptions,
-) -> crate::AssistantMessageEventStream {
-    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
-    tokio::spawn(async move {
-        let output = AssistantMessage::empty_for(&model);
-        if let Err(error) = run_stream(model, context, options, output, &mut sender).await {
+) -> crate::AssistantEventStream {
+    crate::event_stream::stream_from_producer(
+        move |mut sender| async move {
+            let output = AssistantMessage::empty_for(&model);
+            run_stream(model, context, options, output, &mut sender).await?;
+            Ok(())
+        },
+        |error: StreamFailure| {
             let mut message = error.output;
             message.stop_reason = if error.cancelled {
                 StopReason::Aborted
@@ -349,13 +352,12 @@ pub fn stream_anthropic(
                 StopReason::Error
             };
             message.error_message = Some(error.message);
-            sender.push(AssistantMessageEvent::Error {
+            AssistantMessageEvent::Error {
                 reason: message.stop_reason,
                 error: message,
-            });
-        }
-    });
-    stream
+            }
+        },
+    )
 }
 
 struct StreamFailure {
@@ -1372,8 +1374,8 @@ fn from_claude_code_name(name: &str, tools: &[Tool], is_oauth: bool) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
-    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
+fn immediate_error(model: Model, message: &str) -> crate::AssistantEventStream {
+    let (mut sender, stream) = crate::create_assistant_message_event_stream();
     let mut output = AssistantMessage::empty_for(&model);
     output.stop_reason = StopReason::Error;
     output.error_message = Some(message.to_string());
@@ -1428,7 +1430,11 @@ mod tests {
 
         let mut stream =
             crate::stream_simple(model, Context::default(), None).expect("runtime stream");
-        let event = stream.next().await.expect("error event");
+        let event = stream
+            .next()
+            .await
+            .expect("error event")
+            .expect("stream event");
         let AssistantMessageEvent::Error { reason, error } = event else {
             panic!("expected error event");
         };
@@ -1503,13 +1509,14 @@ mod tests {
 
     #[tokio::test]
     async fn stream_simple_missing_api_key_names_provider() {
-        let mut stream = stream_simple_anthropic(
+        let stream = stream_simple_anthropic(
             anthropic_model("claude-sonnet-4-5"),
             Context::default(),
             SimpleStreamOptions::default(),
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -2823,7 +2830,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("Use edit")],
@@ -2850,8 +2857,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(result.stop_reason, StopReason::ToolUse, "{result:#?}");
 
         let tool_call = result
@@ -2933,7 +2941,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("Say hello.")],
@@ -2948,8 +2956,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Stop);
         assert_eq!(result.response_id.as_deref(), Some("msg_response_id"));
@@ -2994,7 +3003,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("Say hello.")],
@@ -3009,8 +3018,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Error);
         assert_eq!(
@@ -3032,7 +3042,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("hello")],
@@ -3048,8 +3058,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Error);
         assert_eq!(response_calls.load(Ordering::SeqCst), 0);
@@ -3064,7 +3075,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("hello")],
@@ -3079,8 +3090,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(result.stop_reason, StopReason::Error);
@@ -3101,7 +3113,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("hello")],
@@ -3118,8 +3130,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(result.stop_reason, StopReason::Stop);
@@ -3130,7 +3143,7 @@ mod tests {
     async fn should_handle_immediate_abort() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         cancellation_token.cancel();
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             anthropic_model("claude-haiku-4-5"),
             Context {
                 messages: vec![crate::types::Message::user_text("hello")],
@@ -3145,7 +3158,9 @@ mod tests {
             },
         );
 
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Aborted);
         assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
@@ -3212,12 +3227,19 @@ mod tests {
             },
         );
 
+        let mut result = None;
         while let Some(event) = stream.next().await {
-            if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
-                cancellation_token.cancel();
+            let event = event.expect("stream event");
+            match event {
+                AssistantMessageEvent::TextDelta { .. } => {
+                    cancellation_token.cancel();
+                }
+                AssistantMessageEvent::Done { message, .. } => result = Some(message),
+                AssistantMessageEvent::Error { error, .. } => result = Some(error),
+                _ => {}
             }
         }
-        let result = stream.result().await.unwrap();
+        let result = result.expect("final message");
         release_server.notify_waiters();
 
         assert_eq!(result.stop_reason, StopReason::Aborted);
@@ -3298,7 +3320,7 @@ mod tests {
         model.base_url = base_url;
         model.reasoning = false;
 
-        let mut stream = stream_anthropic(
+        let stream = stream_anthropic(
             model,
             Context {
                 messages: vec![crate::types::Message::user_text("Say hello")],
@@ -3313,8 +3335,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(result.stop_reason, StopReason::Stop, "{result:#?}");
         assert_eq!(
             result.content,

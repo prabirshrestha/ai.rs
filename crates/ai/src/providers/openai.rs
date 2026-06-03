@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::event_stream::AssistantMessageEventStream;
+use crate::event_stream::AssistantEventStream;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::{openai_completions, openai_responses, register_builtins};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
@@ -187,7 +187,7 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
         model: Model,
         context: Context,
         options: StreamOptions,
-    ) -> Result<AssistantMessageEventStream> {
+    ) -> Result<AssistantEventStream> {
         let options = self.with_api_key(options);
         match self.api {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_openai_completions(
@@ -208,7 +208,7 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
         model: Model,
         context: Context,
         options: SimpleStreamOptions,
-    ) -> Result<AssistantMessageEventStream> {
+    ) -> Result<AssistantEventStream> {
         let options = self.with_api_key_simple(options);
         match self.api {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_simple_openai_completions(
@@ -248,7 +248,11 @@ mod tests {
 
         let mut stream =
             crate::stream_simple(model, Context::default(), None).expect("runtime stream");
-        let event = stream.next().await.expect("error event");
+        let event = stream
+            .next()
+            .await
+            .expect("error event")
+            .expect("stream event");
         let AssistantMessageEvent::Error { reason, error } = event else {
             panic!("expected error event");
         };

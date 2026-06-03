@@ -3,9 +3,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
-    Context, ImageContent, Message, Model, SimpleStreamOptions, TextContent, Tool,
-    ToolResultContent, ToolResultMessage,
+    AssistantContent, AssistantEventStream, AssistantMessage, AssistantMessageEvent, Context,
+    ImageContent, Message, Model, SimpleStreamOptions, TextContent, Tool, ToolResultContent,
+    ToolResultMessage,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -21,8 +21,7 @@ pub type StreamFn = Arc<
             Model,
             Context,
             SimpleStreamOptions,
-        )
-            -> Pin<Box<dyn Future<Output = crate::Result<AssistantMessageEventStream>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = crate::Result<AssistantEventStream>> + Send>>
         + Send
         + Sync,
 >;

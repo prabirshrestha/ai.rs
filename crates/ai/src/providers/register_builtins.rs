@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use crate::api_registry::{self, ApiProvider};
 use crate::providers::{anthropic, openai_completions, openai_responses};
 use crate::types::{Context, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions};
-use crate::{AssistantMessageEventStream, Result};
+use crate::{AssistantEventStream, Result};
 use serde_json::Value;
 
 pub use anthropic::{stream_anthropic, stream_simple_anthropic};
@@ -40,7 +40,7 @@ fn register_builtins() {
                 |model: Model,
                  context: Context,
                  options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
+                 -> Result<AssistantEventStream> {
                     Ok(anthropic::stream_simple_anthropic(model, context, options))
                 },
             ),
@@ -63,7 +63,7 @@ fn register_builtins() {
                 |model: Model,
                  context: Context,
                  options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
+                 -> Result<AssistantEventStream> {
                     Ok(openai_completions::stream_simple_openai_completions(
                         model, context, options,
                     ))
@@ -88,7 +88,7 @@ fn register_builtins() {
                 |model: Model,
                  context: Context,
                  options: SimpleStreamOptions|
-                 -> Result<AssistantMessageEventStream> {
+                 -> Result<AssistantEventStream> {
                     Ok(openai_responses::stream_simple_openai_responses(
                         model, context, options,
                     ))

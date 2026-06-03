@@ -27,8 +27,7 @@ pub use agent_types::*;
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use event_stream::{
-    AssistantMessageEventStream, AssistantMessageEventStreamSender,
-    create_assistant_message_event_stream,
+    AssistantEventStream, AssistantMessageEventStreamSender, create_assistant_message_event_stream,
 };
 pub use models::{
     calculate_cost, clamp_thinking_level, get_supported_thinking_levels, models_are_equal,

@@ -1,16 +1,13 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::event_stream::AssistantMessageEventStream;
+use crate::event_stream::AssistantEventStream;
 use crate::types::{Context, Model, SimpleStreamOptions, StreamOptions};
 use crate::{Error, Result};
 
 pub type ApiStreamFunction =
-    Arc<dyn Fn(Model, Context, StreamOptions) -> Result<AssistantMessageEventStream> + Send + Sync>;
-pub type ApiStreamSimpleFunction = Arc<
-    dyn Fn(Model, Context, SimpleStreamOptions) -> Result<AssistantMessageEventStream>
-        + Send
-        + Sync,
->;
+    Arc<dyn Fn(Model, Context, StreamOptions) -> Result<AssistantEventStream> + Send + Sync>;
+pub type ApiStreamSimpleFunction =
+    Arc<dyn Fn(Model, Context, SimpleStreamOptions) -> Result<AssistantEventStream> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ApiProvider {
@@ -101,10 +98,7 @@ pub fn clear_api_providers() {
 
 pub(crate) fn wrap_stream<F>(api: &'static str, stream: F) -> ApiStreamFunction
 where
-    F: Fn(Model, Context, StreamOptions) -> Result<AssistantMessageEventStream>
-        + Send
-        + Sync
-        + 'static,
+    F: Fn(Model, Context, StreamOptions) -> Result<AssistantEventStream> + Send + Sync + 'static,
 {
     Arc::new(move |model, context, options| {
         if model.api != api {
@@ -116,7 +110,7 @@ where
 
 pub(crate) fn wrap_stream_simple<F>(api: &'static str, stream: F) -> ApiStreamSimpleFunction
 where
-    F: Fn(Model, Context, SimpleStreamOptions) -> Result<AssistantMessageEventStream>
+    F: Fn(Model, Context, SimpleStreamOptions) -> Result<AssistantEventStream>
         + Send
         + Sync
         + 'static,
@@ -178,9 +172,9 @@ mod tests {
         }
     }
 
-    fn done_stream(message: AssistantMessage) -> AssistantMessageEventStream {
+    fn done_stream(message: AssistantMessage) -> AssistantEventStream {
         let reason = message.stop_reason;
-        let (mut sender, stream) = AssistantMessageEventStream::channel();
+        let (mut sender, stream) = crate::create_assistant_message_event_stream();
         sender.push(AssistantMessageEvent::Done { reason, message });
         stream
     }
@@ -206,11 +200,11 @@ mod tests {
             Some(source_id.to_string()),
         );
 
-        let mut stream =
-            crate::stream_simple(test_model("test-custom-api"), Context::default(), None)
-                .expect("custom provider stream");
-        while futures::StreamExt::next(&mut stream).await.is_some() {}
-        let message = stream.result().await.expect("stream result");
+        let stream = crate::stream_simple(test_model("test-custom-api"), Context::default(), None)
+            .expect("custom provider stream");
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .expect("stream result");
 
         assert!(called.load(Ordering::SeqCst));
         assert!(matches!(

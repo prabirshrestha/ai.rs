@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::env_api_keys::get_env_api_key;
-use crate::event_stream::AssistantMessageEventStream;
+use crate::event_stream::AssistantEventStream;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::{anthropic, openai_completions, openai_responses, register_builtins};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
@@ -216,7 +216,7 @@ impl LanguageModelApi for GitHubCopilotLanguageModelApi {
         model: Model,
         context: Context,
         options: StreamOptions,
-    ) -> Result<AssistantMessageEventStream> {
+    ) -> Result<AssistantEventStream> {
         let options = self.with_api_key(options);
         match self.api {
             GitHubCopilotApi::AnthropicMessages => Ok(anthropic::stream_anthropic(
@@ -244,7 +244,7 @@ impl LanguageModelApi for GitHubCopilotLanguageModelApi {
         model: Model,
         context: Context,
         options: SimpleStreamOptions,
-    ) -> Result<AssistantMessageEventStream> {
+    ) -> Result<AssistantEventStream> {
         let options = self.with_api_key_simple(options);
         match self.api {
             GitHubCopilotApi::AnthropicMessages => {

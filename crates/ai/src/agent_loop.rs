@@ -360,6 +360,7 @@ async fn stream_assistant_response(
 
     let mut partial_added = false;
     while let Some(event) = response.next().await {
+        let event = event?;
         match &event {
             AssistantMessageEvent::Start { partial } => {
                 context
@@ -391,8 +392,29 @@ async fn stream_assistant_response(
                     .await?;
                 }
             }
-            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {
-                let final_message = response.result().await?;
+            AssistantMessageEvent::Done { message, .. } => {
+                let final_message = message.clone();
+                if partial_added {
+                    if let Some(last) = context.messages.last_mut() {
+                        *last = crate::Message::Assistant(final_message.clone());
+                    }
+                } else {
+                    context
+                        .messages
+                        .push(crate::Message::Assistant(final_message.clone()));
+                    emit(AgentEvent::MessageStart {
+                        message: crate::Message::Assistant(final_message.clone()),
+                    })
+                    .await?;
+                }
+                emit(AgentEvent::MessageEnd {
+                    message: crate::Message::Assistant(final_message.clone()),
+                })
+                .await?;
+                return Ok(final_message);
+            }
+            AssistantMessageEvent::Error { error, .. } => {
+                let final_message = error.clone();
                 if partial_added {
                     if let Some(last) = context.messages.last_mut() {
                         *last = crate::Message::Assistant(final_message.clone());
@@ -415,25 +437,7 @@ async fn stream_assistant_response(
         }
     }
 
-    let final_message = response.result().await?;
-    if partial_added {
-        if let Some(last) = context.messages.last_mut() {
-            *last = crate::Message::Assistant(final_message.clone());
-        }
-    } else {
-        context
-            .messages
-            .push(crate::Message::Assistant(final_message.clone()));
-        emit(AgentEvent::MessageStart {
-            message: crate::Message::Assistant(final_message.clone()),
-        })
-        .await?;
-    }
-    emit(AgentEvent::MessageEnd {
-        message: crate::Message::Assistant(final_message.clone()),
-    })
-    .await?;
-    Ok(final_message)
+    Err(crate::Error::StreamClosed.into())
 }
 
 struct ExecutedToolBatch {

@@ -1,8 +1,10 @@
-use crate::AssistantMessageEventStream;
+use crate::AssistantEventStream;
 use crate::api_registry::get_api_provider;
 use crate::env_api_keys::get_env_api_key;
 use crate::providers::register_builtins::ensure_builtins_registered;
-use crate::types::{AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions};
+use crate::types::{
+    AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions, StreamOptions,
+};
 use crate::{Error, Result};
 
 fn has_explicit_api_key(api_key: &Option<String>) -> bool {
@@ -29,7 +31,7 @@ pub fn stream(
     model: Model,
     context: Context,
     options: Option<StreamOptions>,
-) -> Result<AssistantMessageEventStream> {
+) -> Result<AssistantEventStream> {
     if let Some(api) = model.language_api() {
         let options = with_env_api_key(&model, options.unwrap_or_default());
         return api.stream(model, context, options);
@@ -47,16 +49,14 @@ pub async fn complete(
     context: Context,
     options: Option<StreamOptions>,
 ) -> Result<AssistantMessage> {
-    let mut stream = stream(model, context, options)?;
-    while futures::StreamExt::next(&mut stream).await.is_some() {}
-    stream.result().await
+    final_message_from_stream(stream(model, context, options)?).await
 }
 
 pub fn stream_simple(
     model: Model,
     context: Context,
     options: Option<SimpleStreamOptions>,
-) -> Result<AssistantMessageEventStream> {
+) -> Result<AssistantEventStream> {
     if let Some(api) = model.language_api() {
         let options = with_env_api_key_simple(&model, options.unwrap_or_default());
         return api.stream_simple(model, context, options);
@@ -74,9 +74,20 @@ pub async fn complete_simple(
     context: Context,
     options: Option<SimpleStreamOptions>,
 ) -> Result<AssistantMessage> {
-    let mut stream = stream_simple(model, context, options)?;
-    while futures::StreamExt::next(&mut stream).await.is_some() {}
-    stream.result().await
+    final_message_from_stream(stream_simple(model, context, options)?).await
+}
+
+pub async fn final_message_from_stream(
+    mut stream: AssistantEventStream,
+) -> Result<AssistantMessage> {
+    while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        match event? {
+            AssistantMessageEvent::Done { message, .. } => return Ok(message),
+            AssistantMessageEvent::Error { error, .. } => return Ok(error),
+            _ => {}
+        }
+    }
+    Err(Error::StreamClosed)
 }
 
 #[cfg(test)]
@@ -136,7 +147,7 @@ mod tests {
         }
     }
 
-    fn done_stream(model: &Model) -> AssistantMessageEventStream {
+    fn done_stream(model: &Model) -> AssistantEventStream {
         let message = AssistantMessage {
             content: vec![AssistantContent::Text(TextContent {
                 text: "ok".to_string(),
@@ -154,7 +165,7 @@ mod tests {
             timestamp: crate::utils::time::now_millis(),
         };
         let reason = message.stop_reason;
-        let (mut sender, stream) = AssistantMessageEventStream::channel();
+        let (mut sender, stream) = crate::create_assistant_message_event_stream();
         sender.push(AssistantMessageEvent::Done {
             reason,
             message: message.clone(),
@@ -190,10 +201,11 @@ mod tests {
             Some(source_id.to_string()),
         );
 
-        let mut events = stream_simple(test_model("stream-env-key-test"), Context::default(), None)
+        let events = stream_simple(test_model("stream-env-key-test"), Context::default(), None)
             .expect("stream_simple should dispatch");
-        while futures::StreamExt::next(&mut events).await.is_some() {}
-        let _message = events.result().await.expect("stream result");
+        let _message = crate::stream::final_message_from_stream(events)
+            .await
+            .expect("stream result");
 
         assert_eq!(
             observed_key
@@ -242,14 +254,15 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut events = stream_simple(
+        let events = stream_simple(
             test_model("stream-explicit-key-test"),
             Context::default(),
             Some(options),
         )
         .expect("stream_simple should dispatch");
-        while futures::StreamExt::next(&mut events).await.is_some() {}
-        let _message = events.result().await.expect("stream result");
+        let _message = crate::stream::final_message_from_stream(events)
+            .await
+            .expect("stream result");
 
         assert_eq!(
             observed_key
@@ -292,7 +305,8 @@ mod tests {
 
         let event = futures::StreamExt::next(&mut stream)
             .await
-            .expect("missing API key should be emitted as an error event");
+            .expect("missing API key should be emitted as an error event")
+            .expect("stream event");
         let AssistantMessageEvent::Error { reason, error } = event else {
             panic!("expected missing API key error event");
         };
@@ -301,9 +315,7 @@ mod tests {
             error.error_message.as_deref(),
             Some("No API key for provider: openai")
         );
-
-        while futures::StreamExt::next(&mut stream).await.is_some() {}
-        let message = stream.result().await.expect("stream result");
+        let message = error;
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
             message.error_message.as_deref(),

@@ -55,7 +55,7 @@ pub fn stream_simple_openai_completions(
     model: Model,
     context: Context,
     options: SimpleStreamOptions,
-) -> crate::AssistantMessageEventStream {
+) -> crate::AssistantEventStream {
     let api_key = options
         .stream
         .api_key
@@ -92,11 +92,14 @@ pub fn stream_openai_completions(
     model: Model,
     context: Context,
     options: OpenAICompletionsOptions,
-) -> crate::AssistantMessageEventStream {
-    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
-    tokio::spawn(async move {
-        let output = AssistantMessage::empty_for(&model);
-        if let Err(error) = run_stream(model, context, options, output, &mut sender).await {
+) -> crate::AssistantEventStream {
+    crate::event_stream::stream_from_producer(
+        move |mut sender| async move {
+            let output = AssistantMessage::empty_for(&model);
+            run_stream(model, context, options, output, &mut sender).await?;
+            Ok(())
+        },
+        |error: StreamFailure| {
             let mut message = error.output;
             message.stop_reason = if error.cancelled {
                 StopReason::Aborted
@@ -104,13 +107,12 @@ pub fn stream_openai_completions(
                 StopReason::Error
             };
             message.error_message = Some(error.message);
-            sender.push(AssistantMessageEvent::Error {
+            AssistantMessageEvent::Error {
                 reason: message.stop_reason,
                 error: message,
-            });
-        }
-    });
-    stream
+            }
+        },
+    )
 }
 
 struct StreamFailure {
@@ -1361,8 +1363,8 @@ fn request_base_url(model: &Model) -> Result<String> {
     Ok(model.base_url.clone())
 }
 
-fn immediate_error(model: Model, message: &str) -> crate::AssistantMessageEventStream {
-    let (mut sender, stream) = crate::AssistantMessageEventStream::channel();
+fn immediate_error(model: Model, message: &str) -> crate::AssistantEventStream {
+    let (mut sender, stream) = crate::create_assistant_message_event_stream();
     let mut output = AssistantMessage::empty_for(&model);
     output.stop_reason = StopReason::Error;
     output.error_message = Some(message.to_string());
@@ -1507,13 +1509,14 @@ mod tests {
 
     #[tokio::test]
     async fn stream_simple_missing_api_key_names_provider() {
-        let mut stream = stream_simple_openai_completions(
+        let stream = stream_simple_openai_completions(
             model(),
             Context::default(),
             SimpleStreamOptions::default(),
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -2474,7 +2477,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             routed_model,
             Context {
                 messages: vec![Message::user_text("hi")],
@@ -2490,7 +2493,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(
             message.response_model.as_deref(),
@@ -2526,7 +2531,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             routed_model,
             Context {
                 messages: vec![Message::user_text("hi")],
@@ -2542,7 +2547,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
         assert_eq!(message.stop_reason, StopReason::Stop);
@@ -2577,7 +2584,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             routed_model,
             Context {
                 messages: vec![Message::user_text("hi")],
@@ -2593,7 +2600,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.model, "openrouter/auto");
         assert_eq!(message.response_model, None);
         assert_eq!(message.stop_reason, StopReason::Stop);
@@ -2621,7 +2630,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("hi")],
@@ -2637,7 +2646,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.response_id.as_deref(), Some("chatcmpl-final"));
         assert_eq!(message.stop_reason, StopReason::Stop);
     }
@@ -2662,7 +2673,7 @@ mod tests {
         )
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("hello")],
@@ -2677,8 +2688,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
@@ -2699,7 +2711,7 @@ mod tests {
         chat_model.base_url =
             spawn_retrying_sse_server(chat_sse_body(&[]), Arc::clone(&attempts)).await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("hello")],
@@ -2715,8 +2727,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -2749,7 +2762,7 @@ mod tests {
         )
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("hello")],
@@ -2766,8 +2779,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(message.stop_reason, StopReason::Stop);
@@ -2784,7 +2798,7 @@ mod tests {
     async fn should_handle_immediate_abort() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         cancellation_token.cancel();
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             model(),
             Context {
                 messages: vec![Message::user_text("hello")],
@@ -2799,7 +2813,9 @@ mod tests {
             },
         );
 
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Aborted);
         assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
@@ -2834,12 +2850,19 @@ mod tests {
             },
         );
 
+        let mut result = None;
         while let Some(event) = stream.next().await {
-            if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
-                cancellation_token.cancel();
+            let event = event.expect("stream event");
+            match event {
+                AssistantMessageEvent::TextDelta { .. } => {
+                    cancellation_token.cancel();
+                }
+                AssistantMessageEvent::Done { message, .. } => result = Some(message),
+                AssistantMessageEvent::Error { error, .. } => result = Some(error),
+                _ => {}
             }
         }
-        let result = stream.result().await.unwrap();
+        let result = result.expect("final message");
         release_server.notify_waiters();
 
         assert_eq!(result.stop_reason, StopReason::Aborted);
@@ -2889,7 +2912,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("hi")],
@@ -2905,7 +2928,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.usage.input, 10);
         assert_eq!(message.usage.output, 5);
         assert_eq!(message.usage.total_tokens, 15);
@@ -2927,7 +2952,7 @@ mod tests {
         })]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Use reasoning.")],
@@ -2943,7 +2968,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.usage.input, 10);
         assert_eq!(message.usage.output, 33);
         assert_eq!(message.usage.total_tokens, 43);
@@ -2971,7 +2998,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Reply with exactly OK")],
@@ -2987,7 +3014,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.usage.input, 20);
         assert_eq!(message.usage.cache_read, 50);
         assert_eq!(message.usage.cache_write, 30);
@@ -3021,7 +3050,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Reply with exactly OK")],
@@ -3037,7 +3066,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.usage.input, 20);
         assert_eq!(message.usage.cache_read, 50);
         assert_eq!(message.usage.cache_write, 30);
@@ -3071,7 +3102,7 @@ mod tests {
             })
         });
 
-        let mut stream = stream_simple_openai_completions(
+        let stream = stream_simple_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Call lookup")],
@@ -3092,7 +3123,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.stop_reason, StopReason::Stop);
         let payload = captured_payload.lock().unwrap().take().expect("payload");
         assert_eq!(payload["tool_choice"], json!("required"));
@@ -3126,7 +3159,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Reply OK")],
@@ -3142,7 +3175,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.stop_reason, StopReason::Stop);
         assert_eq!(message.error_message, None);
         assert_eq!(message.response_id.as_deref(), Some("chatcmpl-null"));
@@ -3172,7 +3207,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Reply longer")],
@@ -3188,7 +3223,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
             message.error_message.as_deref(),
@@ -3218,7 +3255,7 @@ mod tests {
         ]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Hi")],
@@ -3234,7 +3271,9 @@ mod tests {
             },
         );
 
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
             message.error_message.as_deref(),
@@ -3319,17 +3358,24 @@ mod tests {
         );
 
         let mut tool_call_indexes = Vec::new();
+        let mut message = None;
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             match event {
                 AssistantMessageEvent::ToolCallStart { content_index, .. }
                 | AssistantMessageEvent::ToolCallDelta { content_index, .. }
                 | AssistantMessageEvent::ToolCallEnd { content_index, .. } => {
                     tool_call_indexes.push(content_index);
                 }
+                AssistantMessageEvent::Done {
+                    message: final_message,
+                    ..
+                } => message = Some(final_message),
+                AssistantMessageEvent::Error { error, .. } => message = Some(error),
                 _ => {}
             }
         }
-        let message = stream.result().await.unwrap();
+        let message = message.expect("final message");
 
         assert_eq!(message.stop_reason, StopReason::ToolUse);
         assert_eq!(tool_call_indexes, vec![0, 0, 0, 0, 0]);
@@ -3419,17 +3465,24 @@ mod tests {
         );
 
         let mut tool_call_indexes = Vec::new();
+        let mut message = None;
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             match event {
                 AssistantMessageEvent::ToolCallStart { content_index, .. }
                 | AssistantMessageEvent::ToolCallDelta { content_index, .. }
                 | AssistantMessageEvent::ToolCallEnd { content_index, .. } => {
                     tool_call_indexes.push(content_index);
                 }
+                AssistantMessageEvent::Done {
+                    message: final_message,
+                    ..
+                } => message = Some(final_message),
+                AssistantMessageEvent::Error { error, .. } => message = Some(error),
                 _ => {}
             }
         }
-        let message = stream.result().await.unwrap();
+        let message = message.expect("final message");
 
         assert_eq!(message.stop_reason, StopReason::ToolUse);
         assert_eq!(tool_call_indexes, vec![0, 0, 0, 0, 0]);
@@ -3605,7 +3658,9 @@ mod tests {
 
         let mut event_names = Vec::new();
         let mut tool_events_by_content_index: HashMap<usize, Vec<&'static str>> = HashMap::new();
+        let mut message = None;
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             let name = match &event {
                 AssistantMessageEvent::TextStart { .. } => "text_start",
                 AssistantMessageEvent::TextDelta { .. } => "text_delta",
@@ -3636,9 +3691,17 @@ mod tests {
                 }
                 _ => "other",
             };
+            match event {
+                AssistantMessageEvent::Done {
+                    message: final_message,
+                    ..
+                } => message = Some(final_message),
+                AssistantMessageEvent::Error { error, .. } => message = Some(error),
+                _ => {}
+            }
             event_names.push(name);
         }
-        let message = stream.result().await.unwrap();
+        let message = message.expect("final message");
 
         assert_eq!(message.stop_reason, StopReason::ToolUse);
         assert_eq!(
@@ -3817,7 +3880,7 @@ mod tests {
         })]))
         .await;
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             chat_model,
             Context {
                 messages: vec![Message::user_text("Use reasoning.")],
@@ -3832,8 +3895,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let message = stream.result().await.unwrap();
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
 
         assert_eq!(
             message.content,
@@ -4304,7 +4368,7 @@ mod tests {
             &model,
         );
 
-        let mut stream = stream_openai_completions(
+        let stream = stream_openai_completions(
             model,
             Context {
                 messages: vec![
@@ -4323,8 +4387,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        while stream.next().await.is_some() {}
-        let result = stream.result().await.unwrap();
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
         let payload = captured_payload
             .lock()
             .unwrap()

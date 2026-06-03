@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderName, HeaderValue};
 
-use crate::event_stream::AssistantMessageEventStream;
+use crate::event_stream::AssistantEventStream;
 use crate::types::{
     Context, Model, ModelCompat, ModelCost, ModelInput, SimpleStreamOptions, StreamOptions,
 };
@@ -34,14 +34,14 @@ pub trait LanguageModelApi: dyn_clone::DynClone + Send + Sync + 'static {
         model: Model,
         context: Context,
         options: StreamOptions,
-    ) -> Result<AssistantMessageEventStream>;
+    ) -> Result<AssistantEventStream>;
 
     fn stream_simple(
         &self,
         model: Model,
         context: Context,
         options: SimpleStreamOptions,
-    ) -> Result<AssistantMessageEventStream>;
+    ) -> Result<AssistantEventStream>;
 }
 
 dyn_clone::clone_trait_object!(LanguageModelApi);

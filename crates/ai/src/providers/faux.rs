@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::api_registry::{self, ApiProvider};
-use crate::event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamSender};
+use crate::event_stream::{AssistantEventStream, AssistantMessageEventStreamSender};
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
     ImageContent, Message, Model, ModelCost, ModelInput, ProviderResponse, SimpleStreamOptions,
@@ -311,7 +311,7 @@ pub fn register_faux_provider(
         move |request_model: Model,
               context: Context,
               stream_options: StreamOptions|
-              -> Result<AssistantMessageEventStream> {
+              -> Result<AssistantEventStream> {
             if request_model.api != stream_api {
                 return Err(Error::UnsupportedApi(format!(
                     "Mismatched api: {} expected {}",
@@ -319,7 +319,7 @@ pub fn register_faux_provider(
                 )));
             }
 
-            let (sender, output_stream) = AssistantMessageEventStream::channel();
+            let (sender, output_stream) = crate::create_assistant_message_event_stream();
             let step = stream_pending_responses
                 .lock()
                 .expect("faux response queue poisoned")
@@ -360,7 +360,7 @@ pub fn register_faux_provider(
             move |model: Model,
                   context: Context,
                   options: SimpleStreamOptions|
-                  -> Result<AssistantMessageEventStream> {
+                  -> Result<AssistantEventStream> {
                 stream(model, context, options.stream)
             },
         )
@@ -965,9 +965,10 @@ mod tests {
 
     use super::*;
 
-    async fn collect_events(mut stream: AssistantMessageEventStream) -> Vec<AssistantMessageEvent> {
+    async fn collect_events(mut stream: AssistantEventStream) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             events.push(event);
         }
         events
@@ -1870,6 +1871,7 @@ mod tests {
         let mut text_delta_count = 0;
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
                 text_delta_count += 1;
                 cancellation_token.cancel();
@@ -1930,6 +1932,7 @@ mod tests {
         let mut thinking_delta_count = 0;
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             if matches!(event, AssistantMessageEvent::ThinkingDelta { .. }) {
                 thinking_delta_count += 1;
                 cancellation_token.cancel();
@@ -1991,6 +1994,7 @@ mod tests {
         let mut tool_delta_count = 0;
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
             if matches!(event, AssistantMessageEvent::ToolCallDelta { .. }) {
                 tool_delta_count += 1;
                 cancellation_token.cancel();

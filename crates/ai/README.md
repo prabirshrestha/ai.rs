@@ -146,8 +146,9 @@ async fn main() -> Result<()> {
 
     let mut events = stream(model.clone(), context.clone(), None)?;
 
+    let mut final_message = None;
     while let Some(event) = events.next().await {
-        match event {
+        match event? {
             AssistantMessageEvent::Start { partial } => {
                 println!("starting with {}", partial.model.id);
             }
@@ -155,15 +156,19 @@ async fn main() -> Result<()> {
             AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
                 println!("tool: {}({})", tool_call.name, tool_call.arguments);
             }
-            AssistantMessageEvent::Done { reason, .. } => {
+            AssistantMessageEvent::Done { reason, message } => {
                 println!("\nfinished: {reason:?}");
+                final_message = Some(message);
             }
-            AssistantMessageEvent::Error { error, .. } => eprintln!("{error:?}"),
+            AssistantMessageEvent::Error { error, .. } => {
+                eprintln!("{error:?}");
+                final_message = Some(error);
+            }
             _ => {}
         }
     }
 
-    let final_message = events.result().await?;
+    let final_message = final_message.ok_or(ai::Error::StreamClosed)?;
     context.messages.push(Message::Assistant(final_message.clone()));
 
     let mut tool_calls = 0;

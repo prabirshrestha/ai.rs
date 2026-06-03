@@ -33,7 +33,10 @@ vLLM, and Azure Foundry.
 ```rust
 use futures::StreamExt;
 
-use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
+use ai::{
+    providers::openai, stream_simple, AssistantMessage, AssistantMessageEvent, Context, Message,
+    Result,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,14 +47,20 @@ async fn main() -> Result<()> {
         .build();
 
     let mut events = stream_simple(model, context, None)?;
+    let mut final_message: Option<AssistantMessage> = None;
 
     while let Some(event) = events.next().await {
-        if let AssistantMessageEvent::TextDelta { delta, .. } = event {
-            print!("{delta}");
+        match event? {
+            AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
+            AssistantMessageEvent::Done { message, .. }
+            | AssistantMessageEvent::Error { error: message, .. } => {
+                final_message = Some(message);
+            }
+            _ => {}
         }
     }
 
-    let message = events.result().await?;
+    let message = final_message.ok_or(ai::Error::StreamClosed)?;
     println!("\n\nused {} output tokens", message.usage.output);
 
     Ok(())
