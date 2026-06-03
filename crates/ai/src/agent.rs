@@ -88,11 +88,61 @@ impl AgentState {
             error_message: None,
         }
     }
+
+    pub fn builder(model: Model) -> AgentStateBuilder {
+        AgentStateBuilder::new(model)
+    }
 }
 
 impl Default for AgentState {
     fn default() -> Self {
         Self::new(default_agent_model())
+    }
+}
+
+pub struct AgentStateBuilder {
+    state: AgentState,
+}
+
+impl AgentStateBuilder {
+    pub fn new(model: Model) -> Self {
+        Self {
+            state: AgentState::new(model),
+        }
+    }
+
+    pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.state.system_prompt = system_prompt.into();
+        self
+    }
+
+    pub fn thinking_level(mut self, thinking_level: crate::ModelThinkingLevel) -> Self {
+        self.state.thinking_level = thinking_level;
+        self
+    }
+
+    pub fn tool(mut self, tool: DynAgentTool) -> Self {
+        self.state.tools.push(tool);
+        self
+    }
+
+    pub fn tools(mut self, tools: impl IntoIterator<Item = DynAgentTool>) -> Self {
+        self.state.tools.extend(tools);
+        self
+    }
+
+    pub fn message(mut self, message: AgentMessage) -> Self {
+        self.state.messages.push(message);
+        self
+    }
+
+    pub fn messages(mut self, messages: impl IntoIterator<Item = AgentMessage>) -> Self {
+        self.state.messages.extend(messages);
+        self
+    }
+
+    pub fn build(self) -> AgentState {
+        self.state
     }
 }
 
@@ -129,11 +179,121 @@ impl AgentOptions {
             tool_execution: ToolExecutionMode::Parallel,
         }
     }
+
+    pub fn builder(model: Model) -> AgentOptionsBuilder {
+        AgentOptionsBuilder::new(model)
+    }
 }
 
 impl Default for AgentOptions {
     fn default() -> Self {
         Self::new(default_agent_model())
+    }
+}
+
+pub struct AgentOptionsBuilder {
+    options: AgentOptions,
+}
+
+impl AgentOptionsBuilder {
+    pub fn new(model: Model) -> Self {
+        Self {
+            options: AgentOptions::new(model),
+        }
+    }
+
+    pub fn initial_state(mut self, initial_state: AgentState) -> Self {
+        self.options.initial_state = initial_state;
+        self
+    }
+
+    pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.options.initial_state.system_prompt = system_prompt.into();
+        self
+    }
+
+    pub fn thinking_level(mut self, thinking_level: crate::ModelThinkingLevel) -> Self {
+        self.options.initial_state.thinking_level = thinking_level;
+        self
+    }
+
+    pub fn tool(mut self, tool: DynAgentTool) -> Self {
+        self.options.initial_state.tools.push(tool);
+        self
+    }
+
+    pub fn tools(mut self, tools: impl IntoIterator<Item = DynAgentTool>) -> Self {
+        self.options.initial_state.tools.extend(tools);
+        self
+    }
+
+    pub fn message(mut self, message: AgentMessage) -> Self {
+        self.options.initial_state.messages.push(message);
+        self
+    }
+
+    pub fn messages(mut self, messages: impl IntoIterator<Item = AgentMessage>) -> Self {
+        self.options.initial_state.messages.extend(messages);
+        self
+    }
+
+    pub fn convert_to_llm(mut self, convert_to_llm: ConvertToLlmFn) -> Self {
+        self.options.convert_to_llm = Some(convert_to_llm);
+        self
+    }
+
+    pub fn transform_context(mut self, transform_context: TransformContextFn) -> Self {
+        self.options.transform_context = Some(transform_context);
+        self
+    }
+
+    pub fn stream_fn(mut self, stream_fn: StreamFn) -> Self {
+        self.options.stream_fn = Some(stream_fn);
+        self
+    }
+
+    pub fn prepare_next_turn(mut self, prepare_next_turn: AgentPrepareNextTurnFn) -> Self {
+        self.options.prepare_next_turn = Some(prepare_next_turn);
+        self
+    }
+
+    pub fn before_tool_call(mut self, before_tool_call: BeforeToolCallFn) -> Self {
+        self.options.before_tool_call = Some(before_tool_call);
+        self
+    }
+
+    pub fn after_tool_call(mut self, after_tool_call: AfterToolCallFn) -> Self {
+        self.options.after_tool_call = Some(after_tool_call);
+        self
+    }
+
+    pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.options.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn options(mut self, options: SimpleStreamOptions) -> Self {
+        self.options.options = options;
+        self
+    }
+
+    pub fn steering_mode(mut self, steering_mode: QueueMode) -> Self {
+        self.options.steering_mode = steering_mode;
+        self
+    }
+
+    pub fn follow_up_mode(mut self, follow_up_mode: QueueMode) -> Self {
+        self.options.follow_up_mode = follow_up_mode;
+        self
+    }
+
+    pub fn tool_execution(mut self, tool_execution: ToolExecutionMode) -> Self {
+        self.options.tool_execution = tool_execution;
+        self
+    }
+
+    pub fn build(self) -> AgentOptions {
+        self.options
     }
 }
 
@@ -687,7 +847,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{AgentState, StreamFn};
-    use crate::agent_types::{AgentTool, AgentToolResult, AgentToolUpdateCallback, user_message};
+    use crate::agent_types::{
+        AgentTool, AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode, user_message,
+    };
     use crate::event_stream::create_assistant_message_event_stream;
     use crate::providers::faux::{
         FauxAssistantMessageOptions, FauxModelDefinition, FauxResponseStep, FauxTokenSize,
@@ -878,6 +1040,58 @@ mod tests {
         assert_eq!(state.system_prompt, "You are a helpful assistant.");
         assert_eq!(state.model, model);
         assert_eq!(state.thinking_level, ModelThinkingLevel::Low);
+    }
+
+    #[tokio::test]
+    async fn should_build_agent_state() {
+        let model = Model {
+            id: "builder-model".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let state = AgentState::builder(model.clone())
+            .system_prompt("You are terse.")
+            .thinking_level(ModelThinkingLevel::Medium)
+            .tool(Arc::new(CalculateTool))
+            .message(Message::user_text("Hello"))
+            .build();
+
+        assert_eq!(state.system_prompt, "You are terse.");
+        assert_eq!(state.model, model);
+        assert_eq!(state.thinking_level, ModelThinkingLevel::Medium);
+        assert_eq!(state.tools.len(), 1);
+        assert_eq!(state.messages, vec![Message::user_text("Hello")]);
+    }
+
+    #[tokio::test]
+    async fn should_build_agent_options() {
+        let model = Model {
+            id: "builder-model".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let options = AgentOptions::builder(model.clone())
+            .system_prompt("You are precise.")
+            .thinking_level(ModelThinkingLevel::High)
+            .message(Message::user_text("Hello"))
+            .session_id("session-123")
+            .tool_execution(ToolExecutionMode::Sequential)
+            .build();
+
+        assert_eq!(options.initial_state.system_prompt, "You are precise.");
+        assert_eq!(options.initial_state.model, model);
+        assert_eq!(
+            options.initial_state.thinking_level,
+            ModelThinkingLevel::High
+        );
+        assert_eq!(
+            options.initial_state.messages,
+            vec![Message::user_text("Hello")]
+        );
+        assert_eq!(options.session_id.as_deref(), Some("session-123"));
+        assert_eq!(options.tool_execution, ToolExecutionMode::Sequential);
     }
 
     #[tokio::test]

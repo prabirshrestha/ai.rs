@@ -792,7 +792,7 @@ async fn main() -> Result<()> {
 
     agent.set_system_prompt("You are a helpful assistant.").await;
 
-    let _subscription = agent.subscribe(async |event, _cancellation_token| {
+    let subscription = agent.subscribe(async |event, _cancellation_token| {
         if let AgentEvent::MessageUpdate {
             assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
             ..
@@ -805,6 +805,7 @@ async fn main() -> Result<()> {
     });
 
     agent.prompt_text("Hello!", Vec::new()).await?;
+    subscription.unsubscribe();
 
     Ok(())
 }
@@ -922,19 +923,20 @@ means no more loop events will be emitted, but `wait_for_idle` and
 ```rust
 use ai::{Agent, AgentOptions, AgentState, ModelThinkingLevel, ToolExecutionMode};
 
-let agent = Agent::new(AgentOptions {
-    initial_state: AgentState {
-        system_prompt: "You are a helpful assistant.".to_string(),
-        model,
-        thinking_level: ModelThinkingLevel::Medium,
-        tools,
-        messages,
-        ..AgentState::default()
-    },
-    tool_execution: ToolExecutionMode::Parallel,
-    session_id: Some("session-123".to_string()),
-    ..AgentOptions::default()
-});
+let initial_state = AgentState::builder(model.clone())
+    .system_prompt("You are a helpful assistant.")
+    .thinking_level(ModelThinkingLevel::Medium)
+    .tools(tools)
+    .messages(messages)
+    .build();
+
+let agent = Agent::new(
+    AgentOptions::builder(model)
+        .initial_state(initial_state)
+        .tool_execution(ToolExecutionMode::Parallel)
+        .session_id("session-123")
+        .build(),
+);
 ```
 
 ### Agent State
@@ -942,6 +944,14 @@ let agent = Agent::new(AgentOptions {
 `AgentState` contains the system prompt, active model, thinking level, tools,
 message history, streaming status, pending tool call IDs, and the latest error
 message.
+
+```rust
+let state = AgentState::builder(model)
+    .system_prompt("You are a helpful assistant.")
+    .thinking_level(ModelThinkingLevel::Medium)
+    .message(Message::user_text("Hello"))
+    .build();
+```
 
 During streaming, `streaming_message` contains the current partial assistant
 message. `is_streaming` remains true until the run fully settles, including
