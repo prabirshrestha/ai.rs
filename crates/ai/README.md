@@ -1095,6 +1095,97 @@ Agent tools implement the `AgentTool` trait. `definition()` returns the shared
 batch to run sequentially, `prepare_arguments()` can reshape model arguments
 before validation, and `execute()` performs the tool work.
 
+```rust
+use ai::{
+    providers::openai, Agent, AgentOptions, AgentToolBuilder, AgentToolResult, Result,
+};
+use serde_json::{json, Value};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let weather_tool = AgentToolBuilder::new("get_weather")
+        .description("Get current weather for a city.")
+        .parameters(json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }))
+        .label("Weather")
+        .execute(|args| async move {
+            let city = args
+                .get("city")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown city");
+
+            Ok(AgentToolResult::text(format!(
+                "The weather in {city} is 68F and clear."
+            )))
+        })
+        .build()?;
+
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+
+    let agent = Agent::new(
+        AgentOptions::builder(model)
+            .tool(weather_tool)
+            .build(),
+    );
+
+    agent
+        .prompt_text("What is the weather in Seattle?", Vec::new())
+        .await?;
+
+    Ok(())
+}
+```
+
+Implement `AgentTool` directly when a tool needs state, custom argument
+preparation, an execution mode override, cancellation handling, or streaming
+updates.
+
+```rust
+use ai::{AgentTool, AgentToolResult, AgentToolUpdateCallback, Tool};
+use async_trait::async_trait;
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+struct WeatherTool;
+
+#[async_trait]
+impl AgentTool for WeatherTool {
+    fn definition(&self) -> Tool {
+        Tool::builder("get_weather")
+            .description("Get current weather for a city.")
+            .build()
+            .expect("valid weather tool")
+    }
+
+    fn label(&self) -> &str {
+        "Weather"
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        args: Value,
+        _cancellation_token: Option<CancellationToken>,
+        _on_update: Option<AgentToolUpdateCallback>,
+    ) -> ai::AgentResult<AgentToolResult> {
+        let city = args
+            .get("city")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown city");
+
+        Ok(AgentToolResult::text(format!(
+            "The weather in {city} is 68F and clear."
+        )))
+    }
+}
+```
+
 #### Agent Tool Error Handling
 
 Tool failures should return an error from `execute()`. The loop catches that

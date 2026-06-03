@@ -57,6 +57,17 @@ impl AgentToolResult {
 
 pub type AgentToolUpdateCallback =
     Arc<dyn Fn(AgentToolResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+type AgentToolExecuteFn = Arc<
+    dyn Fn(
+            String,
+            Value,
+            Option<CancellationToken>,
+            Option<AgentToolUpdateCallback>,
+        ) -> Pin<Box<dyn Future<Output = AgentResult<AgentToolResult>> + Send>>
+        + Send
+        + Sync,
+>;
+type AgentToolPrepareArgumentsFn = Arc<dyn Fn(Value) -> AgentResult<Value> + Send + Sync>;
 
 #[async_trait]
 pub trait AgentTool: Send + Sync {
@@ -78,6 +89,155 @@ pub trait AgentTool: Send + Sync {
 }
 
 pub type DynAgentTool = Arc<dyn AgentTool>;
+
+pub struct AgentToolBuilder {
+    name: String,
+    description: Option<String>,
+    parameters: Option<Value>,
+    label: Option<String>,
+    execution_mode: Option<ToolExecutionMode>,
+    prepare_arguments: Option<AgentToolPrepareArgumentsFn>,
+    execute: Option<AgentToolExecuteFn>,
+}
+
+impl AgentToolBuilder {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            parameters: None,
+            label: None,
+            execution_mode: None,
+            prepare_arguments: None,
+            execute: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn parameters(mut self, parameters: Value) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
+        self.execution_mode = Some(execution_mode);
+        self
+    }
+
+    pub fn prepare_arguments<F>(mut self, prepare_arguments: F) -> Self
+    where
+        F: Fn(Value) -> AgentResult<Value> + Send + Sync + 'static,
+    {
+        self.prepare_arguments = Some(Arc::new(prepare_arguments));
+        self
+    }
+
+    pub fn execute<F, Fut>(mut self, execute: F) -> Self
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = AgentResult<AgentToolResult>> + Send + 'static,
+    {
+        self.execute = Some(Arc::new(
+            move |_tool_call_id, args, _cancellation_token, _on_update| Box::pin(execute(args)),
+        ));
+        self
+    }
+
+    pub fn execute_with_context<F, Fut>(mut self, execute: F) -> Self
+    where
+        F: Fn(String, Value, Option<CancellationToken>, Option<AgentToolUpdateCallback>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = AgentResult<AgentToolResult>> + Send + 'static,
+    {
+        self.execute = Some(Arc::new(
+            move |tool_call_id, args, cancellation_token, on_update| {
+                Box::pin(execute(tool_call_id, args, cancellation_token, on_update))
+            },
+        ));
+        self
+    }
+
+    pub fn build(self) -> crate::Result<DynAgentTool> {
+        let mut tool_builder = Tool::builder(self.name);
+        if let Some(description) = self.description {
+            tool_builder = tool_builder.description(description);
+        }
+        if let Some(parameters) = self.parameters {
+            tool_builder = tool_builder.parameters(parameters);
+        }
+        let definition = tool_builder.build()?;
+        let label = self.label.unwrap_or_else(|| definition.name.clone());
+        let execute = self.execute.ok_or_else(|| {
+            crate::Error::Validation("agent tool execute callback must be set".to_string())
+        })?;
+
+        Ok(Arc::new(ClosureAgentTool {
+            definition,
+            label,
+            execution_mode: self.execution_mode,
+            prepare_arguments: self.prepare_arguments,
+            execute,
+        }))
+    }
+}
+
+struct ClosureAgentTool {
+    definition: Tool,
+    label: String,
+    execution_mode: Option<ToolExecutionMode>,
+    prepare_arguments: Option<AgentToolPrepareArgumentsFn>,
+    execute: AgentToolExecuteFn,
+}
+
+#[async_trait]
+impl AgentTool for ClosureAgentTool {
+    fn definition(&self) -> Tool {
+        self.definition.clone()
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn execution_mode(&self) -> Option<ToolExecutionMode> {
+        self.execution_mode
+    }
+
+    fn prepare_arguments(&self, args: Value) -> AgentResult<Value> {
+        if let Some(prepare_arguments) = &self.prepare_arguments {
+            prepare_arguments(args)
+        } else {
+            Ok(args)
+        }
+    }
+
+    async fn execute(
+        &self,
+        tool_call_id: &str,
+        args: Value,
+        cancellation_token: Option<CancellationToken>,
+        on_update: Option<AgentToolUpdateCallback>,
+    ) -> AgentResult<AgentToolResult> {
+        (self.execute)(
+            tool_call_id.to_string(),
+            args,
+            cancellation_token,
+            on_update,
+        )
+        .await
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct AgentContext {
@@ -426,5 +586,108 @@ mod tests {
         assert_eq!(llm_context.messages.len(), 1);
         assert_eq!(llm_context.tools.len(), 1);
         assert_eq!(llm_context.tools[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn agent_tool_builder_creates_closure_tool() {
+        let tool = AgentToolBuilder::new("weather")
+            .description("Get weather.")
+            .parameters(json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                }
+            }))
+            .label("Weather")
+            .execute(|args| async move {
+                let city = args
+                    .get("city")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                Ok(AgentToolResult::text(format!("clear in {city}")))
+            })
+            .build()
+            .expect("tool");
+
+        let definition = tool.definition();
+        assert_eq!(definition.name, "weather");
+        assert_eq!(tool.label(), "Weather");
+
+        let result = tool
+            .execute("tool-1", json!({ "city": "Seattle" }), None, None)
+            .await
+            .expect("tool result");
+        assert_eq!(
+            result.content,
+            vec![ToolResultContent::text("clear in Seattle")]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_builder_supports_context_and_prepare_arguments() {
+        let tool = AgentToolBuilder::new("echo")
+            .description("Echo a prepared value.")
+            .execution_mode(ToolExecutionMode::Sequential)
+            .prepare_arguments(|mut args| {
+                args["value"] = json!("prepared");
+                Ok(args)
+            })
+            .execute_with_context(
+                |tool_call_id, args, _cancellation_token, on_update| async move {
+                    if let Some(on_update) = on_update {
+                        on_update(AgentToolResult::text("working")).await;
+                    }
+                    Ok(AgentToolResult::text(format!(
+                        "{tool_call_id}: {}",
+                        args["value"].as_str().unwrap_or_default()
+                    )))
+                },
+            )
+            .build()
+            .expect("tool");
+
+        assert_eq!(tool.execution_mode(), Some(ToolExecutionMode::Sequential));
+
+        let prepared = tool
+            .prepare_arguments(json!({ "value": "raw" }))
+            .expect("prepared args");
+        assert_eq!(prepared["value"], "prepared");
+
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let on_update: AgentToolUpdateCallback = Arc::new({
+            let updates = Arc::clone(&updates);
+            move |result| {
+                let updates = Arc::clone(&updates);
+                Box::pin(async move {
+                    updates.lock().expect("updates lock poisoned").push(result);
+                })
+            }
+        });
+        let result = tool
+            .execute("tool-1", prepared, None, Some(on_update))
+            .await
+            .expect("tool result");
+
+        assert_eq!(
+            result.content,
+            vec![ToolResultContent::text("tool-1: prepared")]
+        );
+        assert_eq!(
+            updates.lock().expect("updates lock poisoned")[0].content,
+            vec![ToolResultContent::text("working")]
+        );
+    }
+
+    #[test]
+    fn agent_tool_builder_requires_execute_callback() {
+        let result = AgentToolBuilder::new("missing")
+            .description("Missing execute.")
+            .build();
+        let error = match result {
+            Ok(_) => panic!("expected missing execute callback error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "agent tool execute callback must be set");
     }
 }
