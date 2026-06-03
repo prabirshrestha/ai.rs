@@ -161,27 +161,27 @@ async fn main() -> Result<()> {
 }
 ```
 
-### OpenAI-Compatible Endpoint
+### Provider Handles
 
-Use the OpenAI provider handle for local servers and compatible endpoints by
-configuring the base URL explicitly.
+Use `openai::from_env()` for OpenAI Responses. Use `openai::builder()` when
+selecting Chat Completions or an OpenAI-compatible endpoint.
 
 ```rust
-use ai::{complete_simple, providers::openai, Context, Message, Result};
+use ai::{
+    providers::{anthropic, openai},
+    Result,
+};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let openai = openai::builder()
+fn providers() -> Result<()> {
+    let _openai_responses = openai::from_env()?;
+
+    let _openai_chat = openai::builder()
         .base_url("http://localhost:11434/v1")
         .chat_completions()
         .build()?;
-    let model = openai.model("gemma3").build()?;
-    let context = Context::builder()
-        .message(Message::user_text("Tell me a short joke."))
-        .build();
 
-    let message = complete_simple(model, context, None).await?;
-    println!("{message:?}");
+    let _anthropic = anthropic::from_env()?;
+
     Ok(())
 }
 ```
