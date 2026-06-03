@@ -44,8 +44,8 @@ pub struct OAuthCredentials {
     pub refresh: String,
     pub access: String,
     pub expires: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enterprise_url: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,8 +150,11 @@ impl GitHubCopilotOAuthProvider {
     }
 
     pub async fn refresh_token(self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
-        refresh_github_copilot_token(&credentials.refresh, credentials.enterprise_url.as_deref())
-            .await
+        refresh_github_copilot_token(
+            &credentials.refresh,
+            github_copilot_enterprise_domain(credentials),
+        )
+        .await
     }
 
     pub fn get_api_key(self, credentials: &OAuthCredentials) -> String {
@@ -186,8 +189,11 @@ impl OAuthProviderInterface for GitHubCopilotOAuthProvider {
     }
 
     async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
-        refresh_github_copilot_token(&credentials.refresh, credentials.enterprise_url.as_deref())
-            .await
+        refresh_github_copilot_token(
+            &credentials.refresh,
+            github_copilot_enterprise_domain(credentials),
+        )
+        .await
     }
 
     fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
@@ -448,7 +454,19 @@ pub fn normalize_domain(input: &str) -> Option<String> {
         .and_then(|url| url.host_str().map(ToString::to_string))
 }
 
-pub fn get_github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
+const GITHUB_COPILOT_ENTERPRISE_URL_KEY: &str = "enterpriseUrl";
+
+pub(crate) fn github_copilot_enterprise_domain(credentials: &OAuthCredentials) -> Option<&str> {
+    credentials
+        .extra
+        .get(GITHUB_COPILOT_ENTERPRISE_URL_KEY)
+        .and_then(Value::as_str)
+}
+
+pub(crate) fn get_github_copilot_base_url(
+    token: Option<&str>,
+    enterprise_domain: Option<&str>,
+) -> String {
     if let Some(token) = token
         && let Some(base_url) = get_base_url_from_token(token)
     {
@@ -664,10 +682,7 @@ pub fn modify_github_copilot_models(
     models: impl IntoIterator<Item = Model>,
     credentials: &OAuthCredentials,
 ) -> Vec<Model> {
-    let domain = credentials
-        .enterprise_url
-        .as_deref()
-        .and_then(normalize_domain);
+    let domain = github_copilot_enterprise_domain(credentials).and_then(normalize_domain);
     let base_url = get_github_copilot_base_url(Some(&credentials.access), domain.as_deref());
     models
         .into_iter()
@@ -1132,6 +1147,14 @@ fn copilot_credentials_from_token(
     enterprise_domain: Option<String>,
     token: CopilotTokenResponse,
 ) -> OAuthCredentials {
+    let mut extra = HashMap::new();
+    if let Some(enterprise_domain) = enterprise_domain {
+        extra.insert(
+            GITHUB_COPILOT_ENTERPRISE_URL_KEY.to_string(),
+            Value::String(enterprise_domain),
+        );
+    }
+
     OAuthCredentials {
         refresh: refresh_token.to_string(),
         access: token.token,
@@ -1139,7 +1162,7 @@ fn copilot_credentials_from_token(
             .expires_at
             .saturating_mul(1000)
             .saturating_sub(COPILOT_TOKEN_EXPIRY_SKEW_MS),
-        enterprise_url: enterprise_domain,
+        extra,
     }
 }
 
@@ -1207,7 +1230,7 @@ fn anthropic_credentials_from_token(token: AnthropicTokenResponse) -> OAuthCrede
         expires: crate::utils::time::now_millis()
             .saturating_add(token.expires_in.saturating_mul(1000))
             .saturating_sub(OAUTH_TOKEN_EXPIRY_SKEW_MS),
-        enterprise_url: None,
+        extra: HashMap::new(),
     }
 }
 
@@ -1358,7 +1381,7 @@ mod tests {
                 refresh: "login-refresh".to_string(),
                 access: "login-access".to_string(),
                 expires: crate::utils::time::now_millis().saturating_add(60_000),
-                enterprise_url: None,
+                extra: HashMap::new(),
             })
         }
 
@@ -1367,7 +1390,7 @@ mod tests {
                 refresh: credentials.refresh.clone(),
                 access: format!("{}-refreshed", credentials.access),
                 expires: crate::utils::time::now_millis().saturating_add(60_000),
-                enterprise_url: credentials.enterprise_url.clone(),
+                extra: credentials.extra.clone(),
             })
         }
 
@@ -1393,7 +1416,7 @@ mod tests {
             refresh: "refresh".to_string(),
             access: "access".to_string(),
             expires: 0,
-            enterprise_url: None,
+            extra: HashMap::new(),
         };
         let refreshed = refresh_oauth_token("test-oauth", &credentials)
             .await
@@ -1407,7 +1430,7 @@ mod tests {
                 refresh: "refresh".to_string(),
                 access: "current-access".to_string(),
                 expires: crate::utils::time::now_millis().saturating_add(60_000),
-                enterprise_url: None,
+                extra: HashMap::new(),
             },
         );
         let api_key = get_oauth_api_key("test-oauth", &credential_map)
@@ -1616,7 +1639,30 @@ mod tests {
         assert_eq!(credentials.access, "access-token");
         assert_eq!(credentials.expires, 700_000);
         assert_eq!(
-            credentials.enterprise_url.as_deref(),
+            github_copilot_enterprise_domain(&credentials),
+            Some("company.ghe.com")
+        );
+    }
+
+    #[test]
+    fn oauth_credentials_flatten_provider_specific_extra_fields() {
+        let credentials = copilot_credentials_from_token(
+            "refresh-token",
+            Some("company.ghe.com".to_string()),
+            CopilotTokenResponse {
+                token: "access-token".to_string(),
+                expires_at: 1_000,
+            },
+        );
+
+        let json = serde_json::to_value(&credentials).expect("credentials json");
+        assert_eq!(json["enterpriseUrl"], "company.ghe.com");
+        assert!(json.get("extra").is_none());
+
+        let round_tripped: OAuthCredentials =
+            serde_json::from_value(json).expect("round-tripped credentials");
+        assert_eq!(
+            github_copilot_enterprise_domain(&round_tripped),
             Some("company.ghe.com")
         );
     }
@@ -1627,7 +1673,7 @@ mod tests {
             refresh: "refresh".to_string(),
             access: "tid=test;proxy-ep=proxy.enterprise.example.com;exp=1".to_string(),
             expires: 1,
-            enterprise_url: None,
+            extra: HashMap::new(),
         };
         let models = vec![
             Model {

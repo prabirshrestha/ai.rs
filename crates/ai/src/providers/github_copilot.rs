@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::AssistantEventStream;
+use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::{anthropic, openai_completions, openai_responses, register_builtins};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
@@ -236,6 +237,34 @@ pub fn builder() -> GitHubCopilotBuilder {
 
 pub fn from_env() -> Result<GitHubCopilot> {
     GitHubCopilot::from_env()
+}
+
+pub fn oauth() -> GitHubCopilotOAuthProvider {
+    crate::oauth::github_copilot_oauth_provider()
+}
+
+pub fn base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
+    crate::oauth::get_github_copilot_base_url(token, enterprise_domain)
+}
+
+pub fn base_url_for_credentials(credentials: &OAuthCredentials) -> String {
+    base_url(
+        Some(&credentials.access),
+        crate::oauth::github_copilot_enterprise_domain(credentials),
+    )
+}
+
+pub async fn get_oauth_api_key(credentials: &OAuthCredentials) -> Result<OAuthApiKey> {
+    let credentials = if crate::utils::time::now_millis() >= credentials.expires {
+        oauth().refresh_token(credentials).await?
+    } else {
+        credentials.clone()
+    };
+    let api_key = oauth().get_api_key(&credentials);
+    Ok(OAuthApiKey {
+        new_credentials: credentials,
+        api_key,
+    })
 }
 
 #[cfg(test)]

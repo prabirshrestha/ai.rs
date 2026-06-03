@@ -754,9 +754,30 @@ drive the login UI from your application.
 
 ### Using OAuth Tokens
 
-Use `get_oauth_api_key` or the OAuth provider's `get_api_key` method to turn
-stored credentials into the API key used by provider builders or stream
-options.
+Use provider-specific helpers to turn stored credentials into the API key used
+by provider builders or stream options. For GitHub Copilot, the helper refreshes
+expired credentials and returns `new_credentials`; persist those back to your
+auth store.
+
+```rust
+use ai::{providers::github_copilot, OAuthCredentials, Result};
+
+async fn provider_from_stored_credentials(
+    credentials: OAuthCredentials,
+) -> Result<github_copilot::GitHubCopilot> {
+    let oauth_key = github_copilot::get_oauth_api_key(&credentials).await?;
+
+    // Persist oauth_key.new_credentials here.
+
+    github_copilot::builder()
+        .api_key(oauth_key.api_key)
+        .base_url(github_copilot::base_url_for_credentials(
+            &oauth_key.new_credentials,
+        ))
+        .responses()
+        .build()
+}
+```
 
 ### Provider Notes
 

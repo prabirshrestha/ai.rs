@@ -41,11 +41,11 @@ pub use oauth::{
     OAuthLoginCallbacks, OAuthManualCodeInputCallback, OAuthPrompt, OAuthProvider, OAuthProviderId,
     OAuthProviderInfo, OAuthProviderInterface, OAuthSelectCallback, OAuthSelectOption,
     OAuthSelectPrompt, anthropic_oauth_provider, exchange_anthropic_authorization_code,
-    get_github_copilot_base_url, get_oauth_api_key, get_oauth_provider,
-    get_oauth_provider_info_list, get_oauth_providers, github_copilot_oauth_provider,
-    login_anthropic, login_github_copilot, modify_github_copilot_models, normalize_domain,
-    poll_oauth_device_code_flow, refresh_anthropic_token, refresh_github_copilot_token,
-    refresh_oauth_token, register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
+    get_oauth_provider, get_oauth_provider_info_list, get_oauth_providers,
+    github_copilot_oauth_provider, login_anthropic, login_github_copilot,
+    modify_github_copilot_models, normalize_domain, poll_oauth_device_code_flow,
+    refresh_anthropic_token, refresh_github_copilot_token, refresh_oauth_token,
+    register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
 pub use provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 pub use providers::anthropic::{
