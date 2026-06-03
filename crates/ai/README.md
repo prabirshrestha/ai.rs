@@ -167,23 +167,16 @@ Use `openai::from_env()` for OpenAI Responses. Use `openai::builder()` when
 selecting Chat Completions or an OpenAI-compatible endpoint.
 
 ```rust
-use ai::{
-    providers::{anthropic, openai},
-    Result,
-};
+use ai::providers::{anthropic, openai};
 
-fn providers() -> Result<()> {
-    let openai_responses = openai::from_env()?;
+let openai_responses = openai::from_env()?;
 
-    let openai_chat = openai::builder()
-        .base_url("http://localhost:11434/v1")
-        .chat_completions()
-        .build()?;
+let openai_chat = openai::builder()
+    .base_url("http://localhost:11434/v1")
+    .chat_completions()
+    .build()?;
 
-    let anthropic = anthropic::from_env()?;
-
-    Ok(())
-}
+let anthropic = anthropic::from_env()?;
 ```
 
 ### Dynamic Provider Choice
