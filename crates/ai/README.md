@@ -766,11 +766,9 @@ use ai::{
 async fn main() -> Result<()> {
     let anthropic = anthropic::from_env()?;
     let model = anthropic.model("claude-sonnet-4-5").build()?;
-    let context = AgentContext {
-        system_prompt: "You are a helpful assistant.".to_string(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
+    let context = AgentContext::builder()
+        .system_prompt("You are a helpful assistant.")
+        .build();
     let config = AgentLoopConfig::new(model);
     let prompts = vec![Message::user_text("Hello!")];
 

@@ -109,11 +109,9 @@ use ai::{
 async fn main() -> Result<()> {
     let anthropic = anthropic::from_env()?;
     let model = anthropic.model("claude-sonnet-4-5").build()?;
-    let context = AgentContext {
-        system_prompt: "You are a concise coding assistant.".to_string(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
+    let context = AgentContext::builder()
+        .system_prompt("You are a concise coding assistant.")
+        .build();
 
     let mut events = agent_loop(
         vec![Message::user_text("Explain ownership in one paragraph.")],

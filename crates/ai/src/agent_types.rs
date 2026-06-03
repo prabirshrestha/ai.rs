@@ -79,7 +79,7 @@ pub trait AgentTool: Send + Sync {
 
 pub type DynAgentTool = Arc<dyn AgentTool>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgentContext {
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
@@ -87,6 +87,10 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    pub fn builder() -> AgentContextBuilder {
+        AgentContextBuilder::default()
+    }
+
     pub fn llm_context(&self) -> Context {
         Context {
             system_prompt: Some(self.system_prompt.clone()),
@@ -98,6 +102,42 @@ impl AgentContext {
                 .collect(),
             tools: self.tools.iter().map(|tool| tool.definition()).collect(),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct AgentContextBuilder {
+    context: AgentContext,
+}
+
+impl AgentContextBuilder {
+    pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.context.system_prompt = system_prompt.into();
+        self
+    }
+
+    pub fn message(mut self, message: AgentMessage) -> Self {
+        self.context.messages.push(message);
+        self
+    }
+
+    pub fn messages(mut self, messages: impl IntoIterator<Item = AgentMessage>) -> Self {
+        self.context.messages.extend(messages);
+        self
+    }
+
+    pub fn tool(mut self, tool: DynAgentTool) -> Self {
+        self.context.tools.push(tool);
+        self
+    }
+
+    pub fn tools(mut self, tools: impl IntoIterator<Item = DynAgentTool>) -> Self {
+        self.context.tools.extend(tools);
+        self
+    }
+
+    pub fn build(self) -> AgentContext {
+        self.context
     }
 }
 
@@ -325,4 +365,66 @@ pub fn user_message(text: impl Into<String>, images: Vec<ImageContent>) -> Agent
         content: crate::UserMessageContent::Parts(content),
         timestamp: crate::utils::time::now_millis(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    struct TestTool;
+
+    #[async_trait]
+    impl AgentTool for TestTool {
+        fn definition(&self) -> Tool {
+            Tool::builder("echo")
+                .description("Echo a value.")
+                .parameters(json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    }
+                }))
+                .build()
+                .expect("tool")
+        }
+
+        fn label(&self) -> &str {
+            "Echo"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> AgentResult<AgentToolResult> {
+            Ok(AgentToolResult::text("ok"))
+        }
+    }
+
+    #[test]
+    fn agent_context_builder_collects_messages_and_tools() {
+        let tool: DynAgentTool = Arc::new(TestTool);
+        let context = AgentContext::builder()
+            .system_prompt("You are concise.")
+            .message(Message::user_text("Hello"))
+            .tool(tool)
+            .build();
+
+        assert_eq!(context.system_prompt, "You are concise.");
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.tools.len(), 1);
+
+        let llm_context = context.llm_context();
+        assert_eq!(
+            llm_context.system_prompt.as_deref(),
+            Some("You are concise.")
+        );
+        assert_eq!(llm_context.messages.len(), 1);
+        assert_eq!(llm_context.tools.len(), 1);
+        assert_eq!(llm_context.tools[0].name, "echo");
+    }
 }

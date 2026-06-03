@@ -28,6 +28,8 @@ Provider builders stay explicit:
 For OpenAI-compatible endpoints that do not use auth, omit `.api_key(...)`.
 OpenAI supports `.responses()` and `.chat_completions()`. `from_env()` defaults
 to Responses. Tools support struct literals and `Tool::builder(...)`.
+Agent loops should use `AgentContext::builder()` for quickstarts instead of
+struct literals.
 Do not use `register_faux_provider()` as the provider API design; keep it only
 as temporary legacy test support until tests move to provider handles.
 
