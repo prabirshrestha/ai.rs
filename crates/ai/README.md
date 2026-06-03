@@ -782,25 +782,17 @@ cargo add ai
 ### Agent Quick Start
 
 ```rust
-use futures::StreamExt;
-
-use ai::{
-    agent_loop, providers::anthropic, AgentContext, AgentEvent, AgentLoopConfig,
-    AssistantMessageEvent, Message, Result,
-};
+use ai::{providers::anthropic, Agent, AgentEvent, AgentOptions, AssistantMessageEvent, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let anthropic = anthropic::from_env()?;
     let model = anthropic.model("claude-sonnet-4-5").build()?;
-    let context = AgentContext::builder()
-        .system_prompt("You are a helpful assistant.")
-        .build();
-    let config = AgentLoopConfig::new(model);
-    let prompts = vec![Message::user_text("Hello!")];
+    let agent = Agent::new(AgentOptions::new(model));
 
-    let mut events = agent_loop(prompts, context, config, None, None);
-    while let Some(event) = events.next().await {
+    agent.set_system_prompt("You are a helpful assistant.").await;
+
+    let _subscription = agent.subscribe(async |event, _cancellation_token| {
         if let AgentEvent::MessageUpdate {
             assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
             ..
@@ -808,7 +800,11 @@ async fn main() -> Result<()> {
         {
             print!("{delta}");
         }
-    }
+
+        Ok(())
+    });
+
+    agent.prompt_text("Hello!", Vec::new()).await?;
 
     Ok(())
 }
@@ -923,6 +919,24 @@ means no more loop events will be emitted, but `wait_for_idle` and
 - `options`: transport, retry, cancellation, payload hooks, provider options,
   thinking budgets, and API key defaults.
 
+```rust
+use ai::{Agent, AgentOptions, AgentState, ModelThinkingLevel, ToolExecutionMode};
+
+let agent = Agent::new(AgentOptions {
+    initial_state: AgentState {
+        system_prompt: "You are a helpful assistant.".to_string(),
+        model,
+        thinking_level: ModelThinkingLevel::Medium,
+        tools,
+        messages,
+        ..AgentState::default()
+    },
+    tool_execution: ToolExecutionMode::Parallel,
+    session_id: Some("session-123".to_string()),
+    ..AgentOptions::default()
+});
+```
+
 ### Agent State
 
 `AgentState` contains the system prompt, active model, thinking level, tools,
@@ -952,11 +966,32 @@ Use the state and option mutation helpers to update system prompt, model,
 thinking level, tools, messages, session ID, queues, hooks, and tool execution
 mode. `reset` returns the agent to its initial state.
 
+```rust
+agent.set_system_prompt("New prompt").await;
+agent.set_model(model).await;
+agent.set_thinking_level(ModelThinkingLevel::Medium).await;
+agent.set_tools(tools).await;
+agent.set_tool_execution(ToolExecutionMode::Sequential).await;
+agent.set_messages(new_messages).await;
+agent.push_message(message).await;
+agent.reset().await;
+```
+
 #### Session and Thinking Budgets
 
 `AgentOptions::session_id` is forwarded to providers that support prompt-cache
 or session affinity behavior. `AgentOptions::options.thinking_budgets` is
 applied by the simple-stream option builder before each model call.
+
+```rust
+agent.set_session_id(Some("session-123".to_string())).await;
+agent.set_thinking_budgets(Some(ThinkingBudgets {
+    minimal: Some(128),
+    low: Some(512),
+    medium: Some(1024),
+    high: Some(2048),
+}));
+```
 
 #### Control
 
@@ -1026,6 +1061,47 @@ converted `Context`, and `SimpleStreamOptions`.
 Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
 `run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
 loop directly.
+
+```rust
+use futures::StreamExt;
+
+use ai::{
+    agent_loop, agent_loop_continue, providers::openai, AgentContext, AgentLoopConfig, Message,
+    Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+
+    let context = AgentContext::builder()
+        .system_prompt("You are helpful.")
+        .build();
+    let config = AgentLoopConfig::new(model);
+    let user_message = Message::user_text("Hello");
+
+    let mut events = agent_loop(
+        vec![user_message.clone()],
+        context.clone(),
+        config.clone(),
+        None,
+        None,
+    );
+    while let Some(event) = events.next().await {
+        println!("{event:?}");
+    }
+
+    let mut context = context;
+    context.messages.push(user_message);
+    let mut events = agent_loop_continue(context, config, None, None)?;
+    while let Some(event) = events.next().await {
+        println!("{event:?}");
+    }
+
+    Ok(())
+}
+```
 
 Low-level streams are observational. They preserve event order, but they do not
 wait for async event handling to settle before later producer phases continue.
