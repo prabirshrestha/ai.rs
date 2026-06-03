@@ -28,6 +28,7 @@ pub type AgentPrepareNextTurnFn = Arc<
         + Sync,
 >;
 
+#[must_use = "keep the subscription alive while the listener should stay registered"]
 pub struct AgentSubscription {
     listeners: Arc<SyncMutex<Vec<AgentEventListener>>>,
     listener: Option<AgentEventListener>,
@@ -35,6 +36,10 @@ pub struct AgentSubscription {
 
 impl AgentSubscription {
     pub fn unsubscribe(mut self) -> bool {
+        self.remove()
+    }
+
+    fn remove(&mut self) -> bool {
         let Some(listener) = self.listener.take() else {
             return false;
         };
@@ -48,6 +53,12 @@ impl AgentSubscription {
         } else {
             false
         }
+    }
+}
+
+impl Drop for AgentSubscription {
+    fn drop(&mut self) {
+        self.remove();
     }
 }
 
@@ -1146,6 +1157,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_unsubscribe_when_subscription_is_dropped() {
+        let agent = Agent::new(AgentOptions {
+            stream_fn: Some(immediate_stream_fn("ok")),
+            ..AgentOptions::default()
+        });
+        let event_count = Arc::new(AtomicUsize::new(0));
+
+        let subscription = agent.subscribe({
+            let event_count = Arc::clone(&event_count);
+            move |_event, _token| {
+                let event_count = Arc::clone(&event_count);
+                async move {
+                    event_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        });
+        drop(subscription);
+
+        agent.prompt_text("hello", Vec::new()).await.unwrap();
+
+        assert_eq!(event_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn should_support_steering_message_queue() {
         let agent = Agent::default();
         let message = user_message("Steering message", Vec::new());
@@ -1185,7 +1221,7 @@ mod tests {
         let barrier = Arc::new(tokio::sync::Notify::new());
         let listener_finished = Arc::new(StdMutex::new(false));
 
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let barrier = Arc::clone(&barrier);
             let listener_finished = Arc::clone(&listener_finished);
             move |event, _token| {
@@ -1225,7 +1261,7 @@ mod tests {
         }));
         let barrier = Arc::new(tokio::sync::Notify::new());
 
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let barrier = Arc::clone(&barrier);
             move |event, _token| {
                 let barrier = Arc::clone(&barrier);
@@ -1270,7 +1306,7 @@ mod tests {
         }));
         let received_token = Arc::new(StdMutex::new(None));
 
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let received_token = Arc::clone(&received_token);
             move |event, token| {
                 let received_token = Arc::clone(&received_token);
@@ -1311,7 +1347,7 @@ mod tests {
             ..AgentOptions::default()
         });
         let events = Arc::new(StdMutex::new(Vec::new()));
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let events = Arc::clone(&events);
             move |event, _token| {
                 let events = Arc::clone(&events);
@@ -1606,7 +1642,7 @@ mod tests {
         }));
 
         let pending_during_events = Arc::new(StdMutex::new(Vec::new()));
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let pending_during_events = Arc::clone(&pending_during_events);
             let agent = Arc::clone(&agent);
             move |event, _token| {
@@ -1722,7 +1758,7 @@ mod tests {
             ..AgentOptions::default()
         });
         let events = Arc::new(StdMutex::new(Vec::new()));
-        agent.subscribe({
+        let _subscription = agent.subscribe({
             let events = Arc::clone(&events);
             move |event, _token| {
                 let events = Arc::clone(&events);
