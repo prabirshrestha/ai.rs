@@ -31,6 +31,13 @@ to Responses. Tools support struct literals and `Tool::builder(...)`.
 Do not use `register_faux_provider()` as the provider API design; keep it only
 as temporary legacy test support until tests move to provider handles.
 
+## Future Images
+
+Image generation is not in scope for the current implementation. When it is
+added, match Pi naming: use `images(model, context, options?)` with image model
+and image context types. Do not introduce `generate_images(...)` unless Pi
+changes its API.
+
 ## Stream Direction
 
 Do not preserve `stream.result().await`. Main already returns a normal fallible
