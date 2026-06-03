@@ -44,7 +44,7 @@ impl OpenAi {
             .ok()
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
-        Self::builder().api_key(api_key).build()
+        Self::builder().api_key(Some(api_key.as_str())).build()
     }
 
     pub fn model(&self, id: &str) -> ModelBuilder {
@@ -68,6 +68,7 @@ impl Provider for OpenAi {
         let runtime = Arc::new(OpenAiLanguageModelApi {
             api: self.api,
             api_key: self.api_key.clone(),
+            allow_missing_api_key: self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL,
             http_client: self.http_client.clone(),
         });
         let mut builder = ModelBuilder::new(&self.provider_id, id, runtime)
@@ -104,8 +105,8 @@ impl OpenAiBuilder {
         self
     }
 
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
+    pub fn api_key(mut self, api_key: Option<&str>) -> Self {
+        self.api_key = Some(api_key.unwrap_or_default().to_string());
         self
     }
 
@@ -153,6 +154,7 @@ impl OpenAiBuilder {
 struct OpenAiLanguageModelApi {
     api: OpenAiApi,
     api_key: Option<String>,
+    allow_missing_api_key: bool,
     http_client: Option<reqwest::Client>,
 }
 
@@ -163,7 +165,11 @@ impl OpenAiLanguageModelApi {
             .as_deref()
             .is_none_or(|api_key| api_key.trim().is_empty())
         {
-            options.api_key = self.api_key.clone();
+            if let Some(api_key) = &self.api_key {
+                options.api_key = Some(api_key.clone());
+            } else if self.allow_missing_api_key {
+                options.api_key = Some(String::new());
+            }
         }
         if options.http_client.is_none() {
             options.http_client = self.http_client.clone();
@@ -251,5 +257,20 @@ mod tests {
         assert!(
             matches!(error, crate::Error::MissingApiKey(provider) if provider == "test-openai-runtime")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compatible_base_url_allows_no_auth_by_default() {
+        let openai = builder()
+            .provider_id("ollama")
+            .base_url("http://127.0.0.1:9/v1")
+            .chat_completions()
+            .build()
+            .expect("provider");
+        let model = openai.model("gemma3").build().expect("model");
+
+        let stream = crate::stream_simple(model, Context::default(), None);
+
+        assert!(stream.is_ok());
     }
 }

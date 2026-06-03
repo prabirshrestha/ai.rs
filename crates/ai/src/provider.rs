@@ -153,7 +153,7 @@ mod tests {
     fn dyn_provider_can_build_and_clone_language_models() {
         let provider: Box<dyn Provider> = Box::new(
             openai::builder()
-                .api_key("test-key")
+                .api_key(Some("test-key"))
                 .chat_completions()
                 .build()
                 .expect("provider"),

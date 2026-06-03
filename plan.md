@@ -18,15 +18,18 @@ async fn main() -> Result<()> {
         .message(Message::user_text("What is Rust ownership?"))
         .build();
     let message = complete_simple(model, context, None).await?;
-    println!("{}", message.text());
+    println!("{message:?}");
     Ok(())
 }
 ```
 
 Provider builders stay explicit:
-`openai::builder().api_key(...).base_url(...).chat_completions().build()?`.
+`openai::builder().api_key(Some("...")).base_url(...).chat_completions().build()?`.
+For OpenAI-compatible endpoints that do not use auth, omit `.api_key(...)`.
 OpenAI supports `.responses()` and `.chat_completions()`. `from_env()` defaults
 to Responses. Tools support struct literals and `Tool::builder(...)`.
+Do not use `register_faux_provider()` as the provider API design; keep it only
+as temporary legacy test support until tests move to provider handles.
 
 ## Stream Direction
 

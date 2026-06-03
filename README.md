@@ -28,15 +28,31 @@ Provider handles are available for OpenAI, Anthropic, and GitHub Copilot. Use
 `providers::openai::builder()` for OpenAI-compatible endpoints such as Ollama,
 vLLM, and Azure Foundry.
 
+### Complete
+
+```rust
+use ai::{complete_simple, providers::openai, Context, Message, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+    let context = Context::builder()
+        .message(Message::user_text("Write a haiku about Rust."))
+        .build();
+
+    let message = complete_simple(model, context, None).await?;
+    println!("{message:?}");
+    Ok(())
+}
+```
+
 ### Streaming
 
 ```rust
 use futures::StreamExt;
 
-use ai::{
-    providers::openai, stream_simple, AssistantMessage, AssistantMessageEvent, Context, Message,
-    Result,
-};
+use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,22 +63,34 @@ async fn main() -> Result<()> {
         .build();
 
     let mut events = stream_simple(model, context, None)?;
-    let mut final_message: Option<AssistantMessage> = None;
-
     while let Some(event) = events.next().await {
-        match event? {
-            AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
-            AssistantMessageEvent::Done { message, .. }
-            | AssistantMessageEvent::Error { error: message, .. } => {
-                final_message = Some(message);
-            }
-            _ => {}
+        if let AssistantMessageEvent::TextDelta { delta, .. } = event? {
+            print!("{delta}");
         }
     }
 
-    let message = final_message.ok_or(ai::Error::StreamClosed)?;
-    println!("\n\nused {} output tokens", message.usage.output);
+    Ok(())
+}
+```
 
+### OpenAI-Compatible Endpoint
+
+```rust
+use ai::{complete_simple, providers::openai, Context, Message, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::builder()
+        .base_url("http://localhost:11434/v1")
+        .chat_completions()
+        .build()?;
+    let model = openai.model("gemma3").build()?;
+    let context = Context::builder()
+        .message(Message::user_text("Tell me a short joke."))
+        .build();
+
+    let message = complete_simple(model, context, None).await?;
+    println!("{message:?}");
     Ok(())
 }
 ```

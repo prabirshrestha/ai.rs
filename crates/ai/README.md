@@ -114,87 +114,107 @@ features. The examples also use `futures::StreamExt` for stream iteration and
 ## Quick Start
 
 ```rust
-use futures::StreamExt;
-use serde_json::json;
-
-use ai::{
-    complete, providers::openai, stream, AssistantContent, AssistantMessageEvent, Context,
-    Message, Result, Tool, ToolResultContent, ToolResultMessage,
-};
+use ai::{complete_simple, providers::openai, Context, Message, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let openai = openai::from_env()?;
     let model = openai.model("gpt-5.5").build()?;
 
-    let capital_tool = Tool::builder("lookup_capital")
-        .description("Look up the capital city for a country.")
-        .parameters(json!({
-            "type": "object",
-            "properties": {
-                "country": { "type": "string" }
-            },
-            "required": ["country"]
-        }))
-        .build()?;
-
-    let mut context = Context::builder()
+    let context = Context::builder()
         .system_prompt("You are a helpful assistant.")
         .message(Message::user_text("What is the capital of France?"))
-        .tool(capital_tool)
         .build();
 
-    let mut events = stream(model.clone(), context.clone(), None)?;
+    let message = complete_simple(model, context, None).await?;
+    println!("{message:?}");
+    Ok(())
+}
+```
 
-    let mut final_message = None;
+### Streaming
+
+Use `stream_simple` when the UI should update as tokens arrive. The
+`futures::StreamExt` import is only needed for `.next().await`.
+
+```rust
+use futures::StreamExt;
+
+use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+    let context = Context::builder()
+        .message(Message::user_text("Write a haiku about Rust."))
+        .build();
+
+    let mut events = stream_simple(model, context, None)?;
     while let Some(event) = events.next().await {
-        match event? {
-            AssistantMessageEvent::Start { partial } => {
-                println!("starting with {}", partial.model.id);
-            }
-            AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
-            AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
-                println!("tool: {}({})", tool_call.name, tool_call.arguments);
-            }
-            AssistantMessageEvent::Done { reason, message } => {
-                println!("\nfinished: {reason:?}");
-                final_message = Some(message);
-            }
-            AssistantMessageEvent::Error { error, .. } => {
-                eprintln!("{error:?}");
-                final_message = Some(error);
-            }
-            _ => {}
+        if let AssistantMessageEvent::TextDelta { delta, .. } = event? {
+            print!("{delta}");
         }
     }
 
-    let final_message = final_message.ok_or(ai::Error::StreamClosed)?;
-    context.messages.push(Message::Assistant(final_message.clone()));
+    Ok(())
+}
+```
 
-    let mut tool_calls = 0;
-    for block in final_message.content {
-        match block {
-            AssistantContent::Text(text) => println!("{}", text.text),
-            AssistantContent::ToolCall(call) => {
-                tool_calls += 1;
-                context.messages.push(Message::ToolResult(ToolResultMessage {
-                    tool_call_id: call.id,
-                    tool_name: call.name,
-                    content: vec![ToolResultContent::text("Paris")],
-                    details: None,
-                    is_error: false,
-                    timestamp: 0,
-                }));
-            }
-            AssistantContent::Thinking(_) => {}
-        }
-    }
+### OpenAI-Compatible Endpoint
 
-    if tool_calls > 0 {
-        let continuation = complete(model, context, None).await?;
-        println!("continued with {} content block(s)", continuation.content.len());
-    }
+Use the OpenAI provider handle for local servers and compatible endpoints by
+configuring the base URL explicitly.
 
+```rust
+use ai::{complete_simple, providers::openai, Context, Message, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::builder()
+        .base_url("http://localhost:11434/v1")
+        .chat_completions()
+        .build()?;
+    let model = openai.model("gemma3").build()?;
+    let context = Context::builder()
+        .message(Message::user_text("Tell me a short joke."))
+        .build();
+
+    let message = complete_simple(model, context, None).await?;
+    println!("{message:?}");
+    Ok(())
+}
+```
+
+### Dynamic Provider Choice
+
+Provider handles are trait objects when the application wants to choose a
+backend at runtime.
+
+```rust
+use ai::{complete_simple, providers::openai, Context, Message, Provider, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let (provider, model_id): (Box<dyn Provider>, &str) =
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            (Box::new(openai::from_env()?), "gpt-5.5")
+        } else {
+            let local = openai::builder()
+                .provider_id("ollama")
+                .base_url("http://localhost:11434/v1")
+                .chat_completions()
+                .build()?;
+            (Box::new(local), "gemma3")
+        };
+
+    let model = provider.model(model_id).build()?;
+    let context = Context::builder()
+        .message(Message::user_text("Summarize Rust ownership."))
+        .build();
+
+    let message = complete_simple(model, context, None).await?;
+    println!("{message:?}");
     Ok(())
 }
 ```
@@ -444,8 +464,13 @@ or message identifier when the underlying API exposes one.
 
 ## Error Handling
 
-Provider errors are surfaced as `AssistantMessageEvent::Error` while streaming
-and as `Error` values from the `complete_*` helpers.
+Setup failures before a stream exists are returned as `Error` values. Once a
+provider stream exists, provider-declared failures and cancellation are
+surfaced as terminal `AssistantMessageEvent::Error` events carrying the final
+assistant message. The `complete_*` helpers return that final assistant message;
+check `message.stop_reason` for `StopReason::Error` or `StopReason::Aborted`.
+Transport or decoder failures that cannot be represented as provider messages
+still return `Err`.
 
 ### Aborting Requests
 
@@ -483,62 +508,15 @@ hooks are supported by `stream`, `complete`, `stream_simple`, and
 
 ## APIs, Models, and Providers
 
-The crate uses a registry of API implementations. Built-in APIs include:
+Provider handles build executable models. Built-in language model APIs include:
 
 - **`anthropic-messages`**: Anthropic Messages API
 - **`openai-completions`**: OpenAI Chat Completions API
 - **`openai-responses`**: OpenAI Responses API
 
-### Faux provider for tests
-
-`register_faux_provider()` registers a temporary in-memory provider for tests
-and demos. It is opt-in and not part of the built-in provider set.
-
-```rust
-use ai::{
-    complete, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
-    register_faux_provider, Context, Message,
-};
-
-let registration = register_faux_provider(None);
-let model = registration.get_model();
-let mut context = Context {
-    messages: vec![Message::user_text("Summarize package.json and then call echo")],
-    ..Default::default()
-};
-
-registration.set_responses([faux_assistant_message(
-    vec![
-        faux_thinking("Need to inspect package metadata first."),
-        faux_tool_call("echo", serde_json::json!({ "text": "package.json" })),
-    ],
-    None,
-)]);
-
-let first = complete(model.clone(), context.clone(), None).await?;
-context.messages.push(Message::Assistant(first));
-
-registration.set_responses([faux_assistant_message(
-    vec![faux_text("Here is the summary.")],
-    None,
-)]);
-
-println!("{}", registration.get_pending_response_count());
-registration.unregister();
-```
-
-Notes:
-
-- Responses are consumed from a queue in request start order.
-- If the queue is empty, the faux provider returns an assistant error message.
-- Use `set_responses` to replace the queue and `append_responses` to add more.
-- `registration.models` exposes all registered faux models.
-- `registration.get_model()` returns the first model, and
-  `registration.get_model_by_id(id)` returns a specific model.
-- Use `faux_assistant_message`, `faux_text`, `faux_thinking`, and
-  `faux_tool_call` to build scripted replies.
-- `registration.unregister()` removes the temporary provider from internal
-  test dispatch.
+`register_faux_provider()` is legacy support for the crate's own unit tests.
+New application code should prefer provider handles and custom provider
+implementations instead of registering global providers.
 
 ### Providers and Models
 
@@ -582,7 +560,7 @@ use ai::{
 
 let provider = openai::builder()
     .provider_id("azure-foundry")
-    .api_key("...")
+    .api_key(Some("..."))
     .base_url("https://example.services.ai.azure.com/openai/v1")
     .chat_completions()
     .build()?;
@@ -747,8 +725,9 @@ drive the login UI from your application.
 
 ### Using OAuth Tokens
 
-Use `get_oauth_api_key` or the provider's `get_api_key` method to turn stored
-credentials into the API key used by stream options.
+Use `get_oauth_api_key` or the OAuth provider's `get_api_key` method to turn
+stored credentials into the API key used by provider builders or stream
+options.
 
 ### Provider Notes
 
@@ -912,7 +891,6 @@ means no more loop events will be emitted, but `wait_for_idle` and
 - `steering_mode` and `follow_up_mode`: queue handling behavior.
 - `stream_fn`: custom stream function for proxy backends.
 - `session_id`: forwarded through `SimpleStreamOptions`.
-- `get_api_key`: dynamic API key resolution for expiring OAuth tokens.
 - `tool_execution`: parallel or sequential tool execution.
 - `before_tool_call` and `after_tool_call`: preflight and postprocess hooks.
 - `prepare_next_turn`: updates context, model, or thinking level before another

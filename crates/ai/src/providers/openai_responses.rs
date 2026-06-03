@@ -45,12 +45,7 @@ pub fn stream_simple_openai_responses(
     context: Context,
     options: SimpleStreamOptions,
 ) -> crate::Result<crate::AssistantEventStream> {
-    let api_key = options
-        .stream
-        .api_key
-        .clone()
-        .filter(|key| !key.trim().is_empty());
-    let Some(api_key) = api_key else {
+    let Some(api_key) = options.stream.api_key.clone() else {
         return Err(crate::Error::MissingApiKey(model.provider));
     };
     let base = build_base_options(&model, &options, api_key);
@@ -145,12 +140,7 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let Some(api_key) = options
-        .base
-        .api_key
-        .clone()
-        .filter(|key| !key.trim().is_empty())
-    else {
+    let Some(api_key) = options.base.api_key.clone() else {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
