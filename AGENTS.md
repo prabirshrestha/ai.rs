@@ -55,6 +55,9 @@ provider is intentionally in scope.
 
 ## Development Notes
 
+- Use semantic/conventional commit messages, such as `feat: add provider`,
+  `fix: handle stream errors`, `docs: update README`, or
+  `chore: update lockfile`.
 - Keep public behavior aligned with the existing Rust API shape before adding
   new abstractions.
 - Add or update tests for provider payload changes, stream event ordering,
