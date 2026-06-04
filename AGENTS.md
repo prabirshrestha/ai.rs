@@ -49,7 +49,8 @@ control.
 
 The active built-in provider scope is OpenAI, Anthropic, and GitHub Copilot.
 Azure Foundry and other compatible endpoints should be documented and tested as
-custom `Model` values with explicit `base_url`, headers, and `compat` settings.
+configured provider handles, such as `providers::openai::builder()` plus
+`provider.model(...).base_url(...).headers(...).compat(...)`.
 Do not add broad provider autodetection by provider name or base URL unless that
 provider is intentionally in scope.
 

@@ -1,11 +1,11 @@
 pub mod anthropic;
 pub mod faux;
 pub mod github_copilot;
-pub mod github_copilot_headers;
+pub(crate) mod github_copilot_headers;
 pub mod openai;
 pub mod openai_completions;
-pub mod openai_prompt_cache;
+pub(crate) mod openai_prompt_cache;
 pub mod openai_responses;
 pub mod register_builtins;
-pub mod simple_options;
-pub mod transform_messages;
+pub(crate) mod simple_options;
+pub(crate) mod transform_messages;

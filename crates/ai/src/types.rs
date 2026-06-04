@@ -824,7 +824,10 @@ impl std::fmt::Debug for Model {
             .field("cost", &self.cost)
             .field("context_window", &self.context_window)
             .field("max_tokens", &self.max_tokens)
-            .field("headers", &self.headers)
+            .field(
+                "headers",
+                &(!self.headers.is_empty()).then_some("<redacted>"),
+            )
             .field("compat", &self.compat)
             .finish()
     }

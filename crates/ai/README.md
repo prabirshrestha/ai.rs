@@ -1065,7 +1065,7 @@ let subscription = agent.subscribe(|event, cancellation_token| async move {
 subscription.unsubscribe();
 ```
 
-Keep the subscription handle alive while the listener should receive events.
+Keep the subscription handle alive while the listener remains registered.
 Dropping the handle also unsubscribes.
 
 ### Steering and Follow-up

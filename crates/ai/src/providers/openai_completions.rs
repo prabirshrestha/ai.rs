@@ -31,24 +31,24 @@ pub struct OpenAICompletionsOptions {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedOpenAICompletionsCompat {
-    pub supports_store: bool,
-    pub supports_developer_role: bool,
-    pub supports_reasoning_effort: bool,
-    pub supports_usage_in_streaming: bool,
-    pub max_tokens_field: MaxTokensField,
-    pub requires_tool_result_name: bool,
-    pub requires_assistant_after_tool_result: bool,
-    pub requires_thinking_as_text: bool,
-    pub requires_reasoning_content_on_assistant_messages: bool,
-    pub thinking_format: OpenAIThinkingFormat,
-    pub open_router_routing: Option<Value>,
-    pub vercel_gateway_routing: Option<Value>,
-    pub zai_tool_stream: bool,
-    pub supports_strict_mode: bool,
-    pub cache_control_format: Option<CacheControlFormat>,
-    pub send_session_affinity_headers: bool,
-    pub supports_long_cache_retention: bool,
+struct ResolvedOpenAICompletionsCompat {
+    supports_store: bool,
+    supports_developer_role: bool,
+    supports_reasoning_effort: bool,
+    supports_usage_in_streaming: bool,
+    max_tokens_field: MaxTokensField,
+    requires_tool_result_name: bool,
+    requires_assistant_after_tool_result: bool,
+    requires_thinking_as_text: bool,
+    requires_reasoning_content_on_assistant_messages: bool,
+    thinking_format: OpenAIThinkingFormat,
+    open_router_routing: Option<Value>,
+    vercel_gateway_routing: Option<Value>,
+    zai_tool_stream: bool,
+    supports_strict_mode: bool,
+    cache_control_format: Option<CacheControlFormat>,
+    send_session_affinity_headers: bool,
+    supports_long_cache_retention: bool,
 }
 
 pub fn stream_simple_openai_completions(
@@ -768,7 +768,7 @@ fn apply_reasoning_options(
     }
 }
 
-pub fn convert_messages(
+fn convert_messages(
     model: &Model,
     context: &Context,
     compat: &ResolvedOpenAICompletionsCompat,
