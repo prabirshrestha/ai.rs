@@ -28,7 +28,7 @@ pub type AgentPrepareNextTurnFn = Arc<
         + Sync,
 >;
 
-#[must_use = "keep the subscription alive while the listener should stay registered"]
+#[must_use = "keep the subscription alive while the listener remains registered"]
 pub struct AgentSubscription {
     listeners: Arc<SyncMutex<Vec<AgentEventListener>>>,
     listener: Option<AgentEventListener>,
