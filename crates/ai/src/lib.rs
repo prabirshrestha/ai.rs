@@ -2,7 +2,6 @@ pub mod agent;
 pub mod agent_error;
 pub mod agent_loop;
 pub mod agent_types;
-mod api_registry;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
@@ -62,8 +61,7 @@ pub use providers::openai::{OpenAi, OpenAiApi};
 pub use providers::openai_completions::OpenAICompletionsOptions;
 pub use providers::openai_responses::OpenAIResponsesOptions;
 pub use providers::register_builtins::{
-    register_builtin_api_providers, reset_api_providers, stream_anthropic,
-    stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
+    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
     stream_simple_openai_completions, stream_simple_openai_responses,
 };
 pub use session_resources::{

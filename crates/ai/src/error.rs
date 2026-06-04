@@ -26,9 +26,6 @@ pub enum Error {
         capability: &'static str,
     },
 
-    #[error("No API provider registered for api: {0}")]
-    NoApiProvider(String),
-
     #[error("provider returned HTTP {status}: {body}")]
     ApiStatus { status: StatusCode, body: String },
 

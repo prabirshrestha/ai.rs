@@ -1,99 +1,10 @@
-use std::sync::OnceLock;
-
-use crate::api_registry::{self, ApiProvider};
 use crate::providers::{anthropic, openai_completions, openai_responses};
-use crate::types::{Context, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions};
-use crate::{AssistantEventStream, Result};
+use crate::types::{ModelThinkingLevel, StreamOptions};
 use serde_json::Value;
 
 pub use anthropic::{stream_anthropic, stream_simple_anthropic};
 pub use openai_completions::{stream_openai_completions, stream_simple_openai_completions};
 pub use openai_responses::{stream_openai_responses, stream_simple_openai_responses};
-
-pub(crate) fn ensure_builtins_registered() {
-    static REGISTERED: OnceLock<()> = OnceLock::new();
-    REGISTERED.get_or_init(register_builtins);
-}
-
-pub fn register_builtin_api_providers() {
-    register_builtins();
-}
-
-pub fn reset_api_providers() {
-    api_registry::clear_api_providers();
-    register_builtins();
-}
-
-fn register_builtins() {
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "anthropic-messages".to_string(),
-            stream: api_registry::wrap_stream("anthropic-messages", |model, context, options| {
-                Ok(anthropic::stream_anthropic(
-                    model,
-                    context,
-                    anthropic_options_from_stream_options(options),
-                ))
-            }),
-            stream_simple: api_registry::wrap_stream_simple(
-                "anthropic-messages",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantEventStream> {
-                    anthropic::stream_simple_anthropic(model, context, options)
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "openai-completions".to_string(),
-            stream: api_registry::wrap_stream("openai-completions", |model, context, options| {
-                Ok(openai_completions::stream_openai_completions(
-                    model,
-                    context,
-                    openai_completions_options_from_stream_options(options),
-                ))
-            }),
-            stream_simple: api_registry::wrap_stream_simple(
-                "openai-completions",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantEventStream> {
-                    openai_completions::stream_simple_openai_completions(model, context, options)
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: "openai-responses".to_string(),
-            stream: api_registry::wrap_stream("openai-responses", |model, context, options| {
-                Ok(openai_responses::stream_openai_responses(
-                    model,
-                    context,
-                    openai_responses_options_from_stream_options(options),
-                ))
-            }),
-            stream_simple: api_registry::wrap_stream_simple(
-                "openai-responses",
-                |model: Model,
-                 context: Context,
-                 options: SimpleStreamOptions|
-                 -> Result<AssistantEventStream> {
-                    openai_responses::stream_simple_openai_responses(model, context, options)
-                },
-            ),
-        },
-        Some("builtin".to_string()),
-    );
-}
 
 pub(crate) fn openai_completions_options_from_stream_options(
     options: StreamOptions,

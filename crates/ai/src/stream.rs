@@ -1,7 +1,5 @@
 use crate::AssistantEventStream;
-use crate::api_registry::get_api_provider;
 use crate::env_api_keys::get_env_api_key;
-use crate::providers::register_builtins::ensure_builtins_registered;
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions, StreamOptions,
 };
@@ -32,16 +30,11 @@ pub fn stream(
     context: Context,
     options: Option<StreamOptions>,
 ) -> Result<AssistantEventStream> {
-    if let Some(api) = model.language_api() {
-        let options = with_env_api_key(&model, options.unwrap_or_default());
-        return api.stream(model, context, options);
-    }
-
-    ensure_builtins_registered();
-    let provider =
-        get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
+    let api = model
+        .language_api()
+        .ok_or_else(|| Error::unsupported_capability(model.provider.clone(), "language models"))?;
     let options = with_env_api_key(&model, options.unwrap_or_default());
-    (provider.stream)(model, context, options)
+    api.stream(model, context, options)
 }
 
 pub async fn complete(
@@ -57,16 +50,11 @@ pub fn stream_simple(
     context: Context,
     options: Option<SimpleStreamOptions>,
 ) -> Result<AssistantEventStream> {
-    if let Some(api) = model.language_api() {
-        let options = with_env_api_key_simple(&model, options.unwrap_or_default());
-        return api.stream_simple(model, context, options);
-    }
-
-    ensure_builtins_registered();
-    let provider =
-        get_api_provider(&model.api).ok_or_else(|| Error::NoApiProvider(model.api.clone()))?;
+    let api = model
+        .language_api()
+        .ok_or_else(|| Error::unsupported_capability(model.provider.clone(), "language models"))?;
     let options = with_env_api_key_simple(&model, options.unwrap_or_default());
-    (provider.stream_simple)(model, context, options)
+    api.stream_simple(model, context, options)
 }
 
 pub async fn complete_simple(
@@ -94,10 +82,7 @@ pub async fn final_message_from_stream(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::api_registry::{
-        ApiProvider, register_api_provider, unregister_api_providers, wrap_stream,
-        wrap_stream_simple,
-    };
+    use crate::provider::LanguageModelApi;
     use crate::types::{
         AssistantContent, AssistantMessageEvent, ModelCost, ModelInput, StopReason, TextContent,
         Usage,
@@ -131,7 +116,41 @@ mod tests {
         }
     }
 
-    fn test_model(api: &str) -> Model {
+    #[derive(Clone)]
+    struct TestLanguageModelApi {
+        api: &'static str,
+        observed_key: Arc<Mutex<Option<String>>>,
+    }
+
+    impl LanguageModelApi for TestLanguageModelApi {
+        fn id(&self) -> &str {
+            self.api
+        }
+
+        fn stream(
+            &self,
+            _model: Model,
+            _context: Context,
+            _options: StreamOptions,
+        ) -> Result<AssistantEventStream> {
+            panic!("stream should not be called")
+        }
+
+        fn stream_simple(
+            &self,
+            model: Model,
+            _context: Context,
+            options: SimpleStreamOptions,
+        ) -> Result<AssistantEventStream> {
+            *self
+                .observed_key
+                .lock()
+                .expect("observed key lock poisoned") = options.stream.api_key.clone();
+            Ok(done_stream(&model))
+        }
+    }
+
+    fn test_model(api: &str, language_api: Option<Arc<dyn LanguageModelApi>>) -> Model {
         Model {
             id: "mock".to_string(),
             name: "mock".to_string(),
@@ -143,6 +162,7 @@ mod tests {
             cost: ModelCost::default(),
             context_window: 8192,
             max_tokens: 2048,
+            language_api,
             ..Model::default()
         }
     }
@@ -181,28 +201,18 @@ mod tests {
             std::env::set_var("OPENAI_API_KEY", "env-openai-key");
         }
 
-        let source_id = "stream-env-key-test";
         let observed_key = Arc::new(Mutex::new(None));
-        register_api_provider(
-            ApiProvider {
-                api: "stream-env-key-test".to_string(),
-                stream: wrap_stream("stream-env-key-test", |_model, _context, _options| {
-                    panic!("stream should not be called")
-                }),
-                stream_simple: wrap_stream_simple("stream-env-key-test", {
-                    let observed_key = Arc::clone(&observed_key);
-                    move |model, _context, options| {
-                        *observed_key.lock().expect("observed key lock poisoned") =
-                            options.stream.api_key.clone();
-                        Ok(done_stream(&model))
-                    }
-                }),
-            },
-            Some(source_id.to_string()),
-        );
+        let api = Arc::new(TestLanguageModelApi {
+            api: "stream-env-key-test",
+            observed_key: Arc::clone(&observed_key),
+        });
 
-        let events = stream_simple(test_model("stream-env-key-test"), Context::default(), None)
-            .expect("stream_simple should dispatch");
+        let events = stream_simple(
+            test_model("stream-env-key-test", Some(api)),
+            Context::default(),
+            None,
+        )
+        .expect("stream_simple should dispatch");
         let _message = crate::stream::final_message_from_stream(events)
             .await
             .expect("stream result");
@@ -215,7 +225,6 @@ mod tests {
             Some("env-openai-key")
         );
 
-        unregister_api_providers(source_id);
         openai.restore();
     }
 
@@ -227,25 +236,11 @@ mod tests {
             std::env::set_var("OPENAI_API_KEY", "env-openai-key");
         }
 
-        let source_id = "stream-explicit-key-test";
         let observed_key = Arc::new(Mutex::new(None));
-        register_api_provider(
-            ApiProvider {
-                api: "stream-explicit-key-test".to_string(),
-                stream: wrap_stream("stream-explicit-key-test", |_model, _context, _options| {
-                    panic!("stream should not be called")
-                }),
-                stream_simple: wrap_stream_simple("stream-explicit-key-test", {
-                    let observed_key = Arc::clone(&observed_key);
-                    move |model, _context, options| {
-                        *observed_key.lock().expect("observed key lock poisoned") =
-                            options.stream.api_key.clone();
-                        Ok(done_stream(&model))
-                    }
-                }),
-            },
-            Some(source_id.to_string()),
-        );
+        let api = Arc::new(TestLanguageModelApi {
+            api: "stream-explicit-key-test",
+            observed_key: Arc::clone(&observed_key),
+        });
 
         let options = SimpleStreamOptions {
             stream: StreamOptions {
@@ -255,7 +250,7 @@ mod tests {
             ..Default::default()
         };
         let events = stream_simple(
-            test_model("stream-explicit-key-test"),
+            test_model("stream-explicit-key-test", Some(api)),
             Context::default(),
             Some(options),
         )
@@ -272,40 +267,23 @@ mod tests {
             Some("explicit-key")
         );
 
-        unregister_api_providers(source_id);
         openai.restore();
     }
 
     #[test]
-    fn stream_reports_unregistered_provider() {
-        let model = test_model("missing-api-provider-test");
+    fn stream_reports_model_without_language_api() {
+        let model = test_model("missing-api-provider-test", None);
         let error = match stream(model, Context::default(), None) {
             Ok(_) => panic!("expected missing provider error"),
             Err(error) => error,
         };
 
-        assert!(matches!(&error, Error::NoApiProvider(api) if api == "missing-api-provider-test"));
-        assert_eq!(
-            error.to_string(),
-            "No API provider registered for api: missing-api-provider-test"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn stream_simple_returns_missing_api_key_error_from_provider() {
-        let _guard = ENV_LOCK.lock().await;
-        let openai = SavedEnv::capture("OPENAI_API_KEY");
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-        crate::providers::register_builtins::register_builtin_api_providers();
-
-        let error = match stream_simple(test_model("openai-responses"), Context::default(), None) {
-            Ok(_) => panic!("missing API key should fail before stream creation"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, Error::MissingApiKey(provider) if provider == "openai"));
-
-        openai.restore();
+        assert!(matches!(
+            &error,
+            Error::UnsupportedCapability {
+                provider,
+                capability: "language models",
+            } if provider == "openai"
+        ));
     }
 }

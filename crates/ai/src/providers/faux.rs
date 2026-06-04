@@ -1,14 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::api_registry::{self, ApiProvider};
 use crate::event_stream::{AssistantEventStream, AssistantMessageEventStreamSender};
+use crate::provider::LanguageModelApi;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
     ImageContent, Message, Model, ModelCost, ModelInput, ProviderResponse, SimpleStreamOptions,
@@ -138,7 +138,7 @@ pub struct FauxProviderRegistration {
     pub models: Vec<Model>,
     pub state: FauxProviderState,
     pending_responses: Arc<Mutex<VecDeque<FauxResponseStep>>>,
-    source_id: String,
+    active: Arc<AtomicBool>,
 }
 
 impl FauxProviderRegistration {
@@ -188,7 +188,7 @@ impl FauxProviderRegistration {
     }
 
     pub fn unregister(&self) {
-        api_registry::unregister_api_providers(&self.source_id);
+        self.active.store(false, Ordering::SeqCst);
     }
 }
 
@@ -250,7 +250,6 @@ pub fn register_faux_provider(
     let provider = options
         .provider
         .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
-    let source_id = random_id("faux-provider");
     let token_size = options.token_size.unwrap_or_default();
     let min_token_size = std::cmp::max(
         1,
@@ -266,6 +265,18 @@ pub fn register_faux_provider(
     let pending_responses = Arc::new(Mutex::new(VecDeque::new()));
     let state = FauxProviderState::default();
     let prompt_cache = Arc::new(Mutex::new(HashMap::new()));
+    let active = Arc::new(AtomicBool::new(true));
+    let language_api: Arc<dyn LanguageModelApi> = Arc::new(FauxLanguageModelApi {
+        api: api.clone(),
+        provider: provider.clone(),
+        pending_responses: pending_responses.clone(),
+        state: state.clone(),
+        prompt_cache,
+        min_token_size,
+        max_token_size,
+        tokens_per_second: options.tokens_per_second,
+        active: active.clone(),
+    });
 
     let model_definitions = if options.models.is_empty() {
         vec![FauxModelDefinition {
@@ -297,90 +308,103 @@ pub fn register_faux_provider(
                 cost: definition.cost.unwrap_or_default(),
                 context_window: definition.context_window.unwrap_or(128_000),
                 max_tokens: definition.max_tokens.unwrap_or(16_384),
+                language_api: Some(language_api.clone()),
                 ..Model::default()
             }
         })
         .collect::<Vec<_>>();
-
-    let stream_pending_responses = pending_responses.clone();
-    let stream_prompt_cache = prompt_cache.clone();
-    let stream_state = state.clone();
-    let stream_api = api.clone();
-    let stream_provider = provider.clone();
-    let stream = Arc::new(
-        move |request_model: Model,
-              context: Context,
-              stream_options: StreamOptions|
-              -> Result<AssistantEventStream> {
-            if request_model.api != stream_api {
-                return Err(Error::UnsupportedApi(format!(
-                    "Mismatched api: {} expected {}",
-                    request_model.api, stream_api
-                )));
-            }
-
-            let (sender, output_stream) = crate::create_assistant_message_event_stream();
-            let step = stream_pending_responses
-                .lock()
-                .expect("faux response queue poisoned")
-                .pop_front();
-            stream_state.increment_call_count();
-
-            let context = context.clone();
-            let request_model_for_task = request_model.clone();
-            let stream_api = stream_api.clone();
-            let stream_provider = stream_provider.clone();
-            let stream_state = stream_state.clone();
-            let prompt_cache = stream_prompt_cache.clone();
-            tokio::spawn(async move {
-                stream_faux_response(
-                    sender,
-                    step,
-                    request_model_for_task,
-                    context,
-                    stream_options,
-                    stream_state,
-                    stream_api,
-                    stream_provider,
-                    min_token_size,
-                    max_token_size,
-                    options.tokens_per_second,
-                    prompt_cache,
-                )
-                .await;
-            });
-
-            Ok(output_stream)
-        },
-    );
-
-    let simple_stream = {
-        let stream = stream.clone();
-        Arc::new(
-            move |model: Model,
-                  context: Context,
-                  options: SimpleStreamOptions|
-                  -> Result<AssistantEventStream> {
-                stream(model, context, options.stream)
-            },
-        )
-    };
-
-    api_registry::register_api_provider(
-        ApiProvider {
-            api: api.clone(),
-            stream,
-            stream_simple: simple_stream,
-        },
-        Some(source_id.clone()),
-    );
 
     FauxProviderRegistration {
         api,
         models,
         state,
         pending_responses,
-        source_id,
+        active,
+    }
+}
+
+#[derive(Clone)]
+struct FauxLanguageModelApi {
+    api: String,
+    provider: String,
+    pending_responses: Arc<Mutex<VecDeque<FauxResponseStep>>>,
+    state: FauxProviderState,
+    prompt_cache: Arc<Mutex<HashMap<String, String>>>,
+    min_token_size: usize,
+    max_token_size: usize,
+    tokens_per_second: Option<f64>,
+    active: Arc<AtomicBool>,
+}
+
+impl LanguageModelApi for FauxLanguageModelApi {
+    fn id(&self) -> &str {
+        &self.api
+    }
+
+    fn stream(
+        &self,
+        request_model: Model,
+        context: Context,
+        stream_options: StreamOptions,
+    ) -> Result<AssistantEventStream> {
+        if !self.active.load(Ordering::SeqCst) {
+            return Err(Error::unsupported_capability(
+                request_model.provider,
+                "language models",
+            ));
+        }
+
+        if request_model.api != self.api {
+            return Err(Error::UnsupportedApi(format!(
+                "Mismatched api: {} expected {}",
+                request_model.api, self.api
+            )));
+        }
+
+        let (sender, output_stream) = crate::create_assistant_message_event_stream();
+        let step = self
+            .pending_responses
+            .lock()
+            .expect("faux response queue poisoned")
+            .pop_front();
+        self.state.increment_call_count();
+
+        let request_model_for_task = request_model.clone();
+        let api = self.api.clone();
+        let provider = self.provider.clone();
+        let state = self.state.clone();
+        let prompt_cache = self.prompt_cache.clone();
+        let min_token_size = self.min_token_size;
+        let max_token_size = self.max_token_size;
+        let tokens_per_second = self.tokens_per_second;
+        tokio::spawn(async move {
+            stream_faux_response(
+                sender,
+                step,
+                request_model_for_task,
+                context,
+                stream_options,
+                state,
+                api,
+                provider,
+                min_token_size,
+                max_token_size,
+                tokens_per_second,
+                prompt_cache,
+            )
+            .await;
+        });
+
+        Ok(output_stream)
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions,
+    ) -> Result<AssistantEventStream> {
+        self.stream(model, context, options.stream)
     }
 }
 
@@ -956,7 +980,6 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    use crate::api_registry::get_api_provider;
     use crate::stream::{complete, stream};
     use crate::types::{
         AssistantContent, AssistantMessageEvent, Context, Message, StreamOptions, TextContent,
@@ -2019,13 +2042,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unregisters_the_provider() {
+    async fn unregister_disables_registered_models() {
         let registration = register_faux_provider(None);
         registration.set_responses([faux_assistant_message("hello", None)]);
-        let api = registration.api.clone();
         registration.unregister();
 
-        assert!(get_api_provider(&api).is_none());
         let error = complete(
             registration.get_model(),
             Context {
@@ -2036,7 +2057,13 @@ mod tests {
         )
         .await
         .expect_err("provider should be unregistered");
-        assert!(matches!(error, Error::NoApiProvider(_)));
+        assert!(matches!(
+            error,
+            Error::UnsupportedCapability {
+                capability: "language models",
+                ..
+            }
+        ));
     }
 
     #[test]
