@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
@@ -28,7 +29,7 @@ use crate::{Error, Result};
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 const CLAUDE_CODE_VERSION: &str = "2.1.75";
-const DEFAULT_PROVIDER_ID: &str = "anthropic";
+const DEFAULT_PROVIDER_ID: KnownProvider = KnownProvider::Anthropic;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 #[derive(Clone)]
@@ -45,10 +46,8 @@ impl Anthropic {
     }
 
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
+        let api_key = get_env_api_key(DEFAULT_PROVIDER_ID)
+            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.into()))?;
         Self::builder().api_key(api_key).build()
     }
 
@@ -115,7 +114,7 @@ impl AnthropicBuilder {
         Ok(Anthropic {
             provider_id: self
                 .provider_id
-                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
+                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.into()),
             api_key: self.api_key,
             base_url: self
                 .base_url

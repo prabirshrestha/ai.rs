@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::env_api_keys::get_env_api_key;
+use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
 use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
@@ -8,7 +8,7 @@ use crate::providers::{anthropic, openai_completions, openai_responses, register
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
 use crate::{Error, Result};
 
-const DEFAULT_PROVIDER_ID: &str = "github-copilot";
+const DEFAULT_PROVIDER_ID: KnownProvider = KnownProvider::GitHubCopilot;
 const DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 
 #[derive(Clone)]
@@ -46,7 +46,7 @@ impl GitHubCopilot {
     pub fn from_env() -> Result<Self> {
         let api_key = get_env_api_key(DEFAULT_PROVIDER_ID)
             .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
+            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.into()))?;
         Self::builder().api_key(api_key).build()
     }
 
@@ -140,7 +140,7 @@ impl GitHubCopilotBuilder {
         Ok(GitHubCopilot {
             provider_id: self
                 .provider_id
-                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
+                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.into()),
             api_key: self.api_key,
             base_url: self.base_url,
             api: self.api,

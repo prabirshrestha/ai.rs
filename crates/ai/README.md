@@ -721,10 +721,9 @@ Explicit API keys in `StreamOptions` take precedence over environment lookup.
 ### Checking Environment Variables
 
 ```rust
-use ai::{find_env_keys, get_env_api_key};
+use ai::get_env_api_key;
 
 let key = get_env_api_key("openai");
-let keys = find_env_keys("openai");
 ```
 
 ## OAuth Providers

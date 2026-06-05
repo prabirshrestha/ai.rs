@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
+use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::{openai_completions, openai_responses, register_builtins};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
 use crate::{Error, Result};
 
-const DEFAULT_PROVIDER_ID: &str = "openai";
+const DEFAULT_PROVIDER_ID: KnownProvider = KnownProvider::OpenAi;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 #[derive(Clone)]
@@ -40,10 +41,8 @@ impl OpenAi {
     }
 
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.to_string()))?;
+        let api_key = get_env_api_key(DEFAULT_PROVIDER_ID)
+            .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.into()))?;
         Self::builder().api_key(Some(api_key.as_str())).build()
     }
 
@@ -131,7 +130,7 @@ impl OpenAiBuilder {
         Ok(OpenAi {
             provider_id: self
                 .provider_id
-                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.to_string()),
+                .unwrap_or_else(|| DEFAULT_PROVIDER_ID.into()),
             api_key: self.api_key,
             base_url: self
                 .base_url

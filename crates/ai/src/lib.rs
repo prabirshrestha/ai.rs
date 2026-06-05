@@ -26,7 +26,10 @@ pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
 };
 pub use agent_types::*;
-pub use env_api_keys::{find_env_keys, get_env_api_key};
+pub use env_api_keys::{
+    ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR, GITHUB_COPILOT_TOKEN_ENV_VAR,
+    KnownProvider, OPENAI_API_KEY_ENV_VAR, get_env_api_key,
+};
 pub use error::{Error, Result};
 pub use event_stream::{
     AssistantEventStream, AssistantMessageEventStreamSender, create_assistant_message_event_stream,
