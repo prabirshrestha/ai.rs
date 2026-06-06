@@ -19,6 +19,7 @@ pub type ProviderId = String;
 pub enum KnownApi {
     OpenaiCompletions,
     OpenaiResponses,
+    OpenaiImages,
     AnthropicMessages,
     OpenrouterImages,
 }
@@ -28,6 +29,7 @@ impl KnownApi {
         match self {
             Self::OpenaiCompletions => "openai-completions",
             Self::OpenaiResponses => "openai-responses",
+            Self::OpenaiImages => "openai-images",
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenrouterImages => "openrouter-images",
         }

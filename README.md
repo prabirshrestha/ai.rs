@@ -116,14 +116,14 @@ let anthropic_with_key = anthropic::builder()
     .build()?;
 ```
 
-#### OpenRouter Image Generation
+#### OpenAI and Ollama Image Generation
 
 ```rust
-use ai::{generate_images, providers::openrouter, ImagesContext};
+use ai::{generate_images, providers::openai, ImagesContext};
 
-let openrouter = openrouter::from_env()?;
-let model = openrouter
-    .model("google/gemini-3.1-flash-image-preview")
+let openai = openai::from_env()?;
+let model = openai
+    .image_model("gpt-image-2")
     .build_image()?;
 let context = ImagesContext::builder()
     .text("Generate a small watercolor robot reading a book.")
@@ -131,6 +131,24 @@ let context = ImagesContext::builder()
 
 let images = generate_images(model, context, None).await?;
 ```
+
+For Ollama's OpenAI-compatible image endpoint:
+
+```rust
+use ai::{generate_images, providers::openai, ImagesContext};
+
+let ollama = openai::builder()
+    .provider_id("ollama")
+    .base_url("http://localhost:11434/v1")
+    .images()
+    .build()?;
+let model = ollama.model("x/z-image-turbo").build_image()?;
+let context = ImagesContext::builder().text("Generate a robot.").build();
+
+let images = generate_images(model, context, None).await?;
+```
+
+OpenRouter image models are also available through `providers::openrouter`.
 
 ### Agent
 

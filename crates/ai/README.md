@@ -75,7 +75,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 
 ## Supported Providers
 
-- **OpenAI** via Chat Completions and Responses
+- **OpenAI** via Chat Completions, Responses, and Images
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
 - **OpenRouter** for image generation
@@ -90,10 +90,11 @@ The active built-in stream APIs are:
 
 The active built-in image generation API is:
 
+- `openai-images`
 - `openrouter-images`
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
-`github_copilot` for chat, plus `openrouter` for image generation. Azure
+`github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
 Foundry, Ollama, vLLM, and other compatible endpoints can use configured
 provider handles with explicit `base_url`, HTTP headers, and compatibility
 settings.
@@ -102,8 +103,9 @@ Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
 surface. PRs to add support for additional providers are welcome.
 
-Image generation is exposed through OpenRouter image models. Chat image input
-and image blocks in tool results are still supported by the regular chat APIs.
+Image generation is exposed through OpenAI-compatible image models and
+OpenRouter image models. Chat image input and image blocks in tool results are
+still supported by the regular chat APIs.
 
 ## Installation
 
@@ -399,23 +401,21 @@ let context = Context {
 
 ## Image Generation
 
-Use `generate_images` with an OpenRouter image model. The returned
-`AssistantImages` can contain text and image output blocks, matching the
-selected model's capabilities.
+Use `generate_images` with an OpenAI-compatible or OpenRouter image model. The
+returned `AssistantImages` can contain text and image output blocks, matching
+the selected model's capabilities.
 
 ### Basic Image Generation
 
 ```rust
 use ai::{
-    generate_images, providers::openrouter, ImageOutput, ImagesContext, Result,
+    generate_images, providers::openai, ImageOutput, ImagesContext, Result,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let openrouter = openrouter::from_env()?;
-    let model = openrouter
-        .model("google/gemini-3.1-flash-image-preview")
-        .build_image()?;
+    let openai = openai::from_env()?;
+    let model = openai.image_model("gpt-image-2").build_image()?;
 
     let context = ImagesContext::builder()
         .text("Generate a small watercolor robot reading a book.")
@@ -435,30 +435,52 @@ async fn main() -> Result<()> {
 }
 ```
 
+For Ollama's OpenAI-compatible image endpoint, use the OpenAI provider with an
+Ollama base URL:
+
+```rust
+use ai::{generate_images, providers::openai, ImagesContext};
+
+let ollama = openai::builder()
+    .provider_id("ollama")
+    .base_url("http://localhost:11434/v1")
+    .images()
+    .build()?;
+
+let model = ollama.model("x/z-image-turbo").build_image()?;
+let context = ImagesContext::builder()
+    .text("Generate a small watercolor robot reading a book.")
+    .build();
+
+let images = generate_images(model, context, None).await?;
+```
+
 Set `OPENROUTER_API_KEY` for `openrouter::from_env()`, or pass a key through
 `providers::openrouter::builder().api_key(Some("..."))`.
 
-For image editing or image-conditioned generation, include base64 image content
-in the image context:
+OpenRouter image models remain available through the `openrouter` provider:
 
 ```rust
-use ai::{ImageContent, ImagesContext};
+use ai::{generate_images, providers::openrouter, ImagesContext};
 
-let context = ImagesContext::builder()
-    .text("Make the background transparent.")
-    .image(ImageContent {
-        data: "...base64...".to_string(),
-        mime_type: "image/png".to_string(),
-    })
-    .build();
+let openrouter = openrouter::from_env()?;
+let model = openrouter
+    .model("google/gemini-3.1-flash-image-preview")
+    .build_image()?;
+let context = ImagesContext::builder().text("Generate a logo.").build();
+
+let images = generate_images(model, context, None).await?;
 ```
 
 ### Notes and Limitations
 
-The active Rust image-generation surface currently covers OpenRouter's
-chat-completions-style image models through the `openrouter-images` API.
-Provider errors are returned as `AssistantImages` with `stop_reason:
-ImagesStopReason::Error`; cancelled requests use `ImagesStopReason::Aborted`.
+The active Rust image-generation surface covers OpenAI-compatible
+`/images/generations` models through the `openai-images` API and OpenRouter's
+chat-completions-style image models through the `openrouter-images` API. The
+OpenAI-compatible generations path supports text input; image edits are not
+implemented yet. Provider errors are returned as `AssistantImages` with
+`stop_reason: ImagesStopReason::Error`; cancelled requests use
+`ImagesStopReason::Aborted`.
 
 ## Thinking/Reasoning
 
