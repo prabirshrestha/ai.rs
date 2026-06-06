@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::event_stream::AssistantEventStream;
 use crate::types::{
-    Context, Model, ModelCompat, ModelCost, ModelInput, SimpleStreamOptions, StreamOptions,
+    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat, ModelCost,
+    ModelInput, ModelOutput, SimpleStreamOptions, StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -46,6 +48,20 @@ pub trait LanguageModelApi: dyn_clone::DynClone + Send + Sync + 'static {
 
 dyn_clone::clone_trait_object!(LanguageModelApi);
 
+#[async_trait]
+pub trait ImageModelApi: dyn_clone::DynClone + Send + Sync + 'static {
+    fn id(&self) -> &str;
+
+    async fn generate_images(
+        &self,
+        model: Model,
+        context: ImagesContext,
+        options: ImageGenerationOptions,
+    ) -> Result<AssistantImages>;
+}
+
+dyn_clone::clone_trait_object!(ImageModelApi);
+
 #[derive(Clone)]
 pub struct ModelBuilder {
     model: Model,
@@ -75,6 +91,19 @@ impl ModelBuilder {
         }
     }
 
+    pub fn new_image(provider_id: &str, id: &str, api: Arc<dyn ImageModelApi>) -> Self {
+        Self {
+            model: Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: api.id().to_string(),
+                provider: provider_id.to_string(),
+                image_api: Some(api),
+                ..Model::default()
+            },
+        }
+    }
+
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.model.name = name.into();
         self
@@ -92,6 +121,11 @@ impl ModelBuilder {
 
     pub fn input(mut self, input: impl Into<Vec<ModelInput>>) -> Self {
         self.model.input = input.into();
+        self
+    }
+
+    pub fn output(mut self, output: impl Into<Vec<ModelOutput>>) -> Self {
+        self.model.output = output.into();
         self
     }
 
@@ -133,10 +167,30 @@ impl ModelBuilder {
     }
 
     pub fn build(self) -> Result<Model> {
+        if self.model.language_api.is_none() && self.model.image_api.is_none() {
+            return Err(Error::unsupported_capability(
+                self.model.provider,
+                "language or image models",
+            ));
+        }
+        Ok(self.model)
+    }
+
+    pub fn build_language(self) -> Result<Model> {
         if self.model.language_api.is_none() {
             return Err(Error::unsupported_capability(
                 self.model.provider,
                 "language models",
+            ));
+        }
+        Ok(self.model)
+    }
+
+    pub fn build_image(self) -> Result<Model> {
+        if self.model.image_api.is_none() {
+            return Err(Error::unsupported_capability(
+                self.model.provider,
+                "image models",
             ));
         }
         Ok(self.model)

@@ -6,6 +6,7 @@ pub mod openai;
 pub mod openai_completions;
 pub(crate) mod openai_prompt_cache;
 pub mod openai_responses;
+pub mod openrouter;
 pub mod register_builtins;
 pub(crate) mod simple_options;
 pub(crate) mod transform_messages;

@@ -5,6 +5,7 @@ pub mod agent_types;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
+pub mod images;
 mod models;
 pub mod oauth;
 pub mod provider;
@@ -28,12 +29,13 @@ pub use agent_loop::{
 pub use agent_types::*;
 pub use env_api_keys::{
     ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR, GITHUB_COPILOT_TOKEN_ENV_VAR,
-    KnownProvider, OPENAI_API_KEY_ENV_VAR, get_env_api_key,
+    KnownProvider, OPENAI_API_KEY_ENV_VAR, OPENROUTER_API_KEY_ENV_VAR, get_env_api_key,
 };
 pub use error::{Error, Result};
 pub use event_stream::{
     AssistantEventStream, AssistantMessageEventStreamSender, create_assistant_message_event_stream,
 };
+pub use images::generate_images;
 pub use models::{
     calculate_cost, clamp_thinking_level, get_supported_thinking_levels, models_are_equal,
 };
@@ -49,7 +51,7 @@ pub use oauth::{
     refresh_anthropic_token, refresh_github_copilot_token, refresh_oauth_token,
     register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
-pub use provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+pub use provider::{ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 pub use providers::anthropic::{
     Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay,
 };
@@ -63,6 +65,7 @@ pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
 pub use providers::openai_completions::OpenAICompletionsOptions;
 pub use providers::openai_responses::OpenAIResponsesOptions;
+pub use providers::openrouter::OpenRouter;
 pub use providers::register_builtins::{
     stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
     stream_simple_openai_completions, stream_simple_openai_responses,

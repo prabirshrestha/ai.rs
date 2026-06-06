@@ -78,6 +78,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - **OpenAI** via Chat Completions and Responses
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
+- **OpenRouter** for image generation
 - **Azure Foundry and other compatible endpoints** through provider handles with
   explicit `base_url`, headers, and compatibility settings
 
@@ -87,17 +88,22 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
+The active built-in image generation API is:
+
+- `openrouter-images`
+
 The active built-in provider handles are focused on `openai`, `anthropic`, and
-`github_copilot`. Azure Foundry, Ollama, vLLM, and other compatible endpoints
-can use configured provider handles with explicit `base_url`, HTTP headers, and
-compatibility settings.
+`github_copilot` for chat, plus `openrouter` for image generation. Azure
+Foundry, Ollama, vLLM, and other compatible endpoints can use configured
+provider handles with explicit `base_url`, HTTP headers, and compatibility
+settings.
 
 Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
 surface. PRs to add support for additional providers are welcome.
 
-Image generation is not exposed yet. Chat image input and image blocks in tool
-results are still supported by the regular chat APIs.
+Image generation is exposed through OpenRouter image models. Chat image input
+and image blocks in tool results are still supported by the regular chat APIs.
 
 ## Installation
 
@@ -393,18 +399,66 @@ let context = Context {
 
 ## Image Generation
 
-Image generation is not exposed yet.
+Use `generate_images` with an OpenRouter image model. The returned
+`AssistantImages` can contain text and image output blocks, matching the
+selected model's capabilities.
 
 ### Basic Image Generation
 
-No Rust image-generation API is exposed at the moment. Keep using the regular
-chat APIs for image input and tool-result image blocks.
+```rust
+use ai::{
+    generate_images, providers::openrouter, ImageOutput, ImagesContext, Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openrouter = openrouter::from_env()?;
+    let model = openrouter
+        .model("google/gemini-3.1-flash-image-preview")
+        .build_image()?;
+
+    let context = ImagesContext::builder()
+        .text("Generate a small watercolor robot reading a book.")
+        .build();
+
+    let images = generate_images(model, context, None).await?;
+    for output in images.output {
+        match output {
+            ImageOutput::Text(text) => println!("{}", text.text),
+            ImageOutput::Image(image) => {
+                println!("{} bytes of {}", image.data.len(), image.mime_type);
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+Set `OPENROUTER_API_KEY` for `openrouter::from_env()`, or pass a key through
+`providers::openrouter::builder().api_key(Some("..."))`.
+
+For image editing or image-conditioned generation, include base64 image content
+in the image context:
+
+```rust
+use ai::{ImageContent, ImagesContext};
+
+let context = ImagesContext::builder()
+    .text("Make the background transparent.")
+    .image(ImageContent {
+        data: "...base64...".to_string(),
+        mime_type: "image/png".to_string(),
+    })
+    .build();
+```
 
 ### Notes and Limitations
 
-The active Rust provider surface is focused on chat/agent behavior for OpenAI
-Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub
-Copilot-compatible routing.
+The active Rust image-generation surface currently covers OpenRouter's
+chat-completions-style image models through the `openrouter-images` API.
+Provider errors are returned as `AssistantImages` with `stop_reason:
+ImagesStopReason::Error`; cancelled requests use `ImagesStopReason::Aborted`.
 
 ## Thinking/Reasoning
 

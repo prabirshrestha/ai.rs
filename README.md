@@ -24,9 +24,9 @@ provider-option forwarding.
 
 ## Examples
 
-Provider handles are available for OpenAI, Anthropic, and GitHub Copilot. Use
-`providers::openai::builder()` for OpenAI-compatible endpoints such as Ollama,
-vLLM, and Azure Foundry.
+Provider handles are available for OpenAI, Anthropic, GitHub Copilot, and
+OpenRouter image generation. Use `providers::openai::builder()` for
+OpenAI-compatible endpoints such as Ollama, vLLM, and Azure Foundry.
 
 ### Complete
 
@@ -114,6 +114,22 @@ let anthropic_from_env = anthropic::from_env()?;
 let anthropic_with_key = anthropic::builder()
     .api_key("sk-ant-...")
     .build()?;
+```
+
+#### OpenRouter Image Generation
+
+```rust
+use ai::{generate_images, providers::openrouter, ImagesContext};
+
+let openrouter = openrouter::from_env()?;
+let model = openrouter
+    .model("google/gemini-3.1-flash-image-preview")
+    .build_image()?;
+let context = ImagesContext::builder()
+    .text("Generate a small watercolor robot reading a book.")
+    .build();
+
+let images = generate_images(model, context, None).await?;
 ```
 
 ### Agent

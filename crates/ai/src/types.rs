@@ -20,6 +20,7 @@ pub enum KnownApi {
     OpenaiCompletions,
     OpenaiResponses,
     AnthropicMessages,
+    OpenrouterImages,
 }
 
 impl KnownApi {
@@ -28,6 +29,7 @@ impl KnownApi {
             Self::OpenaiCompletions => "openai-completions",
             Self::OpenaiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
+            Self::OpenrouterImages => "openrouter-images",
         }
     }
 }
@@ -164,6 +166,11 @@ pub struct StreamOptions {
     pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
     pub provider_options: HashMap<String, Value>,
+}
+
+#[derive(Clone, Default)]
+pub struct ImageGenerationOptions {
+    pub base: StreamOptions,
 }
 
 #[derive(Clone, Default)]
@@ -317,6 +324,14 @@ pub enum StopReason {
     Stop,
     Length,
     ToolUse,
+    Error,
+    Aborted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImagesStopReason {
+    Stop,
     Error,
     Aborted,
 }
@@ -720,6 +735,96 @@ pub struct Context {
     pub tools: Vec<Tool>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagesContext {
+    #[serde(default)]
+    pub input: Vec<UserContent>,
+}
+
+impl ImagesContext {
+    pub fn builder() -> ImagesContextBuilder {
+        ImagesContextBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImagesContextBuilder {
+    context: ImagesContext,
+}
+
+impl ImagesContextBuilder {
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.context.input.push(UserContent::text(text));
+        self
+    }
+
+    pub fn image(mut self, image: ImageContent) -> Self {
+        self.context.input.push(UserContent::Image(image));
+        self
+    }
+
+    pub fn input(mut self, input: impl IntoIterator<Item = UserContent>) -> Self {
+        self.context.input.extend(input);
+        self
+    }
+
+    pub fn build(self) -> ImagesContext {
+        self.context
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ImageOutput {
+    #[serde(rename = "text")]
+    Text(TextContent),
+    #[serde(rename = "image")]
+    Image(ImageContent),
+}
+
+impl ImageOutput {
+    pub fn text<T: Into<String>>(text: T) -> Self {
+        Self::Text(TextContent {
+            text: text.into(),
+            text_signature: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantImages {
+    pub api: Api,
+    pub provider: ProviderId,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(default)]
+    pub output: Vec<ImageOutput>,
+    pub usage: Usage,
+    pub stop_reason: ImagesStopReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub timestamp: u64,
+}
+
+impl AssistantImages {
+    pub fn empty_for(model: &Model) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_id: None,
+            output: Vec::new(),
+            usage: Usage::default(),
+            stop_reason: ImagesStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
 impl Context {
     pub fn builder() -> ContextBuilder {
         ContextBuilder::default()
@@ -769,6 +874,13 @@ pub enum ModelInput {
     Image,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelOutput {
+    Text,
+    Image,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCost {
@@ -791,6 +903,8 @@ pub struct Model {
     pub thinking_level_map: HashMap<String, Option<String>>,
     #[serde(default)]
     pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<ModelOutput>,
     pub cost: ModelCost,
     pub context_window: u32,
     pub max_tokens: u32,
@@ -800,6 +914,8 @@ pub struct Model {
     pub compat: ModelCompat,
     #[serde(skip)]
     pub(crate) language_api: Option<Arc<dyn LanguageModelApi>>,
+    #[serde(skip)]
+    pub(crate) image_api: Option<Arc<dyn crate::provider::ImageModelApi>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -821,6 +937,7 @@ impl std::fmt::Debug for Model {
             .field("reasoning", &self.reasoning)
             .field("thinking_level_map", &self.thinking_level_map)
             .field("input", &self.input)
+            .field("output", &self.output)
             .field("cost", &self.cost)
             .field("context_window", &self.context_window)
             .field("max_tokens", &self.max_tokens)
@@ -843,6 +960,7 @@ impl PartialEq for Model {
             && self.reasoning == other.reasoning
             && self.thinking_level_map == other.thinking_level_map
             && self.input == other.input
+            && self.output == other.output
             && self.cost == other.cost
             && self.context_window == other.context_window
             && self.max_tokens == other.max_tokens
@@ -870,6 +988,10 @@ impl Model {
 
     pub fn language_api(&self) -> Option<Arc<dyn LanguageModelApi>> {
         self.language_api.clone()
+    }
+
+    pub fn image_api(&self) -> Option<Arc<dyn crate::provider::ImageModelApi>> {
+        self.image_api.clone()
     }
 }
 
