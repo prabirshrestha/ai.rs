@@ -1,0 +1,27 @@
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --all --check"
+
+[tasks.check]
+description = "Check all workspace targets"
+run = "cargo check --workspace --all-targets"
+
+[tasks.clippy]
+description = "Run clippy with warnings denied"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run workspace tests"
+run = "cargo test --workspace"
+
+[tasks.test-ai]
+description = "Run ai crate tests"
+run = "cargo test -p ai"
+
+[tasks.ci]
+description = "Run the local CI checks"
+depends = ["fmt", "check", "clippy", "test"]
+
+[tasks.all]
+description = "Run all local checks"
+depends = ["ci"]

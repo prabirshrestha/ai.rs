@@ -1,37 +1,29 @@
 [package]
 name = "ai"
-version = "0.2.16"
-edition = "2024"
-authors = ["Prabir Shrestha <mail@prabir.me>"]
-license = "MIT"
-description = "AI"
-repository = "https://github.com/prabirshrestha/ai.rs"
-readme = "../../README.md"
+version = "0.3.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Simple to use LLM library for Rust with streaming, tool calling, OAuth helpers, and a lightweight agent loop"
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
-async-stream = "0.3.6"
-async-trait = "0.1.85"
-derive_builder = "0.20.2"
-dyn-clone = "1.0.17"
-futures = "0.3.31"
-reqwest = { version = "0.13.0", features = ["json", "stream"], default-features = false }
-secrecy = { version = "0.10.3", features = ["serde"] }
-serde = { version = "1.0.217", features = ["serde_derive"] }
-serde_json = "1.0.135"
-thiserror = "2.0.9"
-time = { version = "0.3.37", features = ["parsing"] }
-tokio = "1.43.0"
-tokio-util = "0.7.13"
-base64 = "0.22.1"
+async-trait.workspace = true
+async-stream.workspace = true
+base64.workspace = true
+dyn-clone.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+ring.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
-httpmock = "0.8.0"
-tokio = { version = "1.43.0", features = ["rt-multi-thread"] }
-
-[features]
-default = [ "azure_openai_client", "openai_client", "rustls_tls"]
-ollama_client = []
-openai_client = []
-azure_openai_client = []
-native_tls = ["reqwest/native-tls"]
-rustls_tls = ["reqwest/rustls"]
+tokio = { workspace = true, features = ["test-util"] }
