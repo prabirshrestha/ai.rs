@@ -633,14 +633,10 @@ Provider handles build executable models. Built-in language model APIs include:
 - **`openai-completions`**: OpenAI Chat Completions API
 - **`openai-responses`**: OpenAI Responses API
 
-`register_faux_provider()` is legacy support for the crate's own unit tests.
-New application code should prefer provider handles and custom provider
-implementations instead of registering global providers.
-
 ### Faux provider for tests
 
-`register_faux_provider()` registers a temporary in-memory provider for tests.
-It is opt-in and not part of the built-in provider set.
+`register_faux_provider()` registers a temporary in-memory provider for tests
+and demos. It is opt-in and not part of the built-in provider set.
 
 ### Providers and Models
 
