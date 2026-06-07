@@ -26,7 +26,7 @@ provider-option forwarding.
 
 Provider handles are available for OpenAI, Anthropic, GitHub Copilot, and
 OpenRouter image generation. Use `providers::openai::builder()` for
-OpenAI-compatible endpoints such as Ollama, vLLM, and Azure Foundry.
+OpenAI-compatible endpoints such as llama.cpp, Ollama, vLLM, and Azure Foundry.
 
 ### Complete
 
@@ -116,7 +116,7 @@ let anthropic_with_key = anthropic::builder()
     .build()?;
 ```
 
-#### OpenAI and Ollama Image Generation
+#### OpenAI, llama.cpp, and Ollama Image Generation
 
 ```rust
 use ai::{generate_images, providers::openai, ImagesContext};
@@ -132,7 +132,9 @@ let context = ImagesContext::builder()
 let images = generate_images(model, context, None).await?;
 ```
 
-For Ollama's OpenAI-compatible image endpoint:
+For llama.cpp, Ollama, or another OpenAI-compatible image endpoint, use the
+OpenAI provider with the compatible server's base URL. For example, with
+Ollama:
 
 ```rust
 use ai::{generate_images, providers::openai, ImagesContext};

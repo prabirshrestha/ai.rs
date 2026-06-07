@@ -95,7 +95,7 @@ The active built-in image generation APIs are:
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
 `github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
-Foundry, Ollama, vLLM, and other compatible endpoints can use configured
+Foundry, llama.cpp, Ollama, vLLM, and other compatible endpoints can use configured
 provider handles with explicit `base_url`, HTTP headers, and compatibility
 settings.
 
@@ -403,7 +403,7 @@ let context = Context {
 
 Use `generate_images` with an OpenAI-compatible or OpenRouter image model. The
 returned `AssistantImages` can contain text and image output blocks, matching
-the selected model's capabilities.
+the selected model configuration.
 
 ### Basic Image Generation
 
@@ -435,8 +435,9 @@ async fn main() -> Result<()> {
 }
 ```
 
-For Ollama's OpenAI-compatible image endpoint, use the OpenAI provider with an
-Ollama base URL:
+For llama.cpp, Ollama, or another OpenAI-compatible image endpoint, use the
+OpenAI provider with the compatible server's base URL. For example, with
+Ollama:
 
 ```rust
 use ai::{generate_images, providers::openai, ImagesContext};
@@ -472,15 +473,35 @@ let context = ImagesContext::builder().text("Generate a logo.").build();
 let images = generate_images(model, context, None).await?;
 ```
 
+OpenRouter image models use conservative defaults because this crate does not
+ship a built-in model catalog. They default to text input and image output. If a
+specific OpenRouter model supports image input or text output, set those
+capabilities on the model builder:
+
+```rust
+use ai::{generate_images, providers::openrouter, ImagesContext, ModelInput, ModelOutput};
+
+let openrouter = openrouter::from_env()?;
+let model = openrouter
+    .model("google/gemini-3.1-flash-image-preview")
+    .input(vec![ModelInput::Text, ModelInput::Image])
+    .output(vec![ModelOutput::Image, ModelOutput::Text])
+    .build_image()?;
+let context = ImagesContext::builder().text("Generate a logo.").build();
+
+let images = generate_images(model, context, None).await?;
+```
+
 ### Notes and Limitations
 
 The active Rust image-generation surface covers OpenAI-compatible
 `/images/generations` models through the `openai-images` API and OpenRouter's
 chat-completions-style image models through the `openrouter-images` API. The
 OpenAI-compatible generations path supports text input; image edits are not
-implemented yet. Provider errors are returned as `AssistantImages` with
-`stop_reason: ImagesStopReason::Error`; cancelled requests use
-`ImagesStopReason::Aborted`.
+implemented yet. OpenRouter image input and text output are opt-in model
+capabilities configured by the caller. Provider errors are returned as
+`AssistantImages` with `stop_reason: ImagesStopReason::Error`; cancelled
+requests use `ImagesStopReason::Aborted`.
 
 ## Thinking/Reasoning
 
@@ -681,8 +702,8 @@ let stream = stream_simple(
 )?;
 ```
 
-The same pattern works for local inference servers such as Ollama, vLLM, and LM
-Studio when they expose an OpenAI-compatible chat endpoint.
+The same pattern works for local inference servers such as llama.cpp, Ollama,
+vLLM, and LM Studio when they expose an OpenAI-compatible chat endpoint.
 
 Some OpenAI-compatible servers do not understand the `developer` role used for
 reasoning-capable models. For those endpoints, build the model with compat
