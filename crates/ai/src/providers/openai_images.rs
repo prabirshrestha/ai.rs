@@ -146,7 +146,7 @@ fn prompt_from_context(context: ImagesContext) -> Result<String> {
             UserContent::Text(content) => text.push(content.text),
             UserContent::Image(_) => {
                 return Err(Error::Provider(
-                    "openai-images generations only supports text input".to_string(),
+                    "openai-images generations only support text input".to_string(),
                 ));
             }
         }
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(output.stop_reason, ImagesStopReason::Error);
         assert_eq!(
             output.error_message.as_deref(),
-            Some("provider error: openai-images generations only supports text input")
+            Some("provider error: openai-images generations only support text input")
         );
     }
 

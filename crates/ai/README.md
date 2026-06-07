@@ -88,7 +88,7 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
-The active built-in image generation API is:
+The active built-in image generation APIs are:
 
 - `openai-images`
 - `openrouter-images`

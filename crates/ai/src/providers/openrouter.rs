@@ -10,8 +10,8 @@ use crate::models::calculate_cost;
 use crate::provider::{ImageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::types::{
     AssistantImages, ImageContent, ImageGenerationOptions, ImageOutput, ImagesContext,
-    ImagesStopReason, KnownApi, Model, ModelCost, ModelInput, ModelOutput, ProviderResponse,
-    TextContent, Usage, UserContent,
+    ImagesStopReason, KnownApi, Model, ModelInput, ModelOutput, ProviderResponse, TextContent,
+    Usage, UserContent,
 };
 use crate::utils::headers::headers_to_record;
 use crate::utils::http::{request_timeout, send_with_retries};
@@ -61,21 +61,10 @@ impl Provider for OpenRouter {
             api_key: self.api_key.clone(),
             http_client: self.http_client.clone(),
         });
-        let mut builder = ModelBuilder::new_image(&self.provider_id, id, runtime)
+        ModelBuilder::new_image(&self.provider_id, id, runtime)
             .base_url(self.base_url.clone())
-            .input(vec![ModelInput::Text, ModelInput::Image])
+            .input(vec![ModelInput::Text])
             .output(vec![ModelOutput::Image])
-            .cost(ModelCost::default());
-
-        if let Some(definition) = known_image_model(id) {
-            builder = builder
-                .name(definition.name)
-                .input(definition.input)
-                .output(definition.output)
-                .cost(definition.cost);
-        }
-
-        builder
     }
 }
 
@@ -421,242 +410,6 @@ struct OpenRouterPromptTokensDetails {
     cache_write_tokens: Option<u32>,
 }
 
-struct ImageModelDefinition {
-    name: &'static str,
-    input: Vec<ModelInput>,
-    output: Vec<ModelOutput>,
-    cost: ModelCost,
-}
-
-fn known_image_model(id: &str) -> Option<ImageModelDefinition> {
-    match id {
-        "black-forest-labs/flux.2-flex" => Some(def(
-            "Black Forest Labs: FLUX.2 Flex",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "black-forest-labs/flux.2-klein-4b" => Some(def(
-            "Black Forest Labs: FLUX.2 Klein 4B",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "black-forest-labs/flux.2-max" => Some(def(
-            "Black Forest Labs: FLUX.2 Max",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "black-forest-labs/flux.2-pro" => Some(def(
-            "Black Forest Labs: FLUX.2 Pro",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "bytedance-seed/seedream-4.5" => Some(def(
-            "ByteDance Seed: Seedream 4.5",
-            image_text_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "google/gemini-2.5-flash-image" => Some(def(
-            "Google: Nano Banana (Gemini 2.5 Flash Image)",
-            image_text_input(),
-            image_text_output(),
-            cost(0.3, 2.5, 0.03, 0.08333333333333334),
-        )),
-        "google/gemini-3-pro-image-preview" => Some(def(
-            "Google: Nano Banana Pro (Gemini 3 Pro Image Preview)",
-            image_text_input(),
-            image_text_output(),
-            cost(2.0, 12.0, 0.19999999999999998, 0.375),
-        )),
-        "google/gemini-3.1-flash-image-preview" => Some(def(
-            "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
-            image_text_input(),
-            image_text_output(),
-            cost(0.5, 3.0, 0.0, 0.0),
-        )),
-        "microsoft/mai-image-2.5" => Some(def(
-            "Microsoft: MAI-Image-2.5",
-            text_image_input(),
-            image_output(),
-            cost(5.0, 0.0, 0.0, 0.0),
-        )),
-        "openai/gpt-5-image" => Some(def(
-            "OpenAI: GPT-5 Image",
-            image_text_input(),
-            image_text_output(),
-            cost(10.0, 10.0, 1.25, 0.0),
-        )),
-        "openai/gpt-5-image-mini" => Some(def(
-            "OpenAI: GPT-5 Image Mini",
-            image_text_input(),
-            image_text_output(),
-            cost(2.5, 2.0, 0.25, 0.0),
-        )),
-        "openai/gpt-5.4-image-2" => Some(def(
-            "OpenAI: GPT-5.4 Image 2",
-            image_text_input(),
-            image_text_output(),
-            cost(8.0, 15.0, 2.0, 0.0),
-        )),
-        "openrouter/auto" => Some(def(
-            "Auto Router",
-            text_image_input(),
-            text_image_output(),
-            cost(-1_000_000.0, -1_000_000.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v3" => Some(def(
-            "Recraft: Recraft V3",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4" => Some(def(
-            "Recraft: Recraft V4",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4-pro" => Some(def(
-            "Recraft: Recraft V4 Pro",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4-pro-vector" => Some(def(
-            "Recraft: Recraft V4 Pro Vector",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4-vector" => Some(def(
-            "Recraft: Recraft V4 Vector",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1" => Some(def(
-            "Recraft: Recraft V4.1",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1-pro" => Some(def(
-            "Recraft: Recraft V4.1 Pro",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1-pro-vector" => Some(def(
-            "Recraft: Recraft V4.1 Pro Vector",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1-utility" => Some(def(
-            "Recraft: Recraft V4.1 Utility",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1-utility-pro" => Some(def(
-            "Recraft: Recraft V4.1 Utility Pro",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "recraft/recraft-v4.1-vector" => Some(def(
-            "Recraft: Recraft V4.1 Vector",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "sourceful/riverflow-v2-fast" => Some(def(
-            "Sourceful: Riverflow V2 Fast",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "sourceful/riverflow-v2-fast-preview" => Some(def(
-            "Sourceful: Riverflow V2 Fast Preview",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "sourceful/riverflow-v2-max-preview" => Some(def(
-            "Sourceful: Riverflow V2 Max Preview",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "sourceful/riverflow-v2-pro" => Some(def(
-            "Sourceful: Riverflow V2 Pro",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "sourceful/riverflow-v2-standard-preview" => Some(def(
-            "Sourceful: Riverflow V2 Standard Preview",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        "x-ai/grok-imagine-image-quality" => Some(def(
-            "xAI: Grok Imagine Image Quality",
-            text_image_input(),
-            image_output(),
-            cost(0.0, 0.0, 0.0, 0.0),
-        )),
-        _ => None,
-    }
-}
-
-fn text_image_input() -> Vec<ModelInput> {
-    vec![ModelInput::Text, ModelInput::Image]
-}
-
-fn image_text_input() -> Vec<ModelInput> {
-    vec![ModelInput::Image, ModelInput::Text]
-}
-
-fn image_output() -> Vec<ModelOutput> {
-    vec![ModelOutput::Image]
-}
-
-fn image_text_output() -> Vec<ModelOutput> {
-    vec![ModelOutput::Image, ModelOutput::Text]
-}
-
-fn text_image_output() -> Vec<ModelOutput> {
-    vec![ModelOutput::Text, ModelOutput::Image]
-}
-
-fn def(
-    name: &'static str,
-    input: Vec<ModelInput>,
-    output: Vec<ModelOutput>,
-    cost: ModelCost,
-) -> ImageModelDefinition {
-    ImageModelDefinition {
-        name,
-        input,
-        output,
-        cost,
-    }
-}
-
-fn cost(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelCost {
-    ModelCost {
-        input,
-        output,
-        cache_read,
-        cache_write,
-    }
-}
-
 pub fn builder() -> OpenRouterBuilder {
     OpenRouter::builder()
 }
@@ -675,8 +428,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::types::{
-        ImageGenerationOptions, ImageOutput, ImagesContext, ModelInput, ModelOutput, StreamOptions,
-        UserContent,
+        ImageGenerationOptions, ImageOutput, ImagesContext, ModelInput, StreamOptions, UserContent,
     };
 
     use super::*;
@@ -743,14 +495,14 @@ mod tests {
         assert_eq!(output.usage.input, 12);
         assert_eq!(output.usage.output, 34);
         assert_eq!(output.usage.total_tokens, 46);
-        assert_eq!(output.usage.cost.input, 0.000006);
-        assert_eq!(output.usage.cost.output, 0.000102);
+        assert_eq!(output.usage.cost.input, 0.0);
+        assert_eq!(output.usage.cost.output, 0.0);
 
         let request = captured.lock().expect("request").clone();
         assert!(request.contains("authorization: Bearer test-key"));
         assert!(request.contains("http-referer: https://example.com"));
         let payload = request_body_json(&request);
-        assert_eq!(payload["modalities"], serde_json::json!(["image", "text"]));
+        assert_eq!(payload["modalities"], serde_json::json!(["image"]));
         assert_eq!(payload["stream"], false);
         assert_eq!(payload["model"], "google/gemini-3.1-flash-image-preview");
         assert_eq!(
@@ -785,6 +537,7 @@ mod tests {
             .expect("provider");
         let model = provider
             .model("black-forest-labs/flux.2-pro")
+            .input(vec![ModelInput::Text, ModelInput::Image])
             .build_image()
             .expect("model");
         let context = ImagesContext::builder()
@@ -869,23 +622,6 @@ mod tests {
             output.error_message.as_deref(),
             Some("No API key for provider: openrouter")
         );
-    }
-
-    #[test]
-    fn known_image_models_match_pi_metadata() {
-        let provider = builder().api_key(Some("test")).build().expect("provider");
-        let model = provider
-            .model("google/gemini-3.1-flash-image-preview")
-            .build_image()
-            .expect("model");
-
-        assert_eq!(model.api, "openrouter-images");
-        assert_eq!(model.provider, "openrouter");
-        assert_eq!(model.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(model.input, vec![ModelInput::Image, ModelInput::Text]);
-        assert_eq!(model.output, vec![ModelOutput::Image, ModelOutput::Text]);
-        assert_eq!(model.cost.input, 0.5);
-        assert_eq!(model.cost.output, 3.0);
     }
 
     async fn spawn_response_server(
