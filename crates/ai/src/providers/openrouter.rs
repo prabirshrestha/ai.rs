@@ -295,7 +295,7 @@ fn build_params(model: &Model, context: ImagesContext) -> Value {
         .map(|item| match item {
             UserContent::Text(text) => json!({
                 "type": "text",
-                "text": sanitize_surrogates(&text.text),
+                "text": text.text,
             }),
             UserContent::Image(image) => json!({
                 "type": "image_url",
@@ -319,20 +319,6 @@ fn build_params(model: &Model, context: ImagesContext) -> Value {
         "stream": false,
         "modalities": modalities,
     })
-}
-
-fn sanitize_surrogates(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            let code = ch as u32;
-            if (0xD800..=0xDFFF).contains(&code) {
-                char::REPLACEMENT_CHARACTER
-            } else {
-                ch
-            }
-        })
-        .collect()
 }
 
 fn parse_data_url(value: &str) -> Option<ImageContent> {
