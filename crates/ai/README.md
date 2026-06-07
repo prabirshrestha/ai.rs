@@ -95,9 +95,9 @@ The active built-in image generation APIs are:
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
 `github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
-Foundry, llama.cpp, Ollama, vLLM, and other compatible endpoints can use configured
-provider handles with explicit `base_url`, HTTP headers, and compatibility
-settings.
+Foundry, llama.cpp, MLX, Ollama, vLLM, and other compatible endpoints can use
+configured provider handles with explicit `base_url`, HTTP headers, and
+compatibility settings.
 
 Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
@@ -435,7 +435,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-For llama.cpp, Ollama, or another OpenAI-compatible image endpoint, use the
+For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use the
 OpenAI provider with the compatible server's base URL. For example, with
 Ollama:
 
@@ -702,8 +702,8 @@ let stream = stream_simple(
 )?;
 ```
 
-The same pattern works for local inference servers such as llama.cpp, Ollama,
-vLLM, and LM Studio when they expose an OpenAI-compatible chat endpoint.
+The same pattern works for local inference servers such as llama.cpp, MLX,
+Ollama, vLLM, and LM Studio when they expose an OpenAI-compatible chat endpoint.
 
 Some OpenAI-compatible servers do not understand the `developer` role used for
 reasoning-capable models. For those endpoints, build the model with compat
