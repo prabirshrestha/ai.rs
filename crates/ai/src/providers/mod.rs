@@ -4,7 +4,7 @@ pub mod github_copilot;
 pub(crate) mod github_copilot_headers;
 pub mod openai;
 pub mod openai_completions;
-pub mod openai_images;
+pub(crate) mod openai_images;
 pub(crate) mod openai_prompt_cache;
 pub mod openai_responses;
 pub mod openrouter;
