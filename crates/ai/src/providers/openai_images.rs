@@ -13,7 +13,7 @@ use crate::{Error, Result};
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
-pub async fn generate_images_openai(
+pub(crate) async fn generate_images_openai(
     model: Model,
     context: ImagesContext,
     options: ImageGenerationOptions,

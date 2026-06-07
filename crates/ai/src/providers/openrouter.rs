@@ -158,7 +158,7 @@ impl ImageModelApi for OpenRouterImageModelApi {
     }
 }
 
-pub async fn generate_images_openrouter(
+async fn generate_images_openrouter(
     model: Model,
     context: ImagesContext,
     options: ImageGenerationOptions,
