@@ -519,7 +519,7 @@ fn known_image_model(id: &str) -> Option<ImageModelDefinition> {
         "openrouter/auto" => Some(def(
             "Auto Router",
             text_image_input(),
-            image_text_output(),
+            text_image_output(),
             cost(-1_000_000.0, -1_000_000.0, 0.0, 0.0),
         )),
         "recraft/recraft-v3" => Some(def(
@@ -642,6 +642,10 @@ fn image_output() -> Vec<ModelOutput> {
 
 fn image_text_output() -> Vec<ModelOutput> {
     vec![ModelOutput::Image, ModelOutput::Text]
+}
+
+fn text_image_output() -> Vec<ModelOutput> {
+    vec![ModelOutput::Text, ModelOutput::Image]
 }
 
 fn def(
