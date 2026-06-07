@@ -75,9 +75,10 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 
 ## Supported Providers
 
-- **OpenAI** via Chat Completions and Responses
+- **OpenAI** via Chat Completions, Responses, and Images
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
+- **OpenRouter** for image generation
 - **Azure Foundry and other compatible endpoints** through provider handles with
   explicit `base_url`, headers, and compatibility settings
 
@@ -87,17 +88,24 @@ The active built-in stream APIs are:
 - `openai-responses`
 - `anthropic-messages`
 
+The active built-in image generation APIs are:
+
+- `openai-images`
+- `openrouter-images`
+
 The active built-in provider handles are focused on `openai`, `anthropic`, and
-`github_copilot`. Azure Foundry, Ollama, vLLM, and other compatible endpoints
-can use configured provider handles with explicit `base_url`, HTTP headers, and
+`github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
+Foundry, llama.cpp, MLX, Ollama, vLLM, and other compatible endpoints can use
+configured provider handles with explicit `base_url`, HTTP headers, and
 compatibility settings.
 
 Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
 and custom compatible routing are not part of the active built-in provider
 surface. PRs to add support for additional providers are welcome.
 
-Image generation is not exposed yet. Chat image input and image blocks in tool
-results are still supported by the regular chat APIs.
+Image generation is exposed through OpenAI-compatible image models and
+OpenRouter image models. Chat image input and image blocks in tool results are
+still supported by the regular chat APIs.
 
 ## Installation
 
@@ -393,18 +401,107 @@ let context = Context {
 
 ## Image Generation
 
-Image generation is not exposed yet.
+Use `generate_images` with an OpenAI-compatible or OpenRouter image model. The
+returned `AssistantImages` can contain text and image output blocks, matching
+the selected model configuration.
 
 ### Basic Image Generation
 
-No Rust image-generation API is exposed at the moment. Keep using the regular
-chat APIs for image input and tool-result image blocks.
+```rust
+use ai::{
+    generate_images, providers::openai, ImageOutput, ImagesContext, Result,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.image_model("gpt-image-2").build_image()?;
+
+    let context = ImagesContext::builder()
+        .text("Generate a small watercolor robot reading a book.")
+        .build();
+
+    let images = generate_images(model, context, None).await?;
+    for output in images.output {
+        match output {
+            ImageOutput::Text(text) => println!("{}", text.text),
+            ImageOutput::Image(image) => {
+                println!("{} bytes of {}", image.data.len(), image.mime_type);
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use the
+OpenAI provider with the compatible server's base URL. For example, with
+Ollama:
+
+```rust
+use ai::{generate_images, providers::openai, ImagesContext};
+
+let ollama = openai::builder()
+    .provider_id("ollama")
+    .base_url("http://localhost:11434/v1")
+    .images()
+    .build()?;
+
+let model = ollama.model("x/z-image-turbo").build_image()?;
+let context = ImagesContext::builder()
+    .text("Generate a small watercolor robot reading a book.")
+    .build();
+
+let images = generate_images(model, context, None).await?;
+```
+
+Set `OPENROUTER_API_KEY` for `openrouter::from_env()`, or pass a key through
+`providers::openrouter::builder().api_key(Some("..."))`.
+
+OpenRouter image models remain available through the `openrouter` provider:
+
+```rust
+use ai::{generate_images, providers::openrouter, ImagesContext};
+
+let openrouter = openrouter::from_env()?;
+let model = openrouter
+    .model("google/gemini-3.1-flash-image-preview")
+    .build_image()?;
+let context = ImagesContext::builder().text("Generate a logo.").build();
+
+let images = generate_images(model, context, None).await?;
+```
+
+OpenRouter image models use conservative defaults because this crate does not
+ship a built-in model catalog. They default to text input and image output. If a
+specific OpenRouter model supports image input or text output, set those
+capabilities on the model builder:
+
+```rust
+use ai::{generate_images, providers::openrouter, ImagesContext, ModelInput, ModelOutput};
+
+let openrouter = openrouter::from_env()?;
+let model = openrouter
+    .model("google/gemini-3.1-flash-image-preview")
+    .input(vec![ModelInput::Text, ModelInput::Image])
+    .output(vec![ModelOutput::Image, ModelOutput::Text])
+    .build_image()?;
+let context = ImagesContext::builder().text("Generate a logo.").build();
+
+let images = generate_images(model, context, None).await?;
+```
 
 ### Notes and Limitations
 
-The active Rust provider surface is focused on chat/agent behavior for OpenAI
-Chat Completions, OpenAI Responses, Anthropic Messages, and GitHub
-Copilot-compatible routing.
+The active Rust image-generation surface covers OpenAI-compatible
+`/images/generations` models through the `openai-images` API and OpenRouter's
+chat-completions-style image models through the `openrouter-images` API. The
+OpenAI-compatible generations path supports text input; image edits are not
+implemented yet. OpenRouter image input and text output are opt-in model
+capabilities configured by the caller. Provider errors are returned as
+`AssistantImages` with `stop_reason: ImagesStopReason::Error`; cancelled
+requests use `ImagesStopReason::Aborted`.
 
 ## Thinking/Reasoning
 
@@ -536,14 +633,10 @@ Provider handles build executable models. Built-in language model APIs include:
 - **`openai-completions`**: OpenAI Chat Completions API
 - **`openai-responses`**: OpenAI Responses API
 
-`register_faux_provider()` is legacy support for the crate's own unit tests.
-New application code should prefer provider handles and custom provider
-implementations instead of registering global providers.
-
 ### Faux provider for tests
 
-`register_faux_provider()` registers a temporary in-memory provider for tests.
-It is opt-in and not part of the built-in provider set.
+`register_faux_provider()` registers a temporary in-memory provider for tests
+and demos. It is opt-in and not part of the built-in provider set.
 
 ### Providers and Models
 
@@ -605,8 +698,8 @@ let stream = stream_simple(
 )?;
 ```
 
-The same pattern works for local inference servers such as Ollama, vLLM, and LM
-Studio when they expose an OpenAI-compatible chat endpoint.
+The same pattern works for local inference servers such as llama.cpp, MLX,
+Ollama, vLLM, and LM Studio when they expose an OpenAI-compatible chat endpoint.
 
 Some OpenAI-compatible servers do not understand the `developer` role used for
 reasoning-capable models. For those endpoints, build the model with compat

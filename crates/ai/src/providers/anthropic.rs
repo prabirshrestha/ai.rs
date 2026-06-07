@@ -11,7 +11,7 @@ use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabili
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
-use crate::providers::register_builtins;
+use crate::providers::simple_options;
 use crate::providers::simple_options::{
     adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
 };
@@ -165,7 +165,7 @@ impl LanguageModelApi for AnthropicLanguageModelApi {
         Ok(stream_anthropic(
             model,
             context,
-            register_builtins::anthropic_options_from_stream_options(self.with_api_key(options)),
+            simple_options::anthropic_options_from_stream_options(self.with_api_key(options)),
         ))
     }
 

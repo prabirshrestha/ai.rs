@@ -1,10 +1,17 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
-use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
-use crate::providers::{openai_completions, openai_responses, register_builtins};
-use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
+use crate::provider::{
+    ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
+};
+use crate::providers::{openai_completions, openai_images, openai_responses, simple_options};
+use crate::types::{
+    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelInput,
+    ModelOutput, SimpleStreamOptions, StreamOptions,
+};
 use crate::{Error, Result};
 
 const DEFAULT_PROVIDER_ID: KnownProvider = KnownProvider::OpenAi;
@@ -24,6 +31,7 @@ pub enum OpenAiApi {
     #[default]
     Responses,
     ChatCompletions,
+    Images,
 }
 
 impl OpenAiApi {
@@ -31,6 +39,7 @@ impl OpenAiApi {
         match self {
             Self::Responses => "openai-responses",
             Self::ChatCompletions => "openai-completions",
+            Self::Images => "openai-images",
         }
     }
 }
@@ -49,6 +58,22 @@ impl OpenAi {
     pub fn model(&self, id: &str) -> ModelBuilder {
         <Self as Provider>::model(self, id)
     }
+
+    pub fn image_model(&self, id: &str) -> ModelBuilder {
+        self.image_model_builder(id)
+    }
+
+    fn image_model_builder(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(OpenAiImageModelApi {
+            api_key: self.api_key.clone(),
+            allow_missing_api_key: self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL,
+            http_client: self.http_client.clone(),
+        });
+        ModelBuilder::new_image(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![ModelInput::Text])
+            .output(vec![ModelOutput::Image])
+    }
 }
 
 impl Provider for OpenAi {
@@ -58,12 +83,16 @@ impl Provider for OpenAi {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            language_models: true,
-            image_models: false,
+            language_models: self.api != OpenAiApi::Images,
+            image_models: true,
         }
     }
 
     fn model(&self, id: &str) -> ModelBuilder {
+        if self.api == OpenAiApi::Images {
+            return self.image_model_builder(id);
+        }
+
         let runtime = Arc::new(OpenAiLanguageModelApi {
             api: self.api,
             api_key: self.api_key.clone(),
@@ -121,6 +150,11 @@ impl OpenAiBuilder {
         self
     }
 
+    pub fn images(mut self) -> Self {
+        self.api = OpenAiApi::Images;
+        self
+    }
+
     pub fn http_client(mut self, http_client: reqwest::Client) -> Self {
         self.http_client = Some(http_client);
         self
@@ -138,6 +172,50 @@ impl OpenAiBuilder {
             api: self.api,
             http_client: self.http_client,
         })
+    }
+}
+
+#[derive(Clone)]
+struct OpenAiImageModelApi {
+    api_key: Option<String>,
+    allow_missing_api_key: bool,
+    http_client: Option<reqwest::Client>,
+}
+
+impl OpenAiImageModelApi {
+    fn with_api_key(&self, mut options: ImageGenerationOptions) -> ImageGenerationOptions {
+        if options
+            .base
+            .api_key
+            .as_deref()
+            .is_none_or(|api_key| api_key.trim().is_empty())
+        {
+            if let Some(api_key) = &self.api_key {
+                options.base.api_key = Some(api_key.clone());
+            } else if self.allow_missing_api_key {
+                options.base.api_key = Some("ollama".to_string());
+            }
+        }
+        if options.base.http_client.is_none() {
+            options.base.http_client = self.http_client.clone();
+        }
+        options
+    }
+}
+
+#[async_trait]
+impl ImageModelApi for OpenAiImageModelApi {
+    fn id(&self) -> &str {
+        OpenAiApi::Images.id()
+    }
+
+    async fn generate_images(
+        &self,
+        model: Model,
+        context: ImagesContext,
+        options: ImageGenerationOptions,
+    ) -> Result<AssistantImages> {
+        Ok(openai_images::generate_images_openai(model, context, self.with_api_key(options)).await)
     }
 }
 
@@ -190,12 +268,16 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_openai_completions(
                 model,
                 context,
-                register_builtins::openai_completions_options_from_stream_options(options),
+                simple_options::openai_completions_options_from_stream_options(options),
             )),
             OpenAiApi::Responses => Ok(openai_responses::stream_openai_responses(
                 model,
                 context,
-                register_builtins::openai_responses_options_from_stream_options(options),
+                simple_options::openai_responses_options_from_stream_options(options),
+            )),
+            OpenAiApi::Images => Err(Error::unsupported_capability(
+                model.provider,
+                "language models",
             )),
         }
     }
@@ -214,6 +296,10 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
             OpenAiApi::Responses => {
                 openai_responses::stream_simple_openai_responses(model, context, options)
             }
+            OpenAiApi::Images => Err(Error::unsupported_capability(
+                model.provider,
+                "language models",
+            )),
         }
     }
 }

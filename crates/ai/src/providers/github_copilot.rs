@@ -4,7 +4,7 @@ use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
 use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
-use crate::providers::{anthropic, openai_completions, openai_responses, register_builtins};
+use crate::providers::{anthropic, openai_completions, openai_responses, simple_options};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
 use crate::{Error, Result};
 
@@ -193,19 +193,19 @@ impl LanguageModelApi for GitHubCopilotLanguageModelApi {
             GitHubCopilotApi::AnthropicMessages => Ok(anthropic::stream_anthropic(
                 model,
                 context,
-                register_builtins::anthropic_options_from_stream_options(options),
+                simple_options::anthropic_options_from_stream_options(options),
             )),
             GitHubCopilotApi::OpenAiChatCompletions => {
                 Ok(openai_completions::stream_openai_completions(
                     model,
                     context,
-                    register_builtins::openai_completions_options_from_stream_options(options),
+                    simple_options::openai_completions_options_from_stream_options(options),
                 ))
             }
             GitHubCopilotApi::OpenAiResponses => Ok(openai_responses::stream_openai_responses(
                 model,
                 context,
-                register_builtins::openai_responses_options_from_stream_options(options),
+                simple_options::openai_responses_options_from_stream_options(options),
             )),
         }
     }

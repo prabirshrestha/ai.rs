@@ -24,9 +24,10 @@ provider-option forwarding.
 
 ## Examples
 
-Provider handles are available for OpenAI, Anthropic, and GitHub Copilot. Use
-`providers::openai::builder()` for OpenAI-compatible endpoints such as Ollama,
-vLLM, and Azure Foundry.
+Provider handles are available for OpenAI, Anthropic, GitHub Copilot, and
+OpenRouter image generation. Use `providers::openai::builder()` for
+OpenAI-compatible endpoints such as llama.cpp, MLX, Ollama, vLLM, and Azure
+Foundry.
 
 ### Complete
 
@@ -115,6 +116,42 @@ let anthropic_with_key = anthropic::builder()
     .api_key("sk-ant-...")
     .build()?;
 ```
+
+#### OpenAI, llama.cpp, MLX, and Ollama Image Generation
+
+```rust
+use ai::{generate_images, providers::openai, ImagesContext};
+
+let openai = openai::from_env()?;
+let model = openai
+    .image_model("gpt-image-2")
+    .build_image()?;
+let context = ImagesContext::builder()
+    .text("Generate a small watercolor robot reading a book.")
+    .build();
+
+let images = generate_images(model, context, None).await?;
+```
+
+For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use the
+OpenAI provider with the compatible server's base URL. For example, with
+Ollama:
+
+```rust
+use ai::{generate_images, providers::openai, ImagesContext};
+
+let ollama = openai::builder()
+    .provider_id("ollama")
+    .base_url("http://localhost:11434/v1")
+    .images()
+    .build()?;
+let model = ollama.model("x/z-image-turbo").build_image()?;
+let context = ImagesContext::builder().text("Generate a robot.").build();
+
+let images = generate_images(model, context, None).await?;
+```
+
+OpenRouter image models are also available through `providers::openrouter`.
 
 ### Agent
 

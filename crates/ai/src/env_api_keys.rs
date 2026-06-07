@@ -2,12 +2,14 @@ pub const GITHUB_COPILOT_TOKEN_ENV_VAR: &str = "COPILOT_GITHUB_TOKEN";
 pub const ANTHROPIC_OAUTH_TOKEN_ENV_VAR: &str = "ANTHROPIC_OAUTH_TOKEN";
 pub const ANTHROPIC_API_KEY_ENV_VAR: &str = "ANTHROPIC_API_KEY";
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
+pub const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownProvider {
     GitHubCopilot,
     Anthropic,
     OpenAi,
+    OpenRouter,
 }
 
 impl KnownProvider {
@@ -16,6 +18,7 @@ impl KnownProvider {
             Self::GitHubCopilot => "github-copilot",
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
         }
     }
 }
@@ -48,6 +51,9 @@ pub fn get_env_api_key(provider: impl AsRef<str>) -> Option<String> {
                 .or_else(|| env_value(ANTHROPIC_API_KEY_ENV_VAR))
         }
         provider if provider == KnownProvider::OpenAi.as_str() => env_value(OPENAI_API_KEY_ENV_VAR),
+        provider if provider == KnownProvider::OpenRouter.as_str() => {
+            env_value(OPENROUTER_API_KEY_ENV_VAR)
+        }
         _ => None,
     }
 }

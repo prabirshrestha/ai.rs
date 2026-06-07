@@ -47,9 +47,11 @@ responses unless the lower-level `StreamOptions` shape is needed. Use `stream`
 or `complete` for direct provider-option forwarding or lower-level request
 control.
 
-The active built-in provider scope is OpenAI, Anthropic, and GitHub Copilot.
-Azure Foundry and other compatible endpoints should be documented and tested as
-configured provider handles, such as `providers::openai::builder()` plus
+The active built-in language provider scope is OpenAI, Anthropic, and GitHub
+Copilot. The active built-in image provider scope is OpenAI-compatible image
+generation and OpenRouter image generation. Azure Foundry and other compatible
+language endpoints should be documented and tested as configured provider
+handles, such as `providers::openai::builder()` plus
 `provider.model(...).base_url(...).headers(...).compat(...)`.
 Do not add broad provider autodetection by provider name or base URL unless that
 provider is intentionally in scope.
