@@ -53,7 +53,8 @@ pub use oauth::{
 };
 pub use provider::{ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 pub use providers::anthropic::{
-    Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay,
+    Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, stream_anthropic,
+    stream_simple_anthropic,
 };
 pub use providers::faux::{
     FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
@@ -63,13 +64,13 @@ pub use providers::faux::{
 };
 pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
-pub use providers::openai_completions::OpenAICompletionsOptions;
-pub use providers::openai_responses::OpenAIResponsesOptions;
-pub use providers::openrouter::OpenRouter;
-pub use providers::register_builtins::{
-    stream_anthropic, stream_openai_completions, stream_openai_responses, stream_simple_anthropic,
-    stream_simple_openai_completions, stream_simple_openai_responses,
+pub use providers::openai_completions::{
+    OpenAICompletionsOptions, stream_openai_completions, stream_simple_openai_completions,
 };
+pub use providers::openai_responses::{
+    OpenAIResponsesOptions, stream_openai_responses, stream_simple_openai_responses,
+};
+pub use providers::openrouter::OpenRouter;
 pub use session_resources::{
     SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
     register_session_resource_cleanup,

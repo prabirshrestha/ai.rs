@@ -7,7 +7,7 @@ use crate::event_stream::AssistantEventStream;
 use crate::provider::{
     ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
 };
-use crate::providers::{openai_completions, openai_images, openai_responses, register_builtins};
+use crate::providers::{openai_completions, openai_images, openai_responses, simple_options};
 use crate::types::{
     AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelInput,
     ModelOutput, SimpleStreamOptions, StreamOptions,
@@ -268,12 +268,12 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
             OpenAiApi::ChatCompletions => Ok(openai_completions::stream_openai_completions(
                 model,
                 context,
-                register_builtins::openai_completions_options_from_stream_options(options),
+                simple_options::openai_completions_options_from_stream_options(options),
             )),
             OpenAiApi::Responses => Ok(openai_responses::stream_openai_responses(
                 model,
                 context,
-                register_builtins::openai_responses_options_from_stream_options(options),
+                simple_options::openai_responses_options_from_stream_options(options),
             )),
             OpenAiApi::Images => Err(Error::unsupported_capability(
                 model.provider,

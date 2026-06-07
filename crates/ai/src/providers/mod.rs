@@ -8,6 +8,5 @@ pub(crate) mod openai_images;
 pub(crate) mod openai_prompt_cache;
 pub mod openai_responses;
 pub mod openrouter;
-pub(crate) mod register_builtins;
 pub(crate) mod simple_options;
 pub(crate) mod transform_messages;
