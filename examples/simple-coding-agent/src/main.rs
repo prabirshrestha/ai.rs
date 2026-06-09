@@ -84,8 +84,10 @@ fn build_agent() -> Result<Agent> {
     let cwd = env::current_dir()?;
     let base_url = env::var("OPENAI_BASE_URL").ok();
     let model_id = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
+    let api_key = env::var("OPENAI_API_KEY").ok();
     let openai = match base_url.as_deref() {
         Some(base_url) => openai::builder()
+            .api_key(api_key.as_deref())
             .base_url(base_url)
             .chat_completions()
             .build()?,
