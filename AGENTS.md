@@ -4,7 +4,8 @@ Guidance for agents working in this repository.
 
 ## Project Shape
 
-This is a Rust workspace for the `ai` crate in `crates/ai`.
+This is a Rust workspace with the `ai` crate in `crates/ai` and example
+packages under `examples/`.
 
 The crate provides:
 
