@@ -137,7 +137,7 @@ fn build_bash_tool() -> Result<DynAgentTool> {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash command to run in the agent process current working directory."
+                    "description": "The bash command to run in the agent process's current working directory."
                 }
             },
             "required": ["command"],
