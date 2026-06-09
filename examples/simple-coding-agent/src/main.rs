@@ -149,6 +149,8 @@ fn build_bash_tool() -> Result<DynAgentTool> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AgentError::Other("missing string argument: command".to_string()))?;
 
+            // For a production agent, add a timeout and cap output before
+            // returning stdout/stderr to the model.
             let output = Command::new("bash")
                 .arg("-lc")
                 .arg(command)
