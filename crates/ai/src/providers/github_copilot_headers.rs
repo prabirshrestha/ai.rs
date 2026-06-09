@@ -2,6 +2,24 @@ use std::collections::HashMap;
 
 use crate::types::{Message, ToolResultContent, UserContent, UserMessageContent};
 
+pub(super) fn copilot_static_headers() -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "User-Agent".to_string(),
+            "GitHubCopilotChat/0.35.0".to_string(),
+        ),
+        ("Editor-Version".to_string(), "vscode/1.107.0".to_string()),
+        (
+            "Editor-Plugin-Version".to_string(),
+            "copilot-chat/0.35.0".to_string(),
+        ),
+        (
+            "Copilot-Integration-Id".to_string(),
+            "vscode-chat".to_string(),
+        ),
+    ])
+}
+
 pub fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
     match messages
         .iter()
@@ -165,6 +183,28 @@ mod tests {
         assert_eq!(
             headers.get("Copilot-Vision-Request").map(String::as_str),
             Some("true")
+        );
+    }
+
+    #[test]
+    fn builds_static_headers() {
+        let headers = copilot_static_headers();
+
+        assert_eq!(
+            headers.get("User-Agent").map(String::as_str),
+            Some("GitHubCopilotChat/0.35.0")
+        );
+        assert_eq!(
+            headers.get("Editor-Version").map(String::as_str),
+            Some("vscode/1.107.0")
+        );
+        assert_eq!(
+            headers.get("Editor-Plugin-Version").map(String::as_str),
+            Some("copilot-chat/0.35.0")
+        );
+        assert_eq!(
+            headers.get("Copilot-Integration-Id").map(String::as_str),
+            Some("vscode-chat")
         );
     }
 }
