@@ -103,7 +103,7 @@ mod tests {
             content: Vec::new(),
             api: "openai-completions".to_string(),
             provider: "ollama".to_string(),
-            model: "qwen3.5:35b".to_string(),
+            model: "gemma4:12b".to_string(),
             response_model: None,
             response_id: None,
             diagnostics: Vec::new(),
