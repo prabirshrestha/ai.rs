@@ -344,7 +344,7 @@ mod tests {
             .chat_completions()
             .build()
             .expect("provider");
-        let model = openai.model("gemma3").build().expect("model");
+        let model = openai.model("gemma4:12b").build().expect("model");
 
         let stream = crate::stream_simple(model, Context::default(), None);
 
@@ -360,7 +360,7 @@ mod tests {
             .chat_completions()
             .build()
             .expect("provider");
-        let model = openai.model("gemma3").build().expect("model");
+        let model = openai.model("gemma4:12b").build().expect("model");
 
         let stream = crate::stream_simple(model, Context::default(), None);
 
@@ -376,7 +376,7 @@ mod tests {
             .chat_completions()
             .build()
             .expect("provider");
-        let model = openai.model("gemma3").build().expect("model");
+        let model = openai.model("gemma4:12b").build().expect("model");
 
         let stream = crate::stream_simple(model, Context::default(), None);
 

@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
                 .base_url("http://localhost:11434/v1")
                 .chat_completions()
                 .build()?;
-            (Box::new(local), "gemma3")
+            (Box::new(local), "gemma4:12b")
         };
 
     let model = provider.model(model_id).build()?;
