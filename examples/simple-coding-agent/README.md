@@ -21,4 +21,11 @@ cargo run -p simple-coding-agent
 Commands inside the REPL:
 
 - `/clear`: reset conversation context.
+- `/model [name]`: show the current model, or switch models on the active
+  provider while preserving conversation context.
+- `/login`: log into GitHub Copilot with the device-code flow and switch the
+  agent to Copilot while preserving conversation context. Set `COPILOT_MODEL` to
+  override the default `gpt-5.5` model.
+- `/login <enterprise-domain>`: log into GitHub Copilot for a GitHub Enterprise
+  domain.
 - `/exit` or `/quit`: exit.

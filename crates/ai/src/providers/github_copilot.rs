@@ -4,6 +4,7 @@ use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
 use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+use crate::providers::github_copilot_headers::copilot_static_headers;
 use crate::providers::{anthropic, openai_completions, openai_responses, simple_options};
 use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
 use crate::{Error, Result};
@@ -80,6 +81,7 @@ impl Provider for GitHubCopilot {
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(base_url)
+            .headers(copilot_static_headers())
             .input(vec![ModelInput::Text, ModelInput::Image])
             .context_window(1_000_000)
             .max_tokens(16_384)
@@ -279,7 +281,17 @@ mod tests {
         assert_eq!(model.provider_id(), "github-copilot");
         assert_eq!(model.api_id(), "openai-responses");
         assert_eq!(model.base_url, DEFAULT_BASE_URL);
-        assert!(model.headers.is_empty());
+        assert_eq!(
+            model.headers.get("Editor-Version").map(String::as_str),
+            Some("vscode/1.107.0")
+        );
+        assert_eq!(
+            model
+                .headers
+                .get("Copilot-Integration-Id")
+                .map(String::as_str),
+            Some("vscode-chat")
+        );
     }
 
     #[test]
