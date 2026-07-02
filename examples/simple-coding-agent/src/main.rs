@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (agent, mut active_provider) = build_agent()?;
+    let (agent, mut active_provider, mut provider_setup_error) = build_agent()?;
 
     let _subscription = agent.subscribe(|event, _token| async move {
         match event {
@@ -115,12 +115,18 @@ async fn main() -> Result<()> {
                 match login_github_copilot_and_swap(&agent, enterprise_domain).await {
                     Ok((model_id, provider)) => {
                         active_provider = provider;
+                        provider_setup_error = None;
                         println!("logged into GitHub Copilot; switched to {model_id}");
                     }
                     Err(error) => eprintln!("\nerror: {error}"),
                 }
             }
             _ => {
+                if let Some(error) = &provider_setup_error {
+                    eprintln!("\nerror: {error}");
+                    println!();
+                    continue;
+                }
                 if let Err(error) = agent.prompt_text(prompt, Vec::new()).await {
                     eprintln!("\nerror: {error}");
                 }
@@ -133,11 +139,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_agent() -> Result<(Agent, ActiveProvider)> {
+fn build_agent() -> Result<(Agent, ActiveProvider, Option<String>)> {
     let cwd = env::current_dir()?;
     let base_url = env::var("OPENAI_BASE_URL").ok();
+    let api_key = openai_api_key();
+    let provider_setup_error = openai_setup_error(base_url.as_deref(), api_key.as_deref());
     let model_id = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
-    let provider = ActiveProvider::OpenAi(build_openai_provider(base_url.as_deref())?);
+    let provider = ActiveProvider::OpenAi(build_openai_provider(
+        base_url.as_deref(),
+        api_key.as_deref(),
+    )?);
     let model = provider.model(&model_id)?;
 
     let system_prompt = format!(
@@ -169,11 +180,14 @@ Current working directory: {}"#,
         "base URL: {}",
         base_url.as_deref().unwrap_or("OpenAI default")
     );
+    if let Some(error) = &provider_setup_error {
+        println!("{error}");
+    }
     println!(
         "type a prompt, /model [name] to view or switch models on the active provider, /login to use Copilot, /clear to reset context, or /exit to quit"
     );
 
-    Ok((agent, provider))
+    Ok((agent, provider, provider_setup_error))
 }
 
 fn build_bash_tool() -> Result<DynAgentTool> {
@@ -240,16 +254,46 @@ impl ActiveProvider {
     }
 }
 
-fn build_openai_provider(base_url: Option<&str>) -> Result<openai::OpenAi> {
-    let api_key = env::var("OPENAI_API_KEY").ok();
+fn build_openai_provider(base_url: Option<&str>, api_key: Option<&str>) -> Result<openai::OpenAi> {
     match base_url {
         Some(base_url) => openai::builder()
-            .api_key(api_key.as_deref())
+            .api_key(api_key)
             .base_url(base_url)
             .chat_completions()
             .build(),
-        None => openai::from_env(),
+        None => openai::builder().api_key(api_key).build(),
     }
+}
+
+fn openai_api_key() -> Option<String> {
+    env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|api_key| api_key.trim().to_string())
+        .filter(|api_key| !api_key.is_empty())
+}
+
+fn openai_setup_error(base_url: Option<&str>, api_key: Option<&str>) -> Option<String> {
+    if base_url.is_some() {
+        return None;
+    }
+
+    match api_key {
+        Some(api_key) if looks_like_github_token(api_key) => Some(
+            "OPENAI_API_KEY looks like a GitHub token. Set OPENAI_API_KEY to an OpenAI key, unset it and run /login for Copilot, or set OPENAI_BASE_URL for a local OpenAI-compatible server."
+                .to_string(),
+        ),
+        Some(_) => None,
+        None => Some(
+            "no OPENAI_API_KEY found; set it before prompting, run /login for Copilot, or set OPENAI_BASE_URL for a local OpenAI-compatible server"
+                .to_string(),
+        ),
+    }
+}
+
+fn looks_like_github_token(api_key: &str) -> bool {
+    ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+        .iter()
+        .any(|prefix| api_key.starts_with(prefix))
 }
 
 async fn switch_model(agent: &Agent, provider: &ActiveProvider, model_id: &str) -> Result<String> {
@@ -307,4 +351,37 @@ fn assistant_visible_content(message: &AssistantMessage) -> String {
             AssistantContent::ToolCall(_) => Some("<tool_call>"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_github_token, openai_setup_error};
+
+    #[test]
+    fn openai_setup_accepts_local_base_url_without_key() {
+        assert_eq!(
+            openai_setup_error(Some("http://localhost:11434/v1"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn openai_setup_rejects_missing_and_github_tokens() {
+        assert!(
+            openai_setup_error(None, None)
+                .expect("missing key should report setup instructions")
+                .contains("no OPENAI_API_KEY found")
+        );
+        assert!(looks_like_github_token("ghu_abc"));
+        assert!(
+            openai_setup_error(None, Some("ghu_abc"))
+                .expect("GitHub token should report setup instructions")
+                .contains("looks like a GitHub token")
+        );
+    }
+
+    #[test]
+    fn openai_setup_accepts_openai_shaped_key() {
+        assert_eq!(openai_setup_error(None, Some("sk-test")), None);
+    }
 }
