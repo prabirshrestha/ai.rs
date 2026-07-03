@@ -31,6 +31,9 @@ const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
 const DEFAULT_COPILOT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
+const GITHUB_COPILOT_REFRESH_TOKEN_KEY: &str = "githubRefreshToken";
+const GITHUB_COPILOT_ACCESS_EXPIRES_KEY: &str = "githubAccessExpires";
+const GITHUB_ACCESS_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 const CANCEL_MESSAGE: &str = "Login cancelled";
 const TIMEOUT_MESSAGE: &str = "Device flow timed out";
 const SLOW_DOWN_TIMEOUT_MESSAGE: &str = "Device flow timed out after one or more slow_down responses. This is often caused by clock drift in WSL or VM environments. Please sync or restart the VM clock and try again.";
@@ -239,11 +242,7 @@ impl GitHubCopilotOAuthProvider {
     }
 
     pub async fn refresh_token(self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
-        refresh_github_copilot_token(
-            &credentials.refresh,
-            github_copilot_enterprise_domain(credentials),
-        )
-        .await
+        refresh_github_copilot_credentials(credentials).await
     }
 
     pub fn get_api_key(self, credentials: &OAuthCredentials) -> String {
@@ -278,11 +277,7 @@ impl OAuthProviderInterface for GitHubCopilotOAuthProvider {
     }
 
     async fn refresh_token(&self, credentials: &OAuthCredentials) -> Result<OAuthCredentials> {
-        refresh_github_copilot_token(
-            &credentials.refresh,
-            github_copilot_enterprise_domain(credentials),
-        )
-        .await
+        refresh_github_copilot_credentials(credentials).await
     }
 
     fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
@@ -567,10 +562,53 @@ pub(crate) fn get_github_copilot_base_url(
     DEFAULT_COPILOT_BASE_URL.to_string()
 }
 
-pub async fn refresh_github_copilot_token(
-    refresh_token: &str,
+/// A GitHub user access token minted via the device flow (or a refresh-token
+/// grant), plus the refresh token and lifetime GitHub returns when the Copilot
+/// app opts into expiring user tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubUserToken {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+/// The GitHub refresh token (`ghr_...`) persisted alongside the credentials, if
+/// the account uses expiring user tokens.
+fn github_copilot_refresh_token(credentials: &OAuthCredentials) -> Option<&str> {
+    credentials
+        .extra
+        .get(GITHUB_COPILOT_REFRESH_TOKEN_KEY)
+        .and_then(Value::as_str)
+}
+
+/// The absolute expiry (Unix epoch millis, skew-adjusted) of the stored GitHub
+/// user access token, if known.
+fn github_copilot_access_expires(credentials: &OAuthCredentials) -> Option<u64> {
+    credentials
+        .extra
+        .get(GITHUB_COPILOT_ACCESS_EXPIRES_KEY)
+        .and_then(Value::as_u64)
+}
+
+/// Converts an `expires_in` (seconds) into a skew-adjusted absolute expiry in
+/// Unix epoch millis.
+fn github_access_expiry_ms(expires_in_seconds: u64) -> u64 {
+    crate::utils::time::now_millis()
+        .saturating_add(expires_in_seconds.saturating_mul(1000))
+        .saturating_sub(GITHUB_ACCESS_TOKEN_EXPIRY_SKEW_MS)
+}
+
+/// Whether an error is GitHub rejecting our credentials (401/403), i.e. a signal
+/// to try renewing the GitHub user token before giving up.
+fn is_github_auth_error(error: &Error) -> bool {
+    matches!(error, Error::ApiStatus { status, .. } if matches!(status.as_u16(), 401 | 403))
+}
+
+/// Mints a short-lived Copilot API token from a GitHub user access token.
+async fn mint_copilot_token(
+    github_access_token: &str,
     enterprise_domain: Option<&str>,
-) -> Result<OAuthCredentials> {
+) -> Result<CopilotTokenResponse> {
     let domain = enterprise_domain
         .and_then(normalize_domain)
         .unwrap_or_else(|| DEFAULT_GITHUB_DOMAIN.to_string());
@@ -578,7 +616,7 @@ pub async fn refresh_github_copilot_token(
     let client = reqwest::Client::new();
     let response = client
         .get(urls.copilot_token_url)
-        .headers(copilot_headers(Some(refresh_token))?)
+        .headers(copilot_headers(Some(github_access_token))?)
         .send()
         .await?;
 
@@ -588,12 +626,134 @@ pub async fn refresh_github_copilot_token(
         return Err(Error::ApiStatus { status, body });
     }
 
-    let token = parse_copilot_token_response(response.json::<Value>().await?)?;
+    parse_copilot_token_response(response.json::<Value>().await?)
+}
+
+/// Mints Copilot credentials from a GitHub user access token without attempting
+/// to renew that token. Kept for the login path and backwards compatibility;
+/// callers holding full credentials should prefer
+/// [`refresh_github_copilot_credentials`], which can renew an expired GitHub
+/// token before minting.
+pub async fn refresh_github_copilot_token(
+    refresh_token: &str,
+    enterprise_domain: Option<&str>,
+) -> Result<OAuthCredentials> {
+    let token = mint_copilot_token(refresh_token, enterprise_domain).await?;
     Ok(copilot_credentials_from_token(
         refresh_token,
+        None,
+        None,
         enterprise_domain.and_then(normalize_domain),
         token,
     ))
+}
+
+/// Refreshes GitHub Copilot credentials, renewing the underlying GitHub user
+/// access token when it has expired.
+///
+/// GitHub Apps that opt into expiring user tokens issue a `ghu_` access token
+/// (valid ~8h) plus a `ghr_` refresh token (valid ~6 months). Previously only the
+/// access token was kept, so once it lapsed every Copilot mint failed with
+/// `401 Bad credentials` until the user re-ran the device-code login. When a
+/// refresh token is present we now exchange it for a fresh GitHub token —
+/// proactively when the stored token is known to have expired, and reactively if
+/// a mint is rejected — so a long-running proxy self-heals without re-login. With
+/// no refresh token (non-expiring tokens, or credentials from before this change)
+/// the behaviour is unchanged and a hard failure still surfaces for re-login.
+async fn refresh_github_copilot_credentials(
+    credentials: &OAuthCredentials,
+) -> Result<OAuthCredentials> {
+    let enterprise_domain = github_copilot_enterprise_domain(credentials).map(str::to_string);
+    let domain = enterprise_domain.as_deref();
+    let mut github_access = credentials.refresh.clone();
+    let mut github_refresh = github_copilot_refresh_token(credentials).map(str::to_string);
+    let mut github_expires = github_copilot_access_expires(credentials);
+
+    // Proactive: the stored GitHub token has expired and we hold a refresh token,
+    // so renew before spending a request on a mint that would 401 anyway.
+    if let Some(refresh) = github_refresh.clone()
+        && github_expires.is_some_and(|expires| crate::utils::time::now_millis() >= expires)
+    {
+        let renewed = refresh_github_user_token(&refresh, domain).await?;
+        github_access = renewed.access_token;
+        github_refresh = renewed.refresh_token.or(Some(refresh));
+        github_expires = renewed.expires_in.map(github_access_expiry_ms);
+    }
+
+    // Reactive: GitHub rejected the token (expiry unknown, or it lapsed just now).
+    // Renew once and retry; if the renewal itself fails, surface it for re-login.
+    let token = match mint_copilot_token(&github_access, domain).await {
+        Ok(token) => token,
+        Err(error) => {
+            let Some(refresh) = github_refresh.clone() else {
+                return Err(error);
+            };
+            if !is_github_auth_error(&error) {
+                return Err(error);
+            }
+            let renewed = refresh_github_user_token(&refresh, domain).await?;
+            github_access = renewed.access_token;
+            github_refresh = renewed.refresh_token.or(Some(refresh));
+            github_expires = renewed.expires_in.map(github_access_expiry_ms);
+            mint_copilot_token(&github_access, domain).await?
+        }
+    };
+
+    Ok(copilot_credentials_from_token(
+        &github_access,
+        github_refresh.as_deref(),
+        github_expires,
+        enterprise_domain,
+        token,
+    ))
+}
+
+/// Exchanges a GitHub refresh token (`ghr_`) for a fresh user access token using
+/// the device-flow client id. Public clients refresh with just `client_id` (no
+/// secret), the same way the token was originally minted.
+async fn refresh_github_user_token(
+    refresh_token: &str,
+    enterprise_domain: Option<&str>,
+) -> Result<GithubUserToken> {
+    let domain = enterprise_domain
+        .and_then(normalize_domain)
+        .unwrap_or_else(|| DEFAULT_GITHUB_DOMAIN.to_string());
+    let urls = GitHubCopilotUrls::new(&domain);
+    let client = reqwest::Client::new();
+    refresh_github_user_token_at(&client, &urls.access_token_url, refresh_token).await
+}
+
+async fn refresh_github_user_token_at(
+    client: &reqwest::Client,
+    access_token_url: &str,
+    refresh_token: &str,
+) -> Result<GithubUserToken> {
+    let response = client
+        .post(access_token_url)
+        .header("Accept", "application/json")
+        .header("User-Agent", "GitHubCopilotChat/0.35.0")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_body(&[
+            ("client_id", GITHUB_COPILOT_CLIENT_ID),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ]))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(Error::ApiStatus { status, body });
+    }
+
+    match parse_device_token_response(response.json::<Value>().await?) {
+        OAuthDeviceCodePollResult::Complete(token) => Ok(token),
+        OAuthDeviceCodePollResult::Failed(message) => Err(Error::Provider(message)),
+        OAuthDeviceCodePollResult::Pending | OAuthDeviceCodePollResult::SlowDown => Err(
+            Error::Provider("Unexpected polling response while refreshing GitHub token".to_string()),
+        ),
+    }
 }
 
 pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
@@ -631,12 +791,18 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
         expires_in_seconds: Some(device.expires_in),
     });
 
-    let refresh_token =
+    let github =
         poll_for_github_access_token(&domain, device, callbacks.cancellation_token.clone()).await?;
-    let credentials =
-        refresh_github_copilot_token(&refresh_token, enterprise_domain.as_deref()).await?;
+    let github_expires = github.expires_in.map(github_access_expiry_ms);
+    let token = mint_copilot_token(&github.access_token, enterprise_domain.as_deref()).await?;
 
-    Ok(credentials)
+    Ok(copilot_credentials_from_token(
+        &github.access_token,
+        github.refresh_token.as_deref(),
+        github_expires,
+        enterprise_domain,
+        token,
+    ))
 }
 
 pub async fn login_anthropic(callbacks: OAuthLoginCallbacks) -> Result<OAuthCredentials> {
@@ -1133,7 +1299,7 @@ async fn poll_for_github_access_token(
     domain: &str,
     device: DeviceCodeResponse,
     cancellation_token: Option<CancellationToken>,
-) -> Result<String> {
+) -> Result<GithubUserToken> {
     let urls = GitHubCopilotUrls::new(domain);
     let client = reqwest::Client::new();
     poll_oauth_device_code_flow(
@@ -1180,13 +1346,20 @@ fn get_base_url_from_token(token: &str) -> Option<String> {
     Some(format!("https://{api_host}"))
 }
 
-fn parse_device_token_response(raw: Value) -> OAuthDeviceCodePollResult<String> {
+fn parse_device_token_response(raw: Value) -> OAuthDeviceCodePollResult<GithubUserToken> {
     let Some(object) = raw.as_object() else {
         return OAuthDeviceCodePollResult::Failed("Invalid device token response".to_string());
     };
 
     if let Some(access_token) = object.get("access_token").and_then(Value::as_str) {
-        return OAuthDeviceCodePollResult::Complete(access_token.to_string());
+        return OAuthDeviceCodePollResult::Complete(GithubUserToken {
+            access_token: access_token.to_string(),
+            refresh_token: object
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            expires_in: object.get("expires_in").and_then(Value::as_u64),
+        });
     }
 
     let Some(error) = object.get("error").and_then(Value::as_str) else {
@@ -1232,7 +1405,9 @@ fn parse_copilot_token_response(raw: Value) -> Result<CopilotTokenResponse> {
 }
 
 fn copilot_credentials_from_token(
-    refresh_token: &str,
+    github_access_token: &str,
+    github_refresh_token: Option<&str>,
+    github_access_expires_at_ms: Option<u64>,
     enterprise_domain: Option<String>,
     token: CopilotTokenResponse,
 ) -> OAuthCredentials {
@@ -1243,9 +1418,21 @@ fn copilot_credentials_from_token(
             Value::String(enterprise_domain),
         );
     }
+    if let Some(refresh_token) = github_refresh_token {
+        extra.insert(
+            GITHUB_COPILOT_REFRESH_TOKEN_KEY.to_string(),
+            Value::String(refresh_token.to_string()),
+        );
+    }
+    if let Some(expires_at) = github_access_expires_at_ms {
+        extra.insert(
+            GITHUB_COPILOT_ACCESS_EXPIRES_KEY.to_string(),
+            Value::from(expires_at),
+        );
+    }
 
     OAuthCredentials {
-        refresh: refresh_token.to_string(),
+        refresh: github_access_token.to_string(),
         access: token.token,
         expires: token
             .expires_at
@@ -1742,6 +1929,8 @@ mod tests {
     fn copilot_credentials_apply_expiry_skew() {
         let credentials = copilot_credentials_from_token(
             "refresh-token",
+            None,
+            None,
             Some("company.ghe.com".to_string()),
             CopilotTokenResponse {
                 token: "access-token".to_string(),
@@ -1762,6 +1951,8 @@ mod tests {
     fn oauth_credentials_flatten_provider_specific_extra_fields() {
         let credentials = copilot_credentials_from_token(
             "refresh-token",
+            None,
+            None,
             Some("company.ghe.com".to_string()),
             CopilotTokenResponse {
                 token: "access-token".to_string(),
@@ -1820,7 +2011,11 @@ mod tests {
     fn parses_device_token_response() {
         assert_eq!(
             parse_device_token_response(serde_json::json!({ "access_token": "ghu_refresh" })),
-            OAuthDeviceCodePollResult::Complete("ghu_refresh".to_string())
+            OAuthDeviceCodePollResult::Complete(GithubUserToken {
+                access_token: "ghu_refresh".to_string(),
+                refresh_token: None,
+                expires_in: None,
+            })
         );
         assert_eq!(
             parse_device_token_response(serde_json::json!({
@@ -2167,6 +2362,164 @@ mod tests {
             ]),
             "client_id=Iv1.b507a08c87ecfe98&scope=read%3Auser&device_code=abc+def%2Fghi"
         );
+    }
+
+    #[test]
+    fn device_token_response_captures_refresh_token_and_expiry() {
+        match parse_device_token_response(serde_json::json!({
+            "access_token": "ghu_new",
+            "refresh_token": "ghr_new",
+            "expires_in": 28_800,
+            "token_type": "bearer"
+        })) {
+            OAuthDeviceCodePollResult::Complete(token) => {
+                assert_eq!(token.access_token, "ghu_new");
+                assert_eq!(token.refresh_token.as_deref(), Some("ghr_new"));
+                assert_eq!(token.expires_in, Some(28_800));
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn device_token_response_without_refresh_token_is_non_expiring() {
+        match parse_device_token_response(
+            serde_json::json!({ "access_token": "gho_classic", "token_type": "bearer" }),
+        ) {
+            OAuthDeviceCodePollResult::Complete(token) => {
+                assert_eq!(token.access_token, "gho_classic");
+                assert!(token.refresh_token.is_none());
+                assert!(token.expires_in.is_none());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn github_auth_errors_signal_token_renewal() {
+        assert!(is_github_auth_error(&Error::ApiStatus {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: String::new(),
+        }));
+        assert!(is_github_auth_error(&Error::ApiStatus {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: String::new(),
+        }));
+        assert!(!is_github_auth_error(&Error::ApiStatus {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: String::new(),
+        }));
+        assert!(!is_github_auth_error(&Error::Provider("nope".to_string())));
+    }
+
+    #[test]
+    fn copilot_credentials_persist_refresh_token_and_expiry() {
+        let credentials = copilot_credentials_from_token(
+            "ghu_access",
+            Some("ghr_refresh"),
+            Some(1_700_000_000_000),
+            None,
+            CopilotTokenResponse {
+                token: "copilot-token".to_string(),
+                expires_at: 2_000,
+            },
+        );
+
+        assert_eq!(credentials.refresh, "ghu_access");
+        assert_eq!(
+            github_copilot_refresh_token(&credentials),
+            Some("ghr_refresh")
+        );
+        assert_eq!(
+            github_copilot_access_expires(&credentials),
+            Some(1_700_000_000_000)
+        );
+
+        let json = serde_json::to_value(&credentials).expect("credentials json");
+        assert_eq!(json["githubRefreshToken"], "ghr_refresh");
+        assert_eq!(json["githubAccessExpires"].as_u64(), Some(1_700_000_000_000));
+        let round_tripped: OAuthCredentials =
+            serde_json::from_value(json).expect("round-tripped credentials");
+        assert_eq!(
+            github_copilot_refresh_token(&round_tripped),
+            Some("ghr_refresh")
+        );
+    }
+
+    #[test]
+    fn copilot_credentials_omit_refresh_metadata_when_absent() {
+        let credentials = copilot_credentials_from_token(
+            "ghu_access",
+            None,
+            None,
+            None,
+            CopilotTokenResponse {
+                token: "copilot-token".to_string(),
+                expires_at: 2_000,
+            },
+        );
+
+        assert!(github_copilot_refresh_token(&credentials).is_none());
+        assert!(github_copilot_access_expires(&credentials).is_none());
+        let json = serde_json::to_value(&credentials).expect("credentials json");
+        assert!(json.get("githubRefreshToken").is_none());
+        assert!(json.get("githubAccessExpires").is_none());
+    }
+
+    #[tokio::test]
+    async fn github_user_token_refresh_uses_refresh_token_grant() {
+        let captured_body = Arc::new(Mutex::new(None));
+        let token_url = spawn_github_refresh_server(Arc::clone(&captured_body)).await;
+        let client = reqwest::Client::new();
+
+        let token = refresh_github_user_token_at(&client, &token_url, "ghr_old")
+            .await
+            .unwrap();
+
+        assert_eq!(token.access_token, "ghu_refreshed");
+        assert_eq!(token.refresh_token.as_deref(), Some("ghr_rotated"));
+        assert_eq!(token.expires_in, Some(28_800));
+
+        let body = captured_body
+            .lock()
+            .expect("captured body lock poisoned")
+            .clone()
+            .expect("captured request body");
+        assert!(body.contains("grant_type=refresh_token"), "body: {body}");
+        assert!(body.contains("refresh_token=ghr_old"), "body: {body}");
+        assert!(
+            body.contains(&format!("client_id={GITHUB_COPILOT_CLIENT_ID}")),
+            "body: {body}"
+        );
+    }
+
+    async fn spawn_github_refresh_server(captured_body: Arc<Mutex<Option<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_string())
+                .unwrap_or_default();
+            *captured_body.lock().expect("captured body lock poisoned") = Some(body);
+            let response_body = serde_json::json!({
+                "access_token": "ghu_refreshed",
+                "refresh_token": "ghr_rotated",
+                "expires_in": 28_800,
+                "token_type": "bearer",
+                "scope": ""
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}/login/oauth/access_token")
     }
 
     async fn spawn_anthropic_token_server(
