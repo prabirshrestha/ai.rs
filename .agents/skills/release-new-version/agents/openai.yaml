@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release New Version"
+  short_description: "Release this crate via tag CI"
+  default_prompt: "Use $release-new-version to bump, build, push, wait for CI, then tag a crate release."
