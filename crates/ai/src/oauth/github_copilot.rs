@@ -11,6 +11,7 @@ use crate::{Error, Result};
 use super::*;
 
 const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
 
 const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 
@@ -154,6 +155,25 @@ fn is_github_auth_error(error: &Error) -> bool {
     matches!(error, Error::ApiStatus { status, .. } if matches!(status.as_u16(), 401 | 403))
 }
 
+/// POSTs `fields` as `application/x-www-form-urlencoded` to a GitHub OAuth
+/// endpoint with the client headers Copilot expects, returning the checked
+/// response. Shared by the device-code, token-poll, and refresh-grant calls.
+async fn github_oauth_form_post(
+    client: &reqwest::Client,
+    url: &str,
+    fields: &[(&str, &str)],
+) -> Result<reqwest::Response> {
+    let response = client
+        .post(url)
+        .header("Accept", "application/json")
+        .header("User-Agent", GITHUB_COPILOT_USER_AGENT)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_body(fields))
+        .send()
+        .await?;
+    error_for_status(response).await
+}
+
 /// Mints a short-lived Copilot API token from a GitHub user access token.
 async fn mint_copilot_token(
     github_access_token: &str,
@@ -169,12 +189,7 @@ async fn mint_copilot_token(
         .headers(copilot_headers(Some(github_access_token))?)
         .send()
         .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(Error::ApiStatus { status, body });
-    }
+    let response = error_for_status(response).await?;
 
     parse_copilot_token_response(response.json::<Value>().await?)
 }
@@ -278,24 +293,16 @@ async fn refresh_github_user_token_at(
     access_token_url: &str,
     refresh_token: &str,
 ) -> Result<GithubUserToken> {
-    let response = client
-        .post(access_token_url)
-        .header("Accept", "application/json")
-        .header("User-Agent", "GitHubCopilotChat/0.35.0")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body(&[
+    let response = github_oauth_form_post(
+        client,
+        access_token_url,
+        &[
             ("client_id", GITHUB_COPILOT_CLIENT_ID),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-        ]))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(Error::ApiStatus { status, body });
-    }
+        ],
+    )
+    .await?;
 
     match parse_device_token_response(response.json::<Value>().await?) {
         OAuthDeviceCodePollResult::Complete(token) => Ok(token),
@@ -377,22 +384,15 @@ pub fn modify_github_copilot_models(
 async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
     let urls = GitHubCopilotUrls::new(domain);
     let client = reqwest::Client::new();
-    let response = client
-        .post(urls.device_code_url)
-        .header("Accept", "application/json")
-        .header("User-Agent", "GitHubCopilotChat/0.35.0")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body(&[
+    let response = github_oauth_form_post(
+        &client,
+        &urls.device_code_url,
+        &[
             ("client_id", GITHUB_COPILOT_CLIENT_ID),
             ("scope", "read:user"),
-        ]))
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(Error::ApiStatus { status, body });
-    }
+        ],
+    )
+    .await?;
     let device = response.json::<DeviceCodeResponse>().await?;
     if device.device_code.is_empty()
         || device.user_code.is_empty()
@@ -422,23 +422,16 @@ async fn poll_for_github_access_token(
             let access_token_url = urls.access_token_url.clone();
             let device_code = device.device_code.clone();
             async move {
-                let response = client
-                    .post(access_token_url)
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "GitHubCopilotChat/0.35.0")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(form_body(&[
+                let response = github_oauth_form_post(
+                    &client,
+                    &access_token_url,
+                    &[
                         ("client_id", GITHUB_COPILOT_CLIENT_ID),
                         ("device_code", device_code.as_str()),
                         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                    ]))
-                    .send()
-                    .await?;
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(Error::ApiStatus { status, body });
-                }
+                    ],
+                )
+                .await?;
                 Ok(parse_device_token_response(response.json::<Value>().await?))
             }
         },
@@ -561,7 +554,7 @@ fn copilot_headers(refresh_token: Option<&str>) -> Result<reqwest::header::Heade
     );
     headers.insert(
         "User-Agent",
-        reqwest::header::HeaderValue::from_static("GitHubCopilotChat/0.35.0"),
+        reqwest::header::HeaderValue::from_static(GITHUB_COPILOT_USER_AGENT),
     );
     headers.insert(
         "Editor-Version",

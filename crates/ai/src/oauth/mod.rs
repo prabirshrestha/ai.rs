@@ -439,6 +439,18 @@ fn form_encode(value: &str) -> String {
     encoded
 }
 
+/// Returns `response` unchanged when its status is a success, otherwise an
+/// [`Error::ApiStatus`] capturing the status code and response body. Shared by
+/// every OAuth HTTP call in this module so the error mapping stays consistent.
+async fn error_for_status(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(Error::ApiStatus { status, body })
+}
+
 async fn abortable_sleep(
     duration: Duration,
     cancellation_token: Option<&CancellationToken>,

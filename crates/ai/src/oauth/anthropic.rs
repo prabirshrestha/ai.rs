@@ -538,21 +538,19 @@ async fn exchange_anthropic_authorization_code_at(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<OAuthCredentials> {
-    let response = client
-        .post(token_url)
-        .header("Accept", "application/json")
-        .timeout(Duration::from_millis(ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS))
-        .json(&serde_json::json!({
+    post_anthropic_token_request(
+        client,
+        token_url,
+        serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": ANTHROPIC_CLIENT_ID,
             "code": code,
             "state": state,
             "redirect_uri": redirect_uri,
             "code_verifier": verifier,
-        }))
-        .send()
-        .await?;
-    anthropic_credentials_from_response(response).await
+        }),
+    )
+    .await
 }
 
 async fn refresh_anthropic_token_at(
@@ -560,15 +558,30 @@ async fn refresh_anthropic_token_at(
     token_url: &str,
     refresh_token: &str,
 ) -> Result<OAuthCredentials> {
+    post_anthropic_token_request(
+        client,
+        token_url,
+        serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": ANTHROPIC_CLIENT_ID,
+            "refresh_token": refresh_token,
+        }),
+    )
+    .await
+}
+
+/// POSTs a JSON body to an Anthropic OAuth token endpoint with the shared
+/// headers and timeout, mapping the response into credentials.
+async fn post_anthropic_token_request(
+    client: &reqwest::Client,
+    token_url: &str,
+    body: serde_json::Value,
+) -> Result<OAuthCredentials> {
     let response = client
         .post(token_url)
         .header("Accept", "application/json")
         .timeout(Duration::from_millis(ANTHROPIC_OAUTH_TOKEN_TIMEOUT_MS))
-        .json(&serde_json::json!({
-            "grant_type": "refresh_token",
-            "client_id": ANTHROPIC_CLIENT_ID,
-            "refresh_token": refresh_token,
-        }))
+        .json(&body)
         .send()
         .await?;
     anthropic_credentials_from_response(response).await
@@ -577,12 +590,7 @@ async fn refresh_anthropic_token_at(
 async fn anthropic_credentials_from_response(
     response: reqwest::Response,
 ) -> Result<OAuthCredentials> {
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(Error::ApiStatus { status, body });
-    }
-
+    let response = error_for_status(response).await?;
     let token = response.json::<AnthropicTokenResponse>().await?;
     Ok(anthropic_credentials_from_token(token))
 }
