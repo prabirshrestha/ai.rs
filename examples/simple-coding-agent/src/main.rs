@@ -1,5 +1,6 @@
 use std::env;
 use std::io::Write;
+use std::time::Duration;
 
 use ai::{
     Agent, AgentError, AgentEvent, AgentOptions, AgentToolBuilder, AgentToolResult,
@@ -10,6 +11,9 @@ use ai::{
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+const BASH_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+const BASH_TOOL_OUTPUT_LIMIT: usize = 16 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -212,24 +216,50 @@ fn build_bash_tool() -> Result<DynAgentTool> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AgentError::Other("missing string argument: command".to_string()))?;
 
-            // For a production agent, add a timeout and cap output before
-            // returning stdout/stderr to the model.
-            let output = Command::new("bash")
-                .arg("-lc")
-                .arg(command)
-                .output()
-                .await
-                .map_err(|error| AgentError::Other(format!("failed to run bash: {error}")))?;
+            let output = tokio::time::timeout(
+                BASH_TOOL_TIMEOUT,
+                Command::new("bash")
+                    .kill_on_drop(true)
+                    .arg("-lc")
+                    .arg(command)
+                    .output(),
+            )
+            .await
+            .map_err(|_| AgentError::Other(format!("bash command timed out after {BASH_TOOL_TIMEOUT:?}")))?
+            .map_err(|error| AgentError::Other(format!("failed to run bash: {error}")))?;
 
-            let mut text = format!("exit status: {}\n", output.status);
-            text.push_str("\nstdout:\n");
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.push_str("\n\nstderr:\n");
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            let text = format_bash_output(
+                output.status.to_string(),
+                &output.stdout,
+                &output.stderr,
+                BASH_TOOL_OUTPUT_LIMIT,
+            );
 
             Ok(AgentToolResult::text(text))
         })
         .build()
+}
+
+fn format_bash_output(
+    status: impl std::fmt::Display,
+    stdout: &[u8],
+    stderr: &[u8],
+    limit: usize,
+) -> String {
+    let mut text = format!("exit status: {status}\n");
+    text.push_str("\nstdout:\n");
+    append_limited_utf8(&mut text, stdout, limit);
+    text.push_str("\n\nstderr:\n");
+    append_limited_utf8(&mut text, stderr, limit);
+    text
+}
+
+fn append_limited_utf8(text: &mut String, bytes: &[u8], limit: usize) {
+    let shown = bytes.len().min(limit);
+    text.push_str(&String::from_utf8_lossy(&bytes[..shown]));
+    if bytes.len() > shown {
+        text.push_str(&format!("\n[truncated {} bytes]", bytes.len() - shown));
+    }
 }
 
 #[derive(Clone)]
@@ -355,7 +385,7 @@ fn assistant_visible_content(message: &AssistantMessage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_github_token, openai_setup_error};
+    use super::{format_bash_output, looks_like_github_token, openai_setup_error};
 
     #[test]
     fn openai_setup_accepts_local_base_url_without_key() {
@@ -383,5 +413,24 @@ mod tests {
     #[test]
     fn openai_setup_accepts_openai_shaped_key() {
         assert_eq!(openai_setup_error(None, Some("sk-test")), None);
+    }
+
+    #[test]
+    fn bash_output_is_truncated_per_stream() {
+        let text = format_bash_output("exit 0", b"abcdef", b"12345", 3);
+
+        assert!(text.contains("stdout:\nabc\n[truncated 3 bytes]"));
+        assert!(text.contains("stderr:\n123\n[truncated 2 bytes]"));
+        assert!(!text.contains("def"));
+        assert!(!text.contains("45"));
+    }
+
+    #[test]
+    fn bash_output_keeps_short_streams_intact() {
+        let text = format_bash_output("exit 0", b"ok", b"", 16);
+
+        assert!(text.contains("exit status: exit 0"));
+        assert!(text.contains("stdout:\nok"));
+        assert!(text.ends_with("stderr:\n"));
     }
 }
