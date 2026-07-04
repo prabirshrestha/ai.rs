@@ -38,19 +38,19 @@ async fn main() -> Result<()> {
                         .unwrap_or("assistant stream failed")
                 );
             }
-            AgentEvent::MessageEnd { message } => {
-                if let Message::Assistant(message) = message {
-                    if let Some(error) = &message.error_message {
-                        eprintln!(
-                            "\nerror from {} ({}, {}): {error}",
-                            message.model, message.provider, message.api
-                        );
-                    } else if assistant_visible_content(&message).trim().is_empty() {
-                        eprintln!(
-                            "\nwarning: empty response from {} ({}, {})",
-                            message.model, message.provider, message.api
-                        );
-                    }
+            AgentEvent::MessageEnd {
+                message: Message::Assistant(message),
+            } => {
+                if let Some(error) = &message.error_message {
+                    eprintln!(
+                        "\nerror from {} ({}, {}): {error}",
+                        message.model, message.provider, message.api
+                    );
+                } else if assistant_visible_content(&message).trim().is_empty() {
+                    eprintln!(
+                        "\nwarning: empty response from {} ({}, {})",
+                        message.model, message.provider, message.api
+                    );
                 }
             }
             AgentEvent::ToolExecutionStart {
@@ -345,10 +345,10 @@ fn assistant_visible_content(message: &AssistantMessage) -> String {
     message
         .content
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            AssistantContent::Thinking(thinking) => Some(thinking.thinking.as_str()),
-            AssistantContent::ToolCall(_) => Some("<tool_call>"),
+        .map(|content| match content {
+            AssistantContent::Text(text) => text.text.as_str(),
+            AssistantContent::Thinking(thinking) => thinking.thinking.as_str(),
+            AssistantContent::ToolCall(_) => "<tool_call>",
         })
         .collect()
 }
