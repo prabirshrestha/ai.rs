@@ -62,6 +62,10 @@ provider is intentionally in scope.
 - Use semantic/conventional commit messages, such as `feat: add provider`,
   `fix: handle stream errors`, `docs: update README`, or
   `chore: update lockfile`.
+- Use the same semantic/conventional style for PR titles, such as
+  `feat: add provider`, `fix(example): limit bash tool execution`, or
+  `ci: run clippy in workflow`. PR bodies should include concise `Summary` and
+  `Verification` sections.
 - Keep public behavior aligned with the existing Rust API shape before adding
   new abstractions.
 - Add or update tests for provider payload changes, stream event ordering,
