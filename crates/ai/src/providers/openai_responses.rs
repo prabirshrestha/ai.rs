@@ -1471,6 +1471,33 @@ mod tests {
     }
 
     #[test]
+    fn builds_responses_payload_with_max_reasoning() {
+        let mut model = model();
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions {
+            reasoning_effort: Some(ModelThinkingLevel::Max),
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning"]["effort"], "max");
+        assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
     fn responses_payload_treats_off_reasoning_effort_as_unspecified() {
         let model = model();
         let context = Context {

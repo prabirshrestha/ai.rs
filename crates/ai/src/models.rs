@@ -1,12 +1,13 @@
 use crate::types::{Model, ModelThinkingLevel, Usage, UsageCost};
 
-const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 6] = [
+const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
     ModelThinkingLevel::Off,
     ModelThinkingLevel::Minimal,
     ModelThinkingLevel::Low,
     ModelThinkingLevel::Medium,
     ModelThinkingLevel::High,
     ModelThinkingLevel::Xhigh,
+    ModelThinkingLevel::Max,
 ];
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (model.cost.input / 1_000_000.0) * usage.input as f64;
@@ -30,7 +31,7 @@ pub fn get_supported_thinking_levels(model: &Model) -> Vec<ModelThinkingLevel> {
             if matches!(mapped, Some(None)) {
                 return false;
             }
-            if *level == ModelThinkingLevel::Xhigh {
+            if *level == ModelThinkingLevel::Xhigh || *level == ModelThinkingLevel::Max {
                 return mapped.is_some();
             }
             true
@@ -119,6 +120,44 @@ mod tests {
                 ModelThinkingLevel::High,
                 ModelThinkingLevel::Xhigh,
             ]
+        );
+    }
+
+    #[test]
+    fn max_thinking_level_is_opt_in() {
+        let ordinary = Model {
+            reasoning: true,
+            ..Model::default()
+        };
+
+        assert_eq!(
+            clamp_thinking_level(&ordinary, ModelThinkingLevel::Max),
+            ModelThinkingLevel::High
+        );
+
+        let mut max_model = ordinary;
+        max_model
+            .thinking_level_map
+            .insert("xhigh".to_string(), Some("xhigh".to_string()));
+        max_model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+
+        assert_eq!(
+            get_supported_thinking_levels(&max_model),
+            vec![
+                ModelThinkingLevel::Off,
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+                ModelThinkingLevel::Xhigh,
+                ModelThinkingLevel::Max,
+            ]
+        );
+        assert_eq!(
+            clamp_thinking_level(&max_model, ModelThinkingLevel::Max),
+            ModelThinkingLevel::Max
         );
     }
 

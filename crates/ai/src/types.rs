@@ -50,6 +50,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ pub enum ModelThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ModelThinkingLevel {
@@ -72,6 +74,7 @@ impl ModelThinkingLevel {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -83,6 +86,7 @@ impl ModelThinkingLevel {
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -96,6 +100,7 @@ impl From<ThinkingLevel> for ModelThinkingLevel {
             ThinkingLevel::Medium => Self::Medium,
             ThinkingLevel::High => Self::High,
             ThinkingLevel::Xhigh => Self::Xhigh,
+            ThinkingLevel::Max => Self::Max,
         }
     }
 }
