@@ -105,6 +105,7 @@ mod tests {
             tool_name: "echo".to_string(),
             content: vec![],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 1,
         });
@@ -128,6 +129,7 @@ mod tests {
             tool_name: "echo".to_string(),
             content: vec![],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 1,
         });
@@ -161,6 +163,7 @@ mod tests {
                 mime_type: "image/png".to_string(),
             })],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 1,
         });

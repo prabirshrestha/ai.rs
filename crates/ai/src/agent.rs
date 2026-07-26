@@ -2006,6 +2006,7 @@ mod tests {
                         tool_name: "calculate".to_string(),
                         content: vec![ToolResultContent::text("5 + 3 = 8")],
                         details: None,
+                        added_tool_names: Vec::new(),
                         is_error: false,
                         timestamp: crate::utils::time::now_millis(),
                     }),

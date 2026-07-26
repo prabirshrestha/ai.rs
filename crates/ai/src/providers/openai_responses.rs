@@ -11,6 +11,7 @@ use crate::providers::constrained_sampling::{
     create_grammar_tool_input_properties, get_grammar_tool_input, grammar_arguments,
     resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
 };
+use crate::providers::deferred_tools::split_deferred_tools;
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -50,6 +51,7 @@ struct ResolvedOpenAIResponsesCompat {
     pub supports_strict_mode: bool,
     pub supports_openai_grammar_tools: bool,
     pub supports_explicit_prompt_cache_mode: bool,
+    pub supports_tool_search: bool,
 }
 
 pub fn stream_simple_openai_responses(
@@ -1052,6 +1054,12 @@ fn try_build_responses_payload(
     cache_retention: CacheRetention,
     grammar_tool_input_properties: &HashMap<String, String>,
 ) -> Result<Value> {
+    let placement = split_deferred_tools(context, compat.supports_tool_search, str::to_string);
+    let deferred_tools = placement
+        .deferred
+        .iter()
+        .cloned()
+        .collect::<HashMap<_, _>>();
     let messages = try_convert_responses_messages(
         model,
         context,
@@ -1059,6 +1067,9 @@ fn try_build_responses_payload(
         true,
         compat.supports_developer_role,
         grammar_tool_input_properties,
+        &deferred_tools,
+        compat.supports_strict_mode,
+        compat.supports_openai_grammar_tools,
     )?;
     let mut payload = json!({
         "model": model.id,
@@ -1079,14 +1090,15 @@ fn try_build_responses_payload(
     if let Some(service_tier) = &options.service_tier {
         object.insert("service_tier".to_string(), json!(service_tier));
     }
-    if !context.tools.is_empty() {
+    if !placement.immediate.is_empty() {
         object.insert(
             "tools".to_string(),
             Value::Array(convert_responses_tools(
-                &context.tools,
+                &placement.immediate,
                 Some(false),
                 compat.supports_strict_mode,
                 compat.supports_openai_grammar_tools,
+                false,
             )?),
         );
     }
@@ -1182,6 +1194,9 @@ fn convert_responses_messages(
             .supports_developer_role
             .unwrap_or(true),
         &grammar_tool_input_properties,
+        &HashMap::new(),
+        false,
+        false,
     )
     .expect("valid OpenAI Responses message history")
 }
@@ -1193,8 +1208,12 @@ fn try_convert_responses_messages(
     include_system_prompt: bool,
     supports_developer_role: bool,
     grammar_tool_input_properties: &HashMap<String, String>,
+    deferred_tools: &HashMap<String, Tool>,
+    supports_strict_mode: bool,
+    supports_openai_grammar_tools: bool,
 ) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
+    let mut loaded_tool_names = HashSet::new();
     let transformed = transform_messages(
         context.messages.as_slice(),
         model,
@@ -1392,6 +1411,46 @@ fn try_convert_responses_messages(
                     "call_id": call_id,
                     "output": output
                 }));
+                let loaded = tool_result
+                    .added_tool_names
+                    .iter()
+                    .filter_map(|name| {
+                        deferred_tools
+                            .get(name)
+                            .filter(|_| loaded_tool_names.insert(name.clone()))
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if !loaded.is_empty() {
+                    let names = loaded
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>();
+                    let search_call_id = format!(
+                        "pi_tool_load_{}",
+                        short_hash(&format!("{}:{}", tool_result.tool_call_id, names.join(",")))
+                    );
+                    messages.push(json!({
+                        "type": "tool_search_call",
+                        "call_id": search_call_id,
+                        "execution": "client",
+                        "status": "completed",
+                        "arguments": { "query": names.join(" "), "limit": names.len() }
+                    }));
+                    messages.push(json!({
+                        "type": "tool_search_output",
+                        "call_id": search_call_id,
+                        "execution": "client",
+                        "status": "completed",
+                        "tools": convert_responses_tools(
+                            &loaded,
+                            Some(false),
+                            supports_strict_mode,
+                            supports_openai_grammar_tools,
+                            true,
+                        )?
+                    }));
+                }
             }
             crate::types::Message::Custom(_) => {}
         }
@@ -1405,6 +1464,7 @@ fn convert_responses_tools(
     strict: Option<bool>,
     supports_strict_mode: bool,
     supports_openai_grammar_tools: bool,
+    defer_loading: bool,
 ) -> Result<Vec<Value>> {
     let default_strict = strict.unwrap_or(false);
     tools
@@ -1413,7 +1473,7 @@ fn convert_responses_tools(
             if let Some(grammar) =
                 resolve_grammar_constrained_sampling(tool, supports_openai_grammar_tools)?
             {
-                return Ok(json!({
+                let mut value = json!({
                     "type": "custom",
                     "name": tool.name,
                     "description": tool.description,
@@ -1422,7 +1482,11 @@ fn convert_responses_tools(
                         "syntax": grammar.format.as_str(),
                         "definition": grammar.definition
                     }
-                }));
+                });
+                if defer_loading {
+                    value["defer_loading"] = json!(true);
+                }
+                return Ok(value);
             }
 
             let constrained_strict =
@@ -1435,6 +1499,9 @@ fn convert_responses_tools(
             });
             if supports_strict_mode {
                 value["strict"] = json!(constrained_strict.unwrap_or(default_strict));
+            }
+            if defer_loading {
+                value["defer_loading"] = json!(true);
             }
             Ok(value)
         })
@@ -1570,6 +1637,7 @@ fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
         supports_explicit_prompt_cache_mode: compat
             .supports_explicit_prompt_cache_mode
             .unwrap_or(false),
+        supports_tool_search: compat.supports_tool_search.unwrap_or(false),
     }
 }
 
@@ -1762,7 +1830,7 @@ mod tests {
             strict: ConstrainedSamplingStrict::Prefer,
         });
         assert_eq!(
-            convert_responses_tools(&[strict_tool], None, true, false).unwrap(),
+            convert_responses_tools(&[strict_tool], None, true, false, false).unwrap(),
             vec![json!({
                 "type": "function",
                 "name": "sample_tool",
@@ -1781,7 +1849,7 @@ mod tests {
             strict: ConstrainedSamplingStrict::Require,
         });
         assert_eq!(
-            convert_responses_tools(&[required_tool], None, false, false)
+            convert_responses_tools(&[required_tool], None, false, false, false)
                 .unwrap_err()
                 .to_string(),
             "Tool \"sample_tool\" requires JSON-schema constrained sampling, but strict tools are unsupported."
@@ -1794,7 +1862,8 @@ mod tests {
             },
         });
         assert_eq!(
-            convert_responses_tools(std::slice::from_ref(&grammar_tool), None, true, true).unwrap(),
+            convert_responses_tools(std::slice::from_ref(&grammar_tool), None, true, true, false,)
+                .unwrap(),
             vec![json!({
                 "type": "custom",
                 "name": "sample_tool",
@@ -1807,7 +1876,7 @@ mod tests {
             })]
         );
         assert_eq!(
-            convert_responses_tools(&[grammar_tool], None, false, false).unwrap()[0]["type"],
+            convert_responses_tools(&[grammar_tool], None, false, false, false).unwrap()[0]["type"],
             json!("function")
         );
     }
@@ -1836,6 +1905,7 @@ mod tests {
                     tool_name: "sample_tool".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 0,
                 }),
@@ -4898,6 +4968,7 @@ mod tests {
                     tool_name: "double_number".to_string(),
                     content: vec![ToolResultContent::text("42")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 3,
                 }),
@@ -4992,6 +5063,7 @@ mod tests {
             tool_name: "edit".to_string(),
             content: vec![ToolResultContent::text("ok")],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 3,
         };
@@ -5063,6 +5135,7 @@ mod tests {
                 }),
             ],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 2,
         };

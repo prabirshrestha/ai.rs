@@ -42,6 +42,8 @@ pub enum QueueMode {
 pub struct AgentToolResult {
     pub content: Vec<ToolResultContent>,
     pub details: Option<Value>,
+    /// Names of tools introduced by this result and available from this transcript point onward.
+    pub added_tool_names: Vec<String>,
     pub terminate: bool,
 }
 
@@ -50,6 +52,7 @@ impl AgentToolResult {
         Self {
             content: vec![ToolResultContent::text(text)],
             details: None,
+            added_tool_names: Vec::new(),
             terminate: false,
         }
     }
@@ -513,6 +516,7 @@ pub fn text_result_message(
             text_signature: None,
         })],
         details: None,
+        added_tool_names: Vec::new(),
         is_error,
         timestamp: crate::utils::time::now_millis(),
     }

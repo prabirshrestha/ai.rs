@@ -9,6 +9,7 @@ use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::constrained_sampling::resolve_json_schema_strict_sampling;
+use crate::providers::deferred_tools::split_deferred_tools;
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -292,6 +293,7 @@ struct ResolvedAnthropicCompat {
     pub supports_cache_control_on_tools: bool,
     pub supports_temperature: bool,
     pub supports_strict_tools: bool,
+    pub supports_tool_references: bool,
 }
 
 pub fn stream_simple_anthropic(
@@ -826,14 +828,46 @@ fn try_build_anthropic_payload(
     is_oauth_token: bool,
     cache_control: Option<Value>,
 ) -> Result<Value> {
+    let compat = get_anthropic_compat(model);
+    let transformed = transform_messages(&context.messages, model, |id, _model, _source| {
+        normalize_tool_call_id(id)
+    });
+    let normalize_name = |name: &str| {
+        if is_oauth_token {
+            to_claude_code_name(name)
+        } else {
+            name.to_string()
+        }
+    };
+    let mut transformed_context = context.clone();
+    transformed_context.messages = transformed;
+    let mut placement = split_deferred_tools(
+        &transformed_context,
+        compat.supports_tool_references,
+        normalize_name,
+    );
+    if placement.immediate.is_empty() && !placement.deferred.is_empty() {
+        placement.immediate = placement
+            .deferred
+            .into_iter()
+            .map(|(_, tool)| tool)
+            .collect();
+        placement.deferred = Vec::new();
+    }
+    let deferred_names = placement
+        .deferred
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::HashSet<_>>();
     let mut payload = json!({
         "model": model.id,
-        "messages": convert_messages(
-            &context.messages,
-            model,
+        "messages": convert_transformed_messages(
+            &transformed_context.messages,
             is_oauth_token,
             cache_control.clone(),
             model.compat.anthropic_messages.allow_empty_signature.unwrap_or(false),
+            &deferred_names,
+            normalize_name,
         ),
         "max_tokens": options.base.max_tokens.unwrap_or(model.max_tokens),
         "stream": true
@@ -870,26 +904,36 @@ fn try_build_anthropic_payload(
 
     if let Some(temperature) = options.base.temperature
         && options.thinking_enabled != Some(true)
-        && get_anthropic_compat(model).supports_temperature
+        && compat.supports_temperature
     {
         object.insert("temperature".to_string(), json!(temperature));
     }
-    if !context.tools.is_empty() {
-        let compat = get_anthropic_compat(model);
-        object.insert(
-            "tools".to_string(),
-            Value::Array(convert_tools(
-                &context.tools,
-                is_oauth_token,
-                compat.supports_eager_tool_input_streaming,
-                compat.supports_strict_tools,
-                if compat.supports_cache_control_on_tools {
-                    cache_control.clone()
-                } else {
-                    None
-                },
-            )?),
-        );
+    if !placement.immediate.is_empty() || !placement.deferred.is_empty() {
+        let mut tools = convert_tools(
+            &placement.immediate,
+            is_oauth_token,
+            compat.supports_eager_tool_input_streaming,
+            compat.supports_strict_tools,
+            if compat.supports_cache_control_on_tools {
+                cache_control.clone()
+            } else {
+                None
+            },
+            false,
+        )?;
+        tools.extend(convert_tools(
+            &placement
+                .deferred
+                .into_iter()
+                .map(|(_, tool)| tool)
+                .collect::<Vec<_>>(),
+            is_oauth_token,
+            compat.supports_eager_tool_input_streaming,
+            compat.supports_strict_tools,
+            None,
+            true,
+        )?);
+        object.insert("tools".to_string(), Value::Array(tools));
     }
     if model.reasoning {
         if options.thinking_enabled == Some(true) {
@@ -948,6 +992,7 @@ fn build_anthropic_payload(
     try_build_anthropic_payload(model, context, options, is_oauth_token, cache_control).unwrap()
 }
 
+#[cfg(test)]
 fn convert_messages(
     messages: &[crate::types::Message],
     model: &Model,
@@ -958,7 +1003,32 @@ fn convert_messages(
     let transformed = transform_messages(messages, model, |id, _model, _source| {
         normalize_tool_call_id(id)
     });
+    convert_transformed_messages(
+        &transformed,
+        is_oauth_token,
+        cache_control,
+        allow_empty_signature,
+        &std::collections::HashSet::new(),
+        |name| {
+            if is_oauth_token {
+                to_claude_code_name(name)
+            } else {
+                name.to_string()
+            }
+        },
+    )
+}
+
+fn convert_transformed_messages(
+    transformed: &[crate::types::Message],
+    is_oauth_token: bool,
+    cache_control: Option<Value>,
+    allow_empty_signature: bool,
+    deferred_tool_names: &std::collections::HashSet<String>,
+    normalize_tool_name: impl Fn(&str) -> String,
+) -> Vec<Value> {
     let mut params = Vec::new();
+    let mut loaded_tool_names = std::collections::HashSet::new();
     let mut index = 0usize;
     while index < transformed.len() {
         match &transformed[index] {
@@ -1040,26 +1110,67 @@ fn convert_messages(
                 }
             }
             crate::types::Message::ToolResult(tool_result) => {
-                let mut tool_results = vec![json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_result.tool_call_id,
-                    "content": convert_content_blocks(&tool_result.content),
-                    "is_error": tool_result.is_error
-                })];
+                let mut tool_results = Vec::new();
+                let mut sibling_content = Vec::new();
+                let convert_result =
+                    |result: &crate::types::ToolResultMessage,
+                     loaded: &mut std::collections::HashSet<String>,
+                     siblings: &mut Vec<Value>| {
+                        let references = result
+                            .added_tool_names
+                            .iter()
+                            .filter_map(|name| {
+                                let normalized_name = normalize_tool_name(name);
+                                (deferred_tool_names.contains(&normalized_name)
+                                    && loaded.insert(normalized_name.clone()))
+                                .then(|| {
+                                    json!({
+                                        "type": "tool_reference",
+                                        "tool_name": if is_oauth_token {
+                                            to_claude_code_name(name)
+                                        } else {
+                                            name.clone()
+                                        }
+                                    })
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let content = convert_content_blocks(&result.content);
+                        if !references.is_empty() {
+                            match &content {
+                                Value::Array(blocks) => siblings.extend(blocks.iter().cloned()),
+                                Value::String(text) => {
+                                    siblings.push(json!({ "type": "text", "text": text }))
+                                }
+                                _ => {}
+                            }
+                        }
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": if references.is_empty() { content } else { Value::Array(references) },
+                            "is_error": result.is_error
+                        })
+                    };
+                tool_results.push(convert_result(
+                    tool_result,
+                    &mut loaded_tool_names,
+                    &mut sibling_content,
+                ));
                 let mut cursor = index + 1;
                 while cursor < transformed.len() {
                     let crate::types::Message::ToolResult(next) = &transformed[cursor] else {
                         break;
                     };
-                    tool_results.push(json!({
-                        "type": "tool_result",
-                        "tool_use_id": next.tool_call_id,
-                        "content": convert_content_blocks(&next.content),
-                        "is_error": next.is_error
-                    }));
+                    tool_results.push(convert_result(
+                        next,
+                        &mut loaded_tool_names,
+                        &mut sibling_content,
+                    ));
                     cursor += 1;
                 }
                 index = cursor - 1;
+                tool_results.extend(sibling_content);
                 params.push(json!({ "role": "user", "content": tool_results }));
             }
             crate::types::Message::Custom(_) => {}
@@ -1142,6 +1253,7 @@ fn convert_tools(
     supports_eager_tool_input_streaming: bool,
     supports_strict_tools: bool,
     cache_control: Option<Value>,
+    defer_loading: bool,
 ) -> Result<Vec<Value>> {
     tools
         .iter()
@@ -1179,6 +1291,9 @@ fn convert_tools(
             }
             if supports_eager_tool_input_streaming {
                 value["eager_input_streaming"] = json!(true);
+            }
+            if defer_loading {
+                value["defer_loading"] = json!(true);
             }
             if index == tools.len() - 1
                 && let Some(cache_control) = &cache_control {
@@ -1248,7 +1363,36 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         supports_cache_control_on_tools: compat.supports_cache_control_on_tools.unwrap_or(true),
         supports_temperature: compat.supports_temperature.unwrap_or(true),
         supports_strict_tools: compat.supports_strict_tools.unwrap_or(false),
+        supports_tool_references: compat
+            .supports_tool_references
+            .unwrap_or_else(|| default_supports_tool_references(model)),
     }
+}
+
+fn default_supports_tool_references(model: &Model) -> bool {
+    if model.provider != "anthropic" || model.id.contains("haiku") {
+        return false;
+    }
+    let Some((family, version)) = model
+        .id
+        .strip_prefix("claude-")
+        .and_then(|id| id.split_once('-'))
+    else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "fable") {
+        return false;
+    }
+    let mut parts = version.split('-');
+    let Some(major) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let minor = parts
+        .next()
+        .filter(|part| part.len() < 8)
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    major > 4 || (major == 4 && minor >= 5)
 }
 
 fn cache_control(
@@ -2243,6 +2387,7 @@ mod tests {
                         ToolResultContent::text("second"),
                     ],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 1,
                 },

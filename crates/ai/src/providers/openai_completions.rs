@@ -19,10 +19,10 @@ use crate::providers::simple_options::build_base_options;
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheControlFormat, CacheRetention,
-    ChatTemplateKwargValue, ChatTemplateVariable, Context, ImageContent, MaxTokensField, Model,
-    ModelInput, ModelThinkingLevel, OpenAIThinkingFormat, SessionAffinityFormat,
-    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall,
-    ToolResultContent, Usage, UserContent, UserMessageContent,
+    ChatTemplateKwargValue, ChatTemplateVariable, Context, DeferredToolsMode, ImageContent,
+    MaxTokensField, Model, ModelInput, ModelThinkingLevel, OpenAIThinkingFormat,
+    SessionAffinityFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
+    ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
 };
 use crate::utils::hash::short_hash;
 use crate::utils::headers::apply_provider_headers;
@@ -60,6 +60,7 @@ struct ResolvedOpenAICompletionsCompat {
     send_session_affinity_headers: bool,
     session_affinity_format: SessionAffinityFormat,
     supports_long_cache_retention: bool,
+    deferred_tools_mode: Option<DeferredToolsMode>,
 }
 
 pub fn stream_simple_openai_completions(
@@ -772,10 +773,29 @@ fn try_build_chat_completions_payload(
     if let Some(temperature) = options.base.temperature {
         object.insert("temperature".to_string(), json!(temperature));
     }
-    if !context.tools.is_empty() {
+    let deferred_names = if compat.deferred_tools_mode == Some(DeferredToolsMode::Kimi) {
+        context
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                crate::types::Message::ToolResult(result) => Some(&result.added_tool_names),
+                _ => None,
+            })
+            .flatten()
+            .collect::<std::collections::HashSet<_>>()
+    } else {
+        std::collections::HashSet::new()
+    };
+    let active_tools = context
+        .tools
+        .iter()
+        .filter(|tool| !deferred_names.contains(&tool.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !active_tools.is_empty() {
         object.insert(
             "tools".to_string(),
-            Value::Array(convert_tools(&context.tools, compat)?),
+            Value::Array(convert_tools(&active_tools, compat)?),
         );
         if compat.zai_tool_stream {
             object.insert("tool_stream".to_string(), json!(true));
@@ -1197,6 +1217,8 @@ fn try_convert_messages(
             }
             crate::types::Message::ToolResult(_) => {
                 let mut image_blocks = Vec::new();
+                let mut deferred_names = Vec::new();
+                let mut seen_deferred_names = std::collections::HashSet::new();
                 let mut cursor = index;
                 while cursor < transformed.len() {
                     let crate::types::Message::ToolResult(tool_msg) = &transformed[cursor] else {
@@ -1221,6 +1243,13 @@ fn try_convert_messages(
                         tool_result["name"] = json!(tool_msg.tool_name);
                     }
                     params.push(tool_result);
+                    if compat.deferred_tools_mode == Some(DeferredToolsMode::Kimi) {
+                        for name in &tool_msg.added_tool_names {
+                            if seen_deferred_names.insert(name.clone()) {
+                                deferred_names.push(name.clone());
+                            }
+                        }
+                    }
 
                     if model.input.contains(&ModelInput::Image) {
                         for block in &tool_msg.content {
@@ -1249,6 +1278,23 @@ fn try_convert_messages(
                     last_role = Some("user");
                 } else {
                     last_role = Some("toolResult");
+                }
+                if !deferred_names.is_empty() {
+                    let tools_by_name = context
+                        .tools
+                        .iter()
+                        .map(|tool| (&tool.name, tool))
+                        .collect::<HashMap<_, _>>();
+                    let tools = deferred_names
+                        .iter()
+                        .filter_map(|name| tools_by_name.get(name).copied())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !tools.is_empty() {
+                        params.push(
+                            json!({ "role": "system", "tools": convert_tools(&tools, compat)? }),
+                        );
+                    }
                 }
             }
             crate::types::Message::Custom(_) => {}
@@ -1377,6 +1423,7 @@ fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         send_session_affinity_headers: false,
         session_affinity_format: detect_session_affinity_format(model),
         supports_long_cache_retention: true,
+        deferred_tools_mode: None,
     }
 }
 
@@ -1440,6 +1487,7 @@ fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         supports_long_cache_retention: compat
             .supports_long_cache_retention
             .unwrap_or(detected.supports_long_cache_retention),
+        deferred_tools_mode: compat.deferred_tools_mode.or(detected.deferred_tools_mode),
     }
 }
 
@@ -2378,6 +2426,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 0,
                 }),
@@ -2443,6 +2492,7 @@ mod tests {
                     tool_name: "echo".to_string(),
                     content: vec![ToolResultContent::text("hello")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 3,
                 }),
@@ -2709,6 +2759,7 @@ mod tests {
                     mime_type: "image/png".to_string(),
                 })],
                 details: None,
+                added_tool_names: Vec::new(),
                 is_error: false,
                 timestamp: 1,
             })],
@@ -5045,6 +5096,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("contents")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 3,
                 }),
@@ -5105,6 +5157,7 @@ mod tests {
                 }),
             ],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp,
         }
@@ -5331,6 +5384,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 1,
                 }),
@@ -5471,6 +5525,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("file contents")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp,
                 }),

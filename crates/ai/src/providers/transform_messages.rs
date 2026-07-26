@@ -192,6 +192,7 @@ fn insert_synthetic_tool_results(messages: Vec<Message>) -> Vec<Message> {
                 tool_name: tool_call.name,
                 content: vec![ToolResultContent::text("No result provided")],
                 details: None,
+                added_tool_names: Vec::new(),
                 is_error: true,
                 timestamp: crate::utils::time::now_millis(),
             }));
@@ -353,6 +354,7 @@ mod tests {
                 ToolResultContent::text("after"),
             ],
             details: None,
+            added_tool_names: Vec::new(),
             is_error: false,
             timestamp: 1,
         });
@@ -474,6 +476,7 @@ mod tests {
                     tool_name: "bash".to_string(),
                     content: vec![ToolResultContent::text("output")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 0,
                 }),
@@ -555,6 +558,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 0,
                 }),

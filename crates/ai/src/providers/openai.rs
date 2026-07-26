@@ -104,6 +104,9 @@ impl Provider for OpenAi {
             compat.openai_responses = OpenAIResponsesCompat {
                 supports_strict_mode: Some(true),
                 supports_openai_grammar_tools: is_gpt_5_or_newer(id).then_some(true),
+                supports_tool_search: (self.provider_id == DEFAULT_PROVIDER_ID.as_ref()
+                    && supports_tool_search(id))
+                .then_some(true),
                 ..Default::default()
             };
         }
@@ -121,6 +124,19 @@ fn is_gpt_5_or_newer(id: &str) -> bool {
         .and_then(|suffix| suffix.split(['.', '-']).next())
         .and_then(|major| major.parse::<u32>().ok())
         .is_some_and(|major| major >= 5)
+}
+
+fn supports_tool_search(id: &str) -> bool {
+    matches!(
+        id,
+        "gpt-5.4"
+            | "gpt-5.4-mini"
+            | "gpt-5.4-pro"
+            | "gpt-5.5"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
+    )
 }
 
 #[derive(Default)]

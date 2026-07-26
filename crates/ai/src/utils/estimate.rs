@@ -166,8 +166,28 @@ fn estimate_tools_tokens(tools: &[Tool]) -> u32 {
 
 pub fn estimate_context_tokens(context: &Context) -> ContextUsageEstimate {
     let estimate = estimate_messages(&context.messages);
-    if estimate.last_usage_index.is_some() {
-        return estimate;
+    if let Some(last_usage_index) = estimate.last_usage_index {
+        let added_names = context.messages[last_usage_index + 1..]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.added_tool_names.iter()),
+                Message::User(_) | Message::Assistant(_) | Message::Custom(_) => None,
+            })
+            .flatten()
+            .collect::<std::collections::HashSet<_>>();
+        let added_tools = context
+            .tools
+            .iter()
+            .filter(|tool| added_names.contains(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_tool_tokens = estimate_tools_tokens(&added_tools);
+        return ContextUsageEstimate {
+            tokens: estimate.tokens.saturating_add(added_tool_tokens),
+            usage_tokens: estimate.usage_tokens,
+            trailing_tokens: estimate.trailing_tokens.saturating_add(added_tool_tokens),
+            last_usage_index: estimate.last_usage_index,
+        };
     }
 
     let prefix_tokens = context

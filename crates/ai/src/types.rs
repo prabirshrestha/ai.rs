@@ -476,6 +476,8 @@ pub struct ToolResultMessage {
     pub tool_name: String,
     pub content: Vec<ToolResultContent>,
     pub details: Option<Value>,
+    /// Names from `Context::tools` that became available after this result.
+    pub added_tool_names: Vec<String>,
     pub is_error: bool,
     pub timestamp: u64,
 }
@@ -617,6 +619,9 @@ impl Serialize for ToolResultMessage {
         if self.details.is_some() {
             field_count += 1;
         }
+        if !self.added_tool_names.is_empty() {
+            field_count += 1;
+        }
         let mut state = serializer.serialize_struct("ToolResultMessage", field_count)?;
         state.serialize_field("role", "toolResult")?;
         state.serialize_field("toolCallId", &self.tool_call_id)?;
@@ -624,6 +629,9 @@ impl Serialize for ToolResultMessage {
         state.serialize_field("content", &self.content)?;
         if let Some(details) = &self.details {
             state.serialize_field("details", details)?;
+        }
+        if !self.added_tool_names.is_empty() {
+            state.serialize_field("addedToolNames", &self.added_tool_names)?;
         }
         state.serialize_field("isError", &self.is_error)?;
         state.serialize_field("timestamp", &self.timestamp)?;
@@ -644,6 +652,8 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             tool_name: String,
             content: Vec<ToolResultContent>,
             details: Option<Value>,
+            #[serde(default)]
+            added_tool_names: Vec<String>,
             is_error: bool,
             timestamp: u64,
         }
@@ -655,6 +665,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             tool_name: helper.tool_name,
             content: helper.content,
             details: helper.details,
+            added_tool_names: helper.added_tool_names,
             is_error: helper.is_error,
             timestamp: helper.timestamp,
         })
@@ -1258,6 +1269,14 @@ pub struct OpenAICompletionsCompat {
     pub session_affinity_format: Option<SessionAffinityFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferred_tools_mode: Option<DeferredToolsMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeferredToolsMode {
+    Kimi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1386,6 +1405,8 @@ pub struct OpenAIResponsesCompat {
     pub supports_openai_grammar_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_explicit_prompt_cache_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tool_search: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1407,6 +1428,8 @@ pub struct AnthropicMessagesCompat {
     pub allow_empty_signature: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tool_references: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1532,6 +1555,7 @@ mod tests {
                 tool_name: "read".to_string(),
                 content: vec![ToolResultContent::text("done")],
                 details: None,
+                added_tool_names: Vec::new(),
                 is_error: false,
                 timestamp: 2,
             })
@@ -1660,6 +1684,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 2,
                 }),
@@ -1872,6 +1897,48 @@ mod tests {
 
         assert_eq!(value["supportsTemperature"], json!(false));
         assert_eq!(restored, compat);
+    }
+
+    #[test]
+    fn deferred_tool_metadata_round_trips() {
+        let message = ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "base_tool".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            added_tool_names: vec!["late_tool".to_string()],
+            is_error: false,
+            timestamp: 3,
+        };
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["addedToolNames"], json!(["late_tool"]));
+        assert_eq!(
+            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
+            message
+        );
+
+        let compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                deferred_tools_mode: Some(DeferredToolsMode::Kimi),
+                ..Default::default()
+            },
+            openai_responses: OpenAIResponsesCompat {
+                supports_tool_search: Some(true),
+                ..Default::default()
+            },
+            anthropic_messages: AnthropicMessagesCompat {
+                supports_tool_references: Some(true),
+                ..Default::default()
+            },
+        };
+        let value = serde_json::to_value(&compat).unwrap();
+        assert_eq!(value["deferredToolsMode"], json!("kimi"));
+        assert_eq!(value["supportsToolSearch"], json!(true));
+        assert_eq!(value["supportsToolReferences"], json!(true));
+        assert_eq!(
+            serde_json::from_value::<ModelCompat>(value).unwrap(),
+            compat
+        );
     }
 
     #[test]

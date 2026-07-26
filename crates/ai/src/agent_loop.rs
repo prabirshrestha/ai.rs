@@ -971,9 +971,32 @@ fn create_tool_result_message(
         tool_name: tool_call.name,
         content: result.content,
         details: result.details,
+        added_tool_names: result.added_tool_names,
         is_error,
         timestamp: crate::utils::time::now_millis(),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn tool_result_messages_preserve_added_tool_names() {
+    let message = create_tool_result_message((
+        crate::ToolCall {
+            id: "call_1".to_string(),
+            name: "base_tool".to_string(),
+            arguments: json!({}),
+            thought_signature: None,
+        },
+        false,
+        AgentToolResult {
+            content: vec![crate::ToolResultContent::text("done")],
+            details: None,
+            added_tool_names: vec!["late_tool".to_string()],
+            terminate: false,
+        },
+    ));
+
+    assert_eq!(message.added_tool_names, ["late_tool"]);
 }
 
 async fn emit_tool_result_message(
@@ -1249,6 +1272,7 @@ mod tests {
                 on_update(AgentToolResult {
                     content: vec![ToolResultContent::text("running")],
                     details: Some(json!({ "status": "running" })),
+                    added_tool_names: Vec::new(),
                     terminate: false,
                 })
                 .await;
@@ -1262,6 +1286,7 @@ mod tests {
             Ok(AgentToolResult {
                 content: vec![ToolResultContent::text("done")],
                 details: Some(json!({ "status": "done" })),
+                added_tool_names: Vec::new(),
                 terminate: true,
             })
         }
@@ -1770,6 +1795,7 @@ mod tests {
             .expect("captured update callback")(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
+            added_tool_names: Vec::new(),
             terminate: false,
         })
         .await;
@@ -1863,6 +1889,7 @@ mod tests {
             .expect("captured update callback")(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
+            added_tool_names: Vec::new(),
             terminate: false,
         })
         .await;

@@ -1363,6 +1363,7 @@ mod tests {
                     tool_name: "echo".to_string(),
                     content: vec![ToolResultContent::text("tool out")],
                     details: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 2,
                 }),
