@@ -13,6 +13,61 @@ use crate::provider::LanguageModelApi;
 
 pub type Api = String;
 pub type ProviderId = String;
+pub type ProviderEnv = HashMap<String, String>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHeaders(HashMap<String, Option<String>>);
+
+impl ProviderHeaders {
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<Option<String>>,
+    ) -> Option<Option<String>> {
+        self.0.insert(name.into(), value.into())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Option<String>)> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Option<String>> {
+        self.0.get(name)
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for ProviderHeaders
+where
+    K: Into<String>,
+    V: Into<Option<String>>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let mut headers = Self::default();
+        for (name, value) in iter {
+            headers.insert(name, value);
+        }
+        headers
+    }
+}
+
+impl<'a> IntoIterator for &'a ProviderHeaders {
+    type Item = (&'a String, &'a Option<String>);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, Option<String>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl From<HashMap<String, String>> for ProviderHeaders {
+    fn from(headers: HashMap<String, String>) -> Self {
+        headers.into_iter().collect()
+    }
+}
 
 fn is_false(value: &bool) -> bool {
     !value
@@ -141,6 +196,15 @@ pub enum Transport {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionAffinityFormat {
+    #[default]
+    Openai,
+    OpenaiNosession,
+    Openrouter,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub status: u16,
@@ -169,13 +233,14 @@ pub struct StreamOptions {
     pub session_id: Option<String>,
     pub on_payload: Option<PayloadHook>,
     pub on_response: Option<ResponseHook>,
-    pub headers: HashMap<String, String>,
+    pub headers: ProviderHeaders,
     pub timeout_ms: Option<u64>,
     pub websocket_connect_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
     pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
+    pub env: ProviderEnv,
     pub provider_options: HashMap<String, Value>,
 }
 
@@ -1064,6 +1129,8 @@ pub struct OpenAICompletionsCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_session_affinity_headers: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_affinity_format: Option<SessionAffinityFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
 }
 
@@ -1178,9 +1245,17 @@ pub enum CacheControlFormat {
 #[serde(rename_all = "camelCase")]
 pub struct OpenAIResponsesCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
+    /// Legacy compatibility setting. `false` maps to `OpenaiNosession` when
+    /// `session_affinity_format` is not explicitly configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub send_session_id_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_affinity_format: Option<SessionAffinityFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_explicit_prompt_cache_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1473,6 +1548,66 @@ mod tests {
         assert_eq!(
             ModelThinkingLevel::parse("max"),
             Some(ModelThinkingLevel::Max)
+        );
+    }
+
+    #[test]
+    fn session_affinity_formats_and_legacy_responses_setting_round_trip() {
+        for (format, serialized) in [
+            (SessionAffinityFormat::Openai, "openai"),
+            (SessionAffinityFormat::OpenaiNosession, "openai-nosession"),
+            (SessionAffinityFormat::Openrouter, "openrouter"),
+        ] {
+            assert_eq!(serde_json::to_value(format).unwrap(), json!(serialized));
+            assert_eq!(
+                serde_json::from_value::<SessionAffinityFormat>(json!(serialized)).unwrap(),
+                format
+            );
+        }
+
+        let completions = OpenAICompletionsCompat {
+            session_affinity_format: Some(SessionAffinityFormat::OpenaiNosession),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(completions).unwrap()["sessionAffinityFormat"],
+            json!("openai-nosession")
+        );
+
+        let legacy: OpenAIResponsesCompat =
+            serde_json::from_value(json!({ "sendSessionIdHeader": false })).unwrap();
+        assert_eq!(legacy.send_session_id_header, Some(false));
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            json!({ "sendSessionIdHeader": false })
+        );
+
+        let responses = OpenAIResponsesCompat {
+            supports_developer_role: Some(false),
+            session_affinity_format: Some(SessionAffinityFormat::Openrouter),
+            supports_long_cache_retention: Some(false),
+            supports_explicit_prompt_cache_mode: Some(true),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_value(&responses).unwrap();
+        assert_eq!(serialized["supportsDeveloperRole"], json!(false));
+        assert_eq!(serialized["sessionAffinityFormat"], json!("openrouter"));
+        assert_eq!(serialized["supportsLongCacheRetention"], json!(false));
+        assert_eq!(serialized["supportsExplicitPromptCacheMode"], json!(true));
+        assert_eq!(
+            serde_json::from_value::<OpenAIResponsesCompat>(serialized).unwrap(),
+            responses
+        );
+
+        let headers: ProviderHeaders = [
+            ("x-keep".to_string(), Some("value".to_string())),
+            ("x-remove".to_string(), None),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            serde_json::to_value(headers).unwrap(),
+            json!({ "x-keep": "value", "x-remove": null })
         );
     }
 

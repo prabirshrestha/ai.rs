@@ -721,6 +721,40 @@ Set model-builder compat metadata when the target OpenAI-compatible endpoint
 needs payload differences such as non-standard reasoning, cache-control,
 max-token, or tool-result behavior.
 
+Chat Completions and Responses share `SessionAffinityFormat` for configured
+compatible endpoints:
+
+| Format | Chat Completions headers | Responses headers |
+| --- | --- | --- |
+| `Openai` | `session_id`, `x-client-request-id`, `x-session-affinity` | `session_id`, `x-client-request-id` |
+| `OpenaiNosession` | `x-client-request-id`, `x-session-affinity` | `x-client-request-id` |
+| `Openrouter` | `x-session-id` | `x-session-id` |
+
+OpenRouter is detected only for the OpenRouter provider or an
+`openrouter.ai` base URL; otherwise the default format is `Openai`. Chat
+Completions also requires `send_session_affinity_headers = Some(true)`, while
+Responses sends its selected affinity format whenever a session ID is present.
+`CacheRetention::None` suppresses generated affinity headers without changing
+the configured format. The legacy Responses
+`send_session_id_header = Some(false)` setting remains readable and maps to
+`OpenaiNosession`; the legacy `Some(true)` maps to `Openai` so existing
+serialized models keep their behavior. Prefer `session_affinity_format` for new
+configurations.
+
+Per-request `StreamOptions::headers` are applied last and match header names
+case-insensitively. A string value replaces a generated or model header, and a
+`None` value suppresses it. `StreamOptions::env` provides provider-scoped
+environment overrides; `PI_CACHE_RETENTION` is currently resolved from this
+map before the process environment by OpenAI Chat Completions, OpenAI
+Responses, and Anthropic. An explicit `cache_retention` still takes precedence.
+
+Responses compatibility also includes `supports_developer_role` and
+`supports_explicit_prompt_cache_mode`. The latter emits
+`prompt_cache_options: { mode: "explicit" }` only when cache retention is
+`None`. Responses clamps positive `max_tokens` values below the API minimum to
+16 (while zero remains omitted), and accepts `toolChoice` through
+`provider_options` or the typed `OpenAIResponsesOptions::tool_choice` field.
+
 For a server that controls thinking through Jinja chat-template arguments, use
 the generic `ChatTemplate` format. Static strings, JSON numbers, booleans, and
 null values pass through unchanged. `thinking_enabled()` resolves to a boolean;

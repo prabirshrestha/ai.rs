@@ -396,7 +396,7 @@ async fn run_stream(
     };
     let is_oauth = is_oauth_token(&api_key);
     let compat = get_anthropic_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
     let cache_control = cache_control(&model, cache_retention, compat);
     let mut payload =
         build_anthropic_payload(&model, &context, &options, is_oauth, cache_control.clone());
@@ -1134,11 +1134,16 @@ fn cache_control(
     Some(value)
 }
 
-fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+fn resolve_cache_retention(
+    cache_retention: Option<CacheRetention>,
+    env: &crate::types::ProviderEnv,
+) -> CacheRetention {
     cache_retention
         .or_else(|| {
-            (std::env::var("PI_CACHE_RETENTION").ok().as_deref() == Some("long"))
-                .then_some(CacheRetention::Long)
+            (crate::utils::provider_env::get_provider_env_value("PI_CACHE_RETENTION", env)
+                .as_deref()
+                == Some("long"))
+            .then_some(CacheRetention::Long)
         })
         .unwrap_or(CacheRetention::Short)
 }
@@ -1246,14 +1251,7 @@ fn headers(
             headers.insert(name, value);
         }
     }
-    for (name, value) in &options.base.headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let value = HeaderValue::from_str(value)
-            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
-        headers.insert(name, value);
-    }
+    crate::utils::headers::apply_provider_headers(&mut headers, &options.base.headers)?;
     Ok(headers)
 }
 
@@ -2088,7 +2086,7 @@ mod tests {
         let options = AnthropicOptions::default();
         let cache_control = cache_control(
             &model,
-            resolve_cache_retention(options.base.cache_retention),
+            resolve_cache_retention(options.base.cache_retention, &options.base.env),
             get_anthropic_compat(&model),
         );
         let payload = build_anthropic_payload(

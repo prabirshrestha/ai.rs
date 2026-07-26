@@ -257,7 +257,7 @@ async fn run_generate_images_openrouter(
 fn build_headers(
     api_key: &str,
     model_headers: &std::collections::HashMap<String, String>,
-    option_headers: &std::collections::HashMap<String, String>,
+    option_headers: &crate::types::ProviderHeaders,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -266,7 +266,7 @@ fn build_headers(
         HeaderValue::from_str(&format!("Bearer {api_key}"))
             .map_err(|error| Error::InvalidHeaderValue("authorization".to_string(), error))?,
     );
-    for (name, value) in model_headers.iter().chain(option_headers.iter()) {
+    for (name, value) in model_headers {
         let name = name
             .parse::<HeaderName>()
             .map_err(|error| Error::Provider(format!("invalid header name: {error}")))?;
@@ -274,6 +274,7 @@ fn build_headers(
             .map_err(|error| Error::InvalidHeaderValue(name.as_str().to_string(), error))?;
         headers.insert(name, value);
     }
+    crate::utils::headers::apply_provider_headers(&mut headers, option_headers)?;
     Ok(headers)
 }
 

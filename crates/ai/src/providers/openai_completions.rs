@@ -15,10 +15,11 @@ use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheControlFormat, CacheRetention,
     ChatTemplateKwargValue, ChatTemplateVariable, Context, ImageContent, MaxTokensField, Model,
-    ModelInput, ModelThinkingLevel, OpenAIThinkingFormat, SimpleStreamOptions, StopReason,
-    StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage,
-    UserContent, UserMessageContent,
+    ModelInput, ModelThinkingLevel, OpenAIThinkingFormat, SessionAffinityFormat,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall,
+    ToolResultContent, Usage, UserContent, UserMessageContent,
 };
+use crate::utils::headers::apply_provider_headers;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::sse;
@@ -50,6 +51,7 @@ struct ResolvedOpenAICompletionsCompat {
     supports_strict_mode: bool,
     cache_control_format: Option<CacheControlFormat>,
     send_session_affinity_headers: bool,
+    session_affinity_format: SessionAffinityFormat,
     supports_long_cache_retention: bool,
 }
 
@@ -156,7 +158,7 @@ async fn run_stream(
         ));
     };
     let compat = get_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
     let mut payload =
         build_chat_completions_payload(&model, &context, &options, &compat, cache_retention);
     if let Some(on_payload) = &options.base.on_payload {
@@ -1144,7 +1146,7 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
     }
 }
 
-fn detect_compat(_model: &Model) -> ResolvedOpenAICompletionsCompat {
+fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
     ResolvedOpenAICompletionsCompat {
         supports_store: true,
         supports_developer_role: true,
@@ -1163,6 +1165,7 @@ fn detect_compat(_model: &Model) -> ResolvedOpenAICompletionsCompat {
         supports_strict_mode: true,
         cache_control_format: None,
         send_session_affinity_headers: false,
+        session_affinity_format: detect_session_affinity_format(model),
         supports_long_cache_retention: true,
     }
 }
@@ -1218,6 +1221,9 @@ fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         send_session_affinity_headers: compat
             .send_session_affinity_headers
             .unwrap_or(detected.send_session_affinity_headers),
+        session_affinity_format: compat
+            .session_affinity_format
+            .unwrap_or(detected.session_affinity_format),
         supports_long_cache_retention: compat
             .supports_long_cache_retention
             .unwrap_or(detected.supports_long_cache_retention),
@@ -1258,11 +1264,24 @@ fn sanitize_id(id: &str) -> String {
         .collect()
 }
 
-fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+fn detect_session_affinity_format(model: &Model) -> SessionAffinityFormat {
+    if model.provider == "openrouter" || model.base_url.contains("openrouter.ai") {
+        SessionAffinityFormat::Openrouter
+    } else {
+        SessionAffinityFormat::Openai
+    }
+}
+
+fn resolve_cache_retention(
+    cache_retention: Option<CacheRetention>,
+    env: &crate::types::ProviderEnv,
+) -> CacheRetention {
     cache_retention
         .or_else(|| {
-            (std::env::var("PI_CACHE_RETENTION").ok().as_deref() == Some("long"))
-                .then_some(CacheRetention::Long)
+            (crate::utils::provider_env::get_provider_env_value("PI_CACHE_RETENTION", env)
+                .as_deref()
+                == Some("long"))
+            .then_some(CacheRetention::Long)
         })
         .unwrap_or(CacheRetention::Short)
 }
@@ -1375,30 +1394,25 @@ fn headers(
         && compat.send_session_affinity_headers
         && cache_retention != CacheRetention::None
     {
-        headers.insert(
-            HeaderName::from_static("session_id"),
-            HeaderValue::from_str(session_id)
-                .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
-        );
-        headers.insert(
-            HeaderName::from_static("x-client-request-id"),
-            HeaderValue::from_str(session_id)
-                .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
-        );
-        headers.insert(
-            HeaderName::from_static("x-session-affinity"),
-            HeaderValue::from_str(session_id)
-                .map_err(|e| Error::InvalidHeaderValue("x-session-affinity".to_string(), e))?,
-        );
+        let value = HeaderValue::from_str(session_id)
+            .map_err(|e| Error::InvalidHeaderValue("session affinity".to_string(), e))?;
+        match compat.session_affinity_format {
+            SessionAffinityFormat::Openrouter => {
+                headers.insert(HeaderName::from_static("x-session-id"), value);
+            }
+            SessionAffinityFormat::Openai | SessionAffinityFormat::OpenaiNosession => {
+                if compat.session_affinity_format == SessionAffinityFormat::Openai {
+                    headers.insert(HeaderName::from_static("session_id"), value.clone());
+                }
+                headers.insert(
+                    HeaderName::from_static("x-client-request-id"),
+                    value.clone(),
+                );
+                headers.insert(HeaderName::from_static("x-session-affinity"), value);
+            }
+        }
     }
-    for (name, value) in &options.headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let value = HeaderValue::from_str(value)
-            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
-        headers.insert(name, value);
-    }
+    apply_provider_headers(&mut headers, &options.headers)?;
     Ok(headers)
 }
 
@@ -1764,11 +1778,35 @@ mod tests {
             &context,
             &options,
             &compat,
-            resolve_cache_retention(options.base.cache_retention),
+            resolve_cache_retention(options.base.cache_retention, &options.base.env),
         );
 
         assert_eq!(payload["prompt_cache_key"], json!("session-env"));
         assert_eq!(payload["prompt_cache_retention"], json!("24h"));
+    }
+
+    #[test]
+    fn chat_cache_retention_prefers_explicit_then_scoped_then_process_env() {
+        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
+        let scoped_short = [("PI_CACHE_RETENTION".to_string(), "short".to_string())]
+            .into_iter()
+            .collect();
+        let scoped_long = [("PI_CACHE_RETENTION".to_string(), "long".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            resolve_cache_retention(None, &scoped_short),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            resolve_cache_retention(None, &scoped_long),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            resolve_cache_retention(Some(CacheRetention::None), &scoped_long),
+            CacheRetention::None
+        );
     }
 
     #[test]
@@ -2278,6 +2316,145 @@ mod tests {
         .unwrap();
         assert!(request_headers.get("session_id").is_none());
         assert!(request_headers.get("x-client-request-id").is_none());
+        assert!(request_headers.get("x-session-affinity").is_none());
+    }
+
+    #[test]
+    fn chat_headers_use_openai_no_session_format() {
+        let mut model = model();
+        model
+            .compat
+            .openai_completions
+            .send_session_affinity_headers = Some(true);
+        model.compat.openai_completions.session_affinity_format =
+            Some(SessionAffinityFormat::OpenaiNosession);
+        let options = StreamOptions {
+            session_id: Some("session-nosession".to_string()),
+            ..Default::default()
+        };
+
+        let request_headers = headers(
+            &model,
+            &Context::default(),
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert!(request_headers.get("session_id").is_none());
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-nosession")
+        );
+        assert_eq!(
+            request_headers
+                .get("x-session-affinity")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-nosession")
+        );
+        assert!(request_headers.get("x-session-id").is_none());
+    }
+
+    #[test]
+    fn chat_headers_use_and_auto_detect_openrouter_format() {
+        for explicit in [false, true] {
+            let mut model = model();
+            model.provider = "openrouter".to_string();
+            model.base_url = "https://openrouter.ai/api/v1".to_string();
+            model
+                .compat
+                .openai_completions
+                .send_session_affinity_headers = Some(true);
+            if explicit {
+                model.compat.openai_completions.session_affinity_format =
+                    Some(SessionAffinityFormat::Openrouter);
+            }
+            let options = StreamOptions {
+                session_id: Some("session-openrouter".to_string()),
+                ..Default::default()
+            };
+
+            let request_headers = headers(
+                &model,
+                &Context::default(),
+                &options,
+                "test-key",
+                &get_compat(&model),
+                CacheRetention::Short,
+            )
+            .unwrap();
+
+            assert_eq!(
+                request_headers
+                    .get("x-session-id")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-openrouter")
+            );
+            assert!(request_headers.get("session_id").is_none());
+            assert!(request_headers.get("x-client-request-id").is_none());
+            assert!(request_headers.get("x-session-affinity").is_none());
+        }
+    }
+
+    #[test]
+    fn chat_headers_omit_openrouter_affinity_when_disabled() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        let options = StreamOptions {
+            session_id: Some("session-openrouter".to_string()),
+            ..Default::default()
+        };
+
+        let request_headers = headers(
+            &model,
+            &Context::default(),
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert!(request_headers.get("x-session-id").is_none());
+    }
+
+    #[test]
+    fn chat_headers_apply_case_insensitive_overrides_and_null_suppression() {
+        let mut model = model();
+        model
+            .compat
+            .openai_completions
+            .send_session_affinity_headers = Some(true);
+        let mut options = StreamOptions {
+            session_id: Some("session-default".to_string()),
+            ..Default::default()
+        };
+        options
+            .headers
+            .insert("X-CLIENT-REQUEST-ID", "session-override".to_string());
+        options.headers.insert("X-Session-Affinity", None);
+
+        let request_headers = headers(
+            &model,
+            &Context::default(),
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-override")
+        );
         assert!(request_headers.get("x-session-affinity").is_none());
     }
 

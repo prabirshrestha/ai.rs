@@ -83,11 +83,13 @@ pub(crate) fn openai_responses_options_from_stream_options(
     let reasoning_summary =
         provider_option(&options, &["reasoningSummary"]).and_then(reasoning_summary_option);
     let service_tier = provider_string(&options, &["serviceTier"]);
+    let tool_choice = provider_option(&options, &["toolChoice"]).cloned();
     openai_responses::OpenAIResponsesOptions {
         base: options,
         reasoning_effort,
         reasoning_summary,
         service_tier,
+        tool_choice,
     }
 }
 
@@ -196,6 +198,20 @@ mod tests {
     }
 
     #[test]
+    fn generic_openai_responses_options_forward_tool_choice() {
+        let options = StreamOptions {
+            provider_options: [("toolChoice".to_string(), json!("required"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+
+        let converted = openai_responses_options_from_stream_options(options);
+
+        assert_eq!(converted.tool_choice, Some(json!("required")));
+    }
+
+    #[test]
     fn generic_provider_options_use_upstream_camel_case_names() {
         let options = StreamOptions {
             provider_options: [
@@ -221,6 +237,7 @@ mod tests {
         assert_eq!(responses.reasoning_effort, None);
         assert_eq!(responses.reasoning_summary, None);
         assert_eq!(responses.service_tier, None);
+        assert_eq!(responses.tool_choice, None);
 
         let anthropic = anthropic_options_from_stream_options(options);
         assert_eq!(anthropic.thinking_enabled, None);
