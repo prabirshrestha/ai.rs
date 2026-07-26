@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -370,6 +371,11 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
         enterprise_domain,
         token,
     );
+    if let Some(on_progress) = &callbacks.on_progress {
+        on_progress("Enabling models...".to_string());
+    }
+    let candidate_ids = fetch_copilot_model_ids(&credentials.access, Some(domain.as_str())).await?;
+    enable_copilot_models(&credentials.access, Some(domain.as_str()), candidate_ids).await;
     set_available_copilot_model_ids(&mut credentials, Some(domain.as_str())).await?;
     Ok(credentials)
 }
@@ -429,6 +435,24 @@ async fn fetch_available_copilot_model_ids(
     fetch_available_copilot_model_ids_at(&client, &base_url, copilot_token).await
 }
 
+async fn fetch_copilot_model_ids(
+    copilot_token: &str,
+    enterprise_domain: Option<&str>,
+) -> Result<Vec<String>> {
+    let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .get(format!("{base_url}/models"))
+        .headers(copilot_headers(Some(copilot_token))?)
+        .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
+        .send()
+        .await?;
+    let response = error_for_status(response).await?;
+    parse_copilot_model_ids(response.json::<Value>().await?)
+}
+
 async fn fetch_available_copilot_model_ids_at(
     client: &reqwest::Client,
     base_url: &str,
@@ -477,6 +501,61 @@ fn parse_available_copilot_model_ids(raw: Value) -> Result<Vec<String>> {
         })
         .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
         .collect())
+}
+
+fn parse_copilot_model_ids(raw: Value) -> Result<Vec<String>> {
+    let Some(data) = raw
+        .as_object()
+        .and_then(|object| object.get("data"))
+        .and_then(Value::as_array)
+    else {
+        return Err(Error::Provider(
+            "Invalid Copilot models response".to_string(),
+        ));
+    };
+
+    Ok(data
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect())
+}
+
+async fn enable_copilot_models(
+    copilot_token: &str,
+    enterprise_domain: Option<&str>,
+    model_ids: Vec<String>,
+) {
+    let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
+    let client = reqwest::Client::new();
+    join_all(model_ids.into_iter().map(|model_id| {
+        let client = client.clone();
+        let base_url = base_url.clone();
+        let copilot_token = copilot_token.to_string();
+        async move { enable_copilot_model_at(&client, &base_url, &copilot_token, &model_id).await }
+    }))
+    .await;
+}
+
+async fn enable_copilot_model_at(
+    client: &reqwest::Client,
+    base_url: &str,
+    copilot_token: &str,
+    model_id: &str,
+) -> bool {
+    let Ok(headers) = copilot_headers(Some(copilot_token)) else {
+        return false;
+    };
+    client
+        .post(format!("{base_url}/models/{model_id}/policy"))
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .header("openai-intent", "chat-policy")
+        .header("x-interaction-type", "chat-policy")
+        .json(&serde_json::json!({ "state": "enabled" }))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
@@ -897,6 +976,17 @@ mod tests {
 
         assert_eq!(ids, vec!["gpt-4.1"]);
         assert_eq!(
+            parse_copilot_model_ids(serde_json::json!({
+                "data": [
+                    { "id": "gpt-4.1" },
+                    { "id": "claude-opus-4.7" },
+                    { "id": 1 }
+                ]
+            }))
+            .expect("model ids"),
+            vec!["gpt-4.1", "claude-opus-4.7"]
+        );
+        assert_eq!(
             parse_available_copilot_model_ids(serde_json::json!({}))
                 .unwrap_err()
                 .to_string(),
@@ -959,6 +1049,61 @@ mod tests {
             request.contains("x-github-api-version: 2026-06-01"),
             "{request}"
         );
+    }
+
+    #[tokio::test]
+    async fn enables_copilot_model_policy_with_pi_request_shape() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = {
+            let captured_request = Arc::clone(&captured_request);
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                *captured_request.lock().expect("request lock poisoned") = Some(request);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            })
+        };
+        let client = reqwest::Client::new();
+
+        assert!(
+            enable_copilot_model_at(
+                &client,
+                &format!("http://{addr}"),
+                "copilot-token",
+                "claude-opus-4.7",
+            )
+            .await
+        );
+        server.await.unwrap();
+
+        let request = captured_request
+            .lock()
+            .expect("request lock poisoned")
+            .clone()
+            .expect("captured request");
+        assert!(
+            request.starts_with("POST /models/claude-opus-4.7/policy HTTP/1.1"),
+            "{request}"
+        );
+        let lowercase = request.to_ascii_lowercase();
+        assert!(
+            lowercase.contains("authorization: bearer copilot-token"),
+            "{request}"
+        );
+        assert!(
+            lowercase.contains("openai-intent: chat-policy"),
+            "{request}"
+        );
+        assert!(
+            lowercase.contains("x-interaction-type: chat-policy"),
+            "{request}"
+        );
+        assert!(request.ends_with(r#"{"state":"enabled"}"#), "{request}");
     }
 
     #[test]
