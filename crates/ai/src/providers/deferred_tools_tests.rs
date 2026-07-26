@@ -57,6 +57,7 @@ fn tool_result(tool_call_id: &str, added_tool_names: &[&str]) -> Message {
         tool_name: "base_tool".to_string(),
         content: vec![ToolResultContent::text("done")],
         details: None,
+        usage: None,
         added_tool_names: added_tool_names.iter().map(ToString::to_string).collect(),
         is_error: false,
         timestamp: 3,

@@ -476,6 +476,8 @@ pub struct ToolResultMessage {
     pub tool_name: String,
     pub content: Vec<ToolResultContent>,
     pub details: Option<Value>,
+    /// Usage from the tool execution itself, if available. Not part of main LLM context accounting.
+    pub usage: Option<Usage>,
     /// Names from `Context::tools` that became available after this result.
     pub added_tool_names: Vec<String>,
     pub is_error: bool,
@@ -619,6 +621,9 @@ impl Serialize for ToolResultMessage {
         if self.details.is_some() {
             field_count += 1;
         }
+        if self.usage.is_some() {
+            field_count += 1;
+        }
         if !self.added_tool_names.is_empty() {
             field_count += 1;
         }
@@ -629,6 +634,9 @@ impl Serialize for ToolResultMessage {
         state.serialize_field("content", &self.content)?;
         if let Some(details) = &self.details {
             state.serialize_field("details", details)?;
+        }
+        if let Some(usage) = &self.usage {
+            state.serialize_field("usage", usage)?;
         }
         if !self.added_tool_names.is_empty() {
             state.serialize_field("addedToolNames", &self.added_tool_names)?;
@@ -652,6 +660,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             tool_name: String,
             content: Vec<ToolResultContent>,
             details: Option<Value>,
+            usage: Option<Usage>,
             #[serde(default)]
             added_tool_names: Vec<String>,
             is_error: bool,
@@ -665,6 +674,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             tool_name: helper.tool_name,
             content: helper.content,
             details: helper.details,
+            usage: helper.usage,
             added_tool_names: helper.added_tool_names,
             is_error: helper.is_error,
             timestamp: helper.timestamp,
@@ -1555,6 +1565,7 @@ mod tests {
                 tool_name: "read".to_string(),
                 content: vec![ToolResultContent::text("done")],
                 details: None,
+                usage: None,
                 added_tool_names: Vec::new(),
                 is_error: false,
                 timestamp: 2,
@@ -1684,6 +1695,7 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    usage: None,
                     added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 2,
@@ -1906,6 +1918,7 @@ mod tests {
             tool_name: "base_tool".to_string(),
             content: vec![ToolResultContent::text("done")],
             details: None,
+            usage: None,
             added_tool_names: vec!["late_tool".to_string()],
             is_error: false,
             timestamp: 3,
@@ -1938,6 +1951,44 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ModelCompat>(value).unwrap(),
             compat
+        );
+    }
+
+    #[test]
+    fn tool_result_usage_round_trips() {
+        let message = ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "llm_tool".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            usage: Some(Usage {
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                total_tokens: 10,
+                cost: UsageCost {
+                    input: 0.1,
+                    output: 0.2,
+                    cache_read: 0.3,
+                    cache_write: 0.4,
+                    total: 1.0,
+                },
+                ..Default::default()
+            }),
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: 3,
+        };
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(
+            value["usage"],
+            serde_json::to_value(&message.usage).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
+            message
         );
     }
 

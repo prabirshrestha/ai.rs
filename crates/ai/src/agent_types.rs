@@ -42,6 +42,8 @@ pub enum QueueMode {
 pub struct AgentToolResult {
     pub content: Vec<ToolResultContent>,
     pub details: Option<Value>,
+    /// Usage from this tool execution, if available. Not used for main LLM context accounting.
+    pub usage: Option<crate::Usage>,
     /// Names of tools introduced by this result and available from this transcript point onward.
     pub added_tool_names: Vec<String>,
     pub terminate: bool,
@@ -52,6 +54,7 @@ impl AgentToolResult {
         Self {
             content: vec![ToolResultContent::text(text)],
             details: None,
+            usage: None,
             added_tool_names: Vec::new(),
             terminate: false,
         }
@@ -437,6 +440,7 @@ pub struct AfterToolCallContext {
 pub struct AfterToolCallResult {
     pub content: Option<Vec<ToolResultContent>>,
     pub details: Option<Value>,
+    pub usage: Option<crate::Usage>,
     pub is_error: Option<bool>,
     pub terminate: Option<bool>,
 }
@@ -516,6 +520,7 @@ pub fn text_result_message(
             text_signature: None,
         })],
         details: None,
+        usage: None,
         added_tool_names: Vec::new(),
         is_error,
         timestamp: crate::utils::time::now_millis(),

@@ -329,4 +329,28 @@ mod tests {
     fn text_estimation_uses_javascript_utf16_string_length() {
         assert_eq!(estimate_text_tokens("😀😀"), 1);
     }
+
+    #[test]
+    fn ignores_tool_execution_usage() {
+        let tool_result = Message::ToolResult(crate::ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "llm_tool".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            usage: Some(create_usage(9_000)),
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: 1,
+        });
+        let mut without_usage = tool_result.clone();
+        let Message::ToolResult(result) = &mut without_usage else {
+            unreachable!();
+        };
+        result.usage = None;
+
+        assert_eq!(
+            estimate_message_tokens(&tool_result),
+            estimate_message_tokens(&without_usage)
+        );
+    }
 }

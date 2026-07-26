@@ -889,6 +889,9 @@ async fn execute_prepared_tool_call(
                 if let Some(details) = after_result.details.filter(|details| !details.is_null()) {
                     result.details = Some(details);
                 }
+                if let Some(usage) = after_result.usage {
+                    result.usage = Some(usage);
+                }
                 if let Some(terminate) = after_result.terminate {
                     result.terminate = terminate;
                 }
@@ -971,6 +974,7 @@ fn create_tool_result_message(
         tool_name: tool_call.name,
         content: result.content,
         details: result.details,
+        usage: result.usage,
         added_tool_names: result.added_tool_names,
         is_error,
         timestamp: crate::utils::time::now_millis(),
@@ -991,6 +995,7 @@ fn tool_result_messages_preserve_added_tool_names() {
         AgentToolResult {
             content: vec![crate::ToolResultContent::text("done")],
             details: None,
+            usage: None,
             added_tool_names: vec!["late_tool".to_string()],
             terminate: false,
         },
@@ -1036,7 +1041,8 @@ mod tests {
     };
     use crate::{
         AssistantContent, AssistantMessage, AssistantMessageEvent, Message, Model, StopReason,
-        TextContent, Tool, ToolResultContent, ToolResultMessage, UserMessageContent,
+        TextContent, Tool, ToolResultContent, ToolResultMessage, Usage, UsageCost,
+        UserMessageContent,
     };
 
     fn collect_events() -> (Arc<StdMutex<Vec<AgentEvent>>>, AgentEventSink) {
@@ -1235,6 +1241,42 @@ mod tests {
         }
     }
 
+    struct UsageTool {
+        usage: Usage,
+    }
+
+    #[async_trait]
+    impl AgentTool for UsageTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "llm_tool".to_string(),
+                description: "Runs an LLM-backed tool.".to_string(),
+                parameters: json!({ "type": "object" }),
+                constrained_sampling: None,
+            }
+        }
+
+        fn label(&self) -> &str {
+            "LLM tool"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            Ok(AgentToolResult {
+                content: vec![ToolResultContent::text("done")],
+                details: None,
+                usage: Some(self.usage.clone()),
+                added_tool_names: Vec::new(),
+                terminate: false,
+            })
+        }
+    }
+
     struct DelayedUpdateTool {
         name: &'static str,
         update: Arc<StdMutex<Option<AgentToolUpdateCallback>>>,
@@ -1272,6 +1314,7 @@ mod tests {
                 on_update(AgentToolResult {
                     content: vec![ToolResultContent::text("running")],
                     details: Some(json!({ "status": "running" })),
+                    usage: None,
                     added_tool_names: Vec::new(),
                     terminate: false,
                 })
@@ -1286,6 +1329,7 @@ mod tests {
             Ok(AgentToolResult {
                 content: vec![ToolResultContent::text("done")],
                 details: Some(json!({ "status": "done" })),
+                usage: None,
                 added_tool_names: Vec::new(),
                 terminate: true,
             })
@@ -1795,6 +1839,7 @@ mod tests {
             .expect("captured update callback")(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
+            usage: None,
             added_tool_names: Vec::new(),
             terminate: false,
         })
@@ -1889,6 +1934,7 @@ mod tests {
             .expect("captured update callback")(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
+            usage: None,
             added_tool_names: Vec::new(),
             terminate: false,
         })
@@ -2716,6 +2762,100 @@ mod tests {
                 .filter(|message| matches!(message, Message::Assistant(_)))
                 .count(),
             2
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn after_tool_call_observes_and_patches_tool_usage() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "llm_tool",
+                    json!({}),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let tool_usage = Usage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            total_tokens: 10,
+            cost: UsageCost {
+                input: 0.1,
+                output: 0.2,
+                cache_read: 0.3,
+                cache_write: 0.4,
+                total: 1.0,
+            },
+            ..Default::default()
+        };
+        let patched_tool_usage = Usage {
+            input: 5,
+            output: 6,
+            cache_read: 7,
+            cache_write: 8,
+            total_tokens: 26,
+            cost: UsageCost {
+                input: 0.5,
+                output: 0.6,
+                cache_read: 0.7,
+                cache_write: 0.8,
+                total: 2.6,
+            },
+            ..Default::default()
+        };
+        let observed_tool_usage = Arc::new(StdMutex::new(None));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.after_tool_call = Some(Arc::new({
+            let observed_tool_usage = Arc::clone(&observed_tool_usage);
+            let patched_tool_usage = patched_tool_usage.clone();
+            move |context: AfterToolCallContext, _token| {
+                *observed_tool_usage.lock().unwrap() = context.result.usage;
+                let patched_tool_usage = patched_tool_usage.clone();
+                Box::pin(async move {
+                    Ok(Some(AfterToolCallResult {
+                        usage: Some(patched_tool_usage),
+                        ..AfterToolCallResult::default()
+                    }))
+                })
+            }
+        }));
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: vec![Arc::new(UsageTool {
+                usage: tool_usage.clone(),
+            })],
+        };
+        let (_events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("run the tool")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*observed_tool_usage.lock().unwrap(), Some(tool_usage));
+        assert_eq!(
+            messages.iter().find_map(|message| match message {
+                Message::ToolResult(result) => result.usage.as_ref(),
+                _ => None,
+            }),
+            Some(&patched_tool_usage)
         );
         registration.unregister();
     }

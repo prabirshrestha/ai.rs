@@ -2387,6 +2387,7 @@ mod tests {
                         ToolResultContent::text("second"),
                     ],
                     details: None,
+                    usage: None,
                     added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 1,
