@@ -6,6 +6,7 @@ pub mod headers;
 pub(crate) mod http;
 pub mod json;
 pub mod overflow;
+pub(crate) mod provider_env;
 pub(crate) mod sse;
 pub(crate) mod time;
 pub mod validation;

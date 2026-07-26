@@ -28,6 +28,7 @@ use crate::utils::hash::short_hash;
 use crate::utils::headers::apply_provider_headers;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
+use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sse;
 use crate::{Error, Result};
 
@@ -309,7 +310,7 @@ async fn run_stream(
         Ok(properties) => properties,
         Err(error) => return Err(StreamFailure::new(output, error)),
     };
-    let cache_retention = resolve_cache_retention(options.base.cache_retention);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
     let mut payload = match try_build_responses_payload(
         &model,
         &context,
@@ -1649,11 +1650,15 @@ fn detect_session_affinity_format(model: &Model) -> SessionAffinityFormat {
     }
 }
 
-fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
-    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
-    // ai.rs is a library: applications that want environment-driven policy can
-    // translate it into StreamOptions::cache_retention at their boundary.
-    cache_retention.unwrap_or(CacheRetention::Short)
+fn resolve_cache_retention(
+    cache_retention: Option<CacheRetention>,
+    env: &std::collections::HashMap<String, String>,
+) -> CacheRetention {
+    cache_retention.unwrap_or_else(|| {
+        (get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long"))
+            .then_some(CacheRetention::Long)
+            .unwrap_or(CacheRetention::Short)
+    })
 }
 
 fn headers(
@@ -2704,6 +2709,23 @@ mod tests {
         );
         assert!(enabled.get("prompt_cache_options").is_none());
         assert!(unsupported.get("prompt_cache_options").is_none());
+    }
+
+    #[test]
+    fn provider_env_controls_default_cache_retention() {
+        let long = [("PI_CACHE_RETENTION".to_string(), "long".to_string())]
+            .into_iter()
+            .collect();
+        let short = [("PI_CACHE_RETENTION".to_string(), "short".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(resolve_cache_retention(None, &long), CacheRetention::Long);
+        assert_eq!(resolve_cache_retention(None, &short), CacheRetention::Short);
+        assert_eq!(
+            resolve_cache_retention(Some(CacheRetention::None), &long),
+            CacheRetention::None
+        );
     }
 
     #[test]
