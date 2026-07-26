@@ -128,6 +128,8 @@ mod tests {
                 output,
                 cache_read,
                 cache_write: 0,
+                cache_write_1h: None,
+                reasoning: None,
                 total_tokens: input + cache_read + output,
                 cost: UsageCost::default(),
             },

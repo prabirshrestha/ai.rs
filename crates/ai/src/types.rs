@@ -392,6 +392,14 @@ pub struct Usage {
     pub output: u32,
     pub cache_read: u32,
     pub cache_write: u32,
+    /// Subset of `cache_write` written with one-hour retention. Only
+    /// Anthropic reports this split.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u32>,
+    /// Reasoning/thinking tokens when the provider reports them. This is a
+    /// subset of `output`, which already includes these tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u32>,
     pub total_tokens: u32,
     pub cost: UsageCost,
 }
@@ -961,11 +969,36 @@ pub enum ModelOutput {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelCostRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCostTier {
+    /// Use this tier for requests whose total input usage exceeds this token
+    /// count.
+    pub input_tokens_above: u32,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCost {
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// Request-wide pricing tiers. The highest matching input threshold
+    /// applies to the full request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ModelCostTier>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1610,6 +1643,47 @@ mod tests {
         assert_eq!(
             serde_json::to_value(headers).unwrap(),
             json!({ "x-keep": "value", "x-remove": null })
+        );
+    }
+
+    #[test]
+    fn usage_optional_breakdowns_and_cost_tiers_round_trip() {
+        let usage = Usage {
+            output: 20,
+            cache_write: 10,
+            cache_write_1h: Some(4),
+            reasoning: Some(7),
+            ..Default::default()
+        };
+        let serialized_usage = serde_json::to_value(&usage).unwrap();
+        assert_eq!(serialized_usage["cacheWrite1h"], json!(4));
+        assert_eq!(serialized_usage["reasoning"], json!(7));
+        assert_eq!(
+            serde_json::from_value::<Usage>(serialized_usage).unwrap(),
+            usage
+        );
+        let empty_usage = serde_json::to_value(Usage::default()).unwrap();
+        assert!(empty_usage.get("cacheWrite1h").is_none());
+        assert!(empty_usage.get("reasoning").is_none());
+
+        let cost = ModelCost {
+            input: 5.0,
+            output: 30.0,
+            cache_read: 0.5,
+            cache_write: 6.25,
+            tiers: vec![ModelCostTier {
+                input_tokens_above: 272_000,
+                input: 10.0,
+                output: 45.0,
+                cache_read: 1.0,
+                cache_write: 12.5,
+            }],
+        };
+        let serialized_cost = serde_json::to_value(&cost).unwrap();
+        assert_eq!(serialized_cost["tiers"][0]["inputTokensAbove"], 272_000);
+        assert_eq!(
+            serde_json::from_value::<ModelCost>(serialized_cost).unwrap(),
+            cost
         );
     }
 

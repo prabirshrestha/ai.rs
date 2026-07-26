@@ -690,6 +690,8 @@ fn default_usage() -> Usage {
         output: 0,
         cache_read: 0,
         cache_write: 0,
+        cache_write_1h: None,
+        reasoning: None,
         total_tokens: 0,
         cost: UsageCost::default(),
     }
@@ -855,6 +857,8 @@ fn with_usage_estimate(
         output: output_tokens,
         cache_read,
         cache_write,
+        cache_write_1h: None,
+        reasoning: None,
         total_tokens: input + output_tokens + cache_read + cache_write,
         cost: UsageCost::default(),
     };
