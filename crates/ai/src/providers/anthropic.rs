@@ -519,7 +519,7 @@ async fn run_stream(
                     output.response_id = Some(id.to_string());
                 }
                 if let Some(usage) = parsed.pointer("/message/usage") {
-                    update_anthropic_usage(&mut output, usage, &model);
+                    update_anthropic_start_usage(&mut output, usage, &model);
                 }
             }
             Some("content_block_start") => {
@@ -1119,6 +1119,19 @@ fn update_anthropic_usage(output: &mut AssistantMessage, usage: &Value, model: &
     calculate_cost(model, &mut output.usage);
 }
 
+fn update_anthropic_start_usage(output: &mut AssistantMessage, usage: &Value, model: &Model) {
+    // pi exposes this provider-supported breakdown as zero when Anthropic
+    // omits it from message_start, while leaving it absent for providers that
+    // do not report the breakdown at all.
+    output.usage.cache_write_1h = Some(
+        usage
+            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+    );
+    update_anthropic_usage(output, usage, model);
+}
+
 fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
     let compat = &model.compat.anthropic_messages;
     ResolvedAnthropicCompat {
@@ -1439,13 +1452,13 @@ mod tests {
         };
         let mut output = AssistantMessage::empty_for(&model);
 
-        update_anthropic_usage(
+        update_anthropic_start_usage(
             &mut output,
             &json!({ "cache_creation_input_tokens": 1_000_000 }),
             &model,
         );
 
-        assert_eq!(output.usage.cache_write_1h, None);
+        assert_eq!(output.usage.cache_write_1h, Some(0));
         assert_eq!(output.usage.cost.cache_write, 6.25);
     }
 
