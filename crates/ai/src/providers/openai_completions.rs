@@ -5204,7 +5204,7 @@ mod tests {
             (ModelThinkingLevel::Low, "high"),
             (ModelThinkingLevel::Medium, "high"),
             (ModelThinkingLevel::High, "high"),
-            (ModelThinkingLevel::Xhigh, "max"),
+            (ModelThinkingLevel::Max, "max"),
         ] {
             model
                 .thinking_level_map
@@ -5219,7 +5219,7 @@ mod tests {
             (ModelThinkingLevel::Low, "high"),
             (ModelThinkingLevel::Medium, "high"),
             (ModelThinkingLevel::High, "high"),
-            (ModelThinkingLevel::Xhigh, "max"),
+            (ModelThinkingLevel::Max, "max"),
         ] {
             let payload = build_chat_completions_payload(
                 &model,
