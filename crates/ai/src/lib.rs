@@ -25,8 +25,9 @@ pub use agent_loop::{
 };
 pub use agent_types::*;
 pub use env_api_keys::{
-    ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR, GITHUB_COPILOT_TOKEN_ENV_VAR,
-    KnownProvider, OPENAI_API_KEY_ENV_VAR, OPENROUTER_API_KEY_ENV_VAR, get_env_api_key,
+    ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
+    GITHUB_COPILOT_TOKEN_ENV_VAR, KnownProvider, OPENAI_API_KEY_ENV_VAR,
+    OPENROUTER_API_KEY_ENV_VAR, get_env_api_key,
 };
 pub use error::{Error, Result};
 pub use event_stream::{

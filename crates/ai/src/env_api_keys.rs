@@ -1,8 +1,12 @@
 pub const GITHUB_COPILOT_TOKEN_ENV_VAR: &str = "COPILOT_GITHUB_TOKEN";
+pub const ANTHROPIC_AUTH_TOKEN_ENV_VAR: &str = "ANTHROPIC_AUTH_TOKEN";
 pub const ANTHROPIC_OAUTH_TOKEN_ENV_VAR: &str = "ANTHROPIC_OAUTH_TOKEN";
 pub const ANTHROPIC_API_KEY_ENV_VAR: &str = "ANTHROPIC_API_KEY";
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 pub const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
+
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownProvider {
@@ -41,6 +45,10 @@ fn env_value(env_var: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+pub(crate) fn get_anthropic_auth_token() -> Option<String> {
+    env_value(ANTHROPIC_AUTH_TOKEN_ENV_VAR)
+}
+
 pub fn get_env_api_key(provider: impl AsRef<str>) -> Option<String> {
     match provider.as_ref() {
         provider if provider == KnownProvider::GitHubCopilot.as_str() => {
@@ -60,11 +68,7 @@ pub fn get_env_api_key(provider: impl AsRef<str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct SavedEnv {
         key: &'static str,
@@ -106,6 +110,30 @@ mod tests {
             Some("oauth-token")
         );
 
+        oauth.restore();
+        api_key.restore();
+    }
+
+    #[test]
+    fn anthropic_auth_token_is_distinct_from_api_key_lookup() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+        let oauth = SavedEnv::capture(ANTHROPIC_OAUTH_TOKEN_ENV_VAR);
+        let api_key = SavedEnv::capture(ANTHROPIC_API_KEY_ENV_VAR);
+
+        unsafe {
+            std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "auth-token");
+            std::env::set_var(ANTHROPIC_OAUTH_TOKEN_ENV_VAR, "oauth-token");
+            std::env::set_var(ANTHROPIC_API_KEY_ENV_VAR, "api-key");
+        }
+
+        assert_eq!(get_anthropic_auth_token().as_deref(), Some("auth-token"));
+        assert_eq!(
+            get_env_api_key(KnownProvider::Anthropic).as_deref(),
+            Some("oauth-token")
+        );
+
+        auth.restore();
         oauth.restore();
         api_key.restore();
     }

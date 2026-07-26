@@ -899,10 +899,13 @@ Not applicable to this Rust crate.
 | Provider | Environment variables |
 | --- | --- |
 | `openai` | `OPENAI_API_KEY` |
-| `anthropic` | `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` |
+| `anthropic` | `ANTHROPIC_AUTH_TOKEN` (Bearer), then `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` |
 | `github-copilot` | `COPILOT_GITHUB_TOKEN` |
 
-Explicit API keys in `StreamOptions` take precedence over environment lookup.
+Explicit API keys and `Authorization` header overrides in `StreamOptions` take
+precedence over environment lookup. `get_env_api_key("anthropic")` intentionally
+does not return `ANTHROPIC_AUTH_TOKEN`, because that value must be sent as
+`Authorization: Bearer` rather than `x-api-key`.
 
 ### Checking Environment Variables
 

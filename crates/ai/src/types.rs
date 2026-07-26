@@ -1305,6 +1305,8 @@ pub struct AnthropicMessagesCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_cache_control_on_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_temperature: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub force_adaptive_thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_empty_signature: Option<bool>,
@@ -1725,6 +1727,20 @@ mod tests {
         );
         assert_eq!(value["chatTemplateKwargs"]["temperature"], json!(0.5));
         assert_eq!(value["chatTemplateKwargs"]["sentinel"], Value::Null);
+        assert_eq!(restored, compat);
+    }
+
+    #[test]
+    fn anthropic_temperature_compat_round_trips() {
+        let compat = AnthropicMessagesCompat {
+            supports_temperature: Some(false),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&compat).unwrap();
+        let restored: AnthropicMessagesCompat = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(value["supportsTemperature"], json!(false));
         assert_eq!(restored, compat);
     }
 
