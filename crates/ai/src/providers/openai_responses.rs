@@ -2923,6 +2923,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_text_phase_is_preserved_across_turns() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_commentary",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_commentary",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{ "type": "output_text", "text": "Working on it." }]
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut replay_model = model();
+        replay_model.base_url = base_url;
+        let streamed = crate::stream::final_message_from_stream(stream_openai_responses(
+            replay_model.clone(),
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            streamed.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "Working on it.".to_string(),
+                text_signature: Some(
+                    serde_json::to_string(&TextSignatureV1 {
+                        v: 1,
+                        id: "msg_commentary".to_string(),
+                        phase: Some(TextPhase::Commentary),
+                    })
+                    .unwrap()
+                ),
+            })]
+        );
+
+        let replayed = convert_responses_messages(
+            &replay_model,
+            &Context {
+                messages: vec![Message::Assistant(streamed)],
+                ..Default::default()
+            },
+            &["openai"].into_iter().collect(),
+            true,
+        );
+
+        assert_eq!(
+            replayed,
+            vec![json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Working on it.",
+                    "annotations": []
+                }],
+                "status": "completed",
+                "id": "msg_commentary",
+                "phase": "commentary"
+            })]
+        );
+    }
+
+    #[tokio::test]
     async fn removes_partial_json_from_persisted_tool_call_blocks_at_output_item_done() {
         let arguments = r#"{"path":"README.md","content":"updated"}"#;
         let body = sse_body(&[
