@@ -141,6 +141,142 @@ impl StreamFailure {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ResponsesOutputSlot {
+    Thinking { content_index: usize },
+    Text { content_index: usize },
+    ToolCall { content_index: usize },
+}
+
+impl ResponsesOutputSlot {
+    fn content_index(self) -> usize {
+        match self {
+            Self::Thinking { content_index }
+            | Self::Text { content_index }
+            | Self::ToolCall { content_index } => content_index,
+        }
+    }
+}
+
+fn create_slot(
+    output_index: u64,
+    item: &Value,
+    output_slots: &mut HashMap<u64, ResponsesOutputSlot>,
+    output: &mut AssistantMessage,
+    sender: &mut AssistantMessageEventStreamSender,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    partial_json: &mut HashMap<usize, String>,
+    custom_tool_inputs: &mut HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
+) -> Option<ResponsesOutputSlot> {
+    let slot = match item.get("type").and_then(Value::as_str)? {
+        "reasoning" => {
+            output
+                .content
+                .push(AssistantContent::Thinking(ThinkingContent {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    redacted: None,
+                }));
+            ResponsesOutputSlot::Thinking {
+                content_index: output.content.len() - 1,
+            }
+        }
+        "message" => {
+            output.content.push(AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            }));
+            ResponsesOutputSlot::Text {
+                content_index: output.content.len() - 1,
+            }
+        }
+        "function_call" | "custom_tool_call" => {
+            let is_custom = item.get("type").and_then(Value::as_str) == Some("custom_tool_call");
+            let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+            let input_property = is_custom.then(|| {
+                grammar_tool_input_properties
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| "input".to_string())
+            });
+            let input = item
+                .get(if is_custom { "input" } else { "arguments" })
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            output.content.push(AssistantContent::ToolCall(ToolCall {
+                id: format!("{call_id}|{item_id}"),
+                name: name.to_string(),
+                arguments: input_property
+                    .as_deref()
+                    .map(|property| grammar_arguments(property, input))
+                    .unwrap_or_else(|| json!({})),
+                thought_signature: None,
+            }));
+            let content_index = output.content.len() - 1;
+            if let Some(input_property) = input_property {
+                custom_tool_inputs.insert(
+                    content_index,
+                    (input_property, GrammarToolInputJsonBuffer::default()),
+                );
+            } else {
+                partial_json.insert(content_index, input.to_string());
+            }
+            ResponsesOutputSlot::ToolCall { content_index }
+        }
+        _ => return None,
+    };
+    output_slots.insert(output_index, slot);
+    let content_index = slot.content_index();
+    match slot {
+        ResponsesOutputSlot::Thinking { .. } => {
+            sender.push(AssistantMessageEvent::ThinkingStart {
+                content_index,
+                partial: output.clone(),
+            });
+        }
+        ResponsesOutputSlot::Text { .. } => sender.push(AssistantMessageEvent::TextStart {
+            content_index,
+            partial: output.clone(),
+        }),
+        ResponsesOutputSlot::ToolCall { .. } => {
+            sender.push(AssistantMessageEvent::ToolCallStart {
+                content_index,
+                partial: output.clone(),
+            });
+        }
+    }
+    Some(slot)
+}
+
+fn get_or_create_slot(
+    output_index: u64,
+    item: &Value,
+    output_slots: &mut HashMap<u64, ResponsesOutputSlot>,
+    output: &mut AssistantMessage,
+    sender: &mut AssistantMessageEventStreamSender,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    partial_json: &mut HashMap<usize, String>,
+    custom_tool_inputs: &mut HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
+) -> Option<ResponsesOutputSlot> {
+    output_slots.get(&output_index).copied().or_else(|| {
+        create_slot(
+            output_index,
+            item,
+            output_slots,
+            output,
+            sender,
+            grammar_tool_input_properties,
+            partial_json,
+            custom_tool_inputs,
+        )
+    })
+}
+
 async fn run_stream(
     model: Model,
     context: Context,
@@ -239,10 +375,9 @@ async fn run_stream(
         partial: output.clone(),
     });
 
-    let mut current_item: Option<Value> = None;
-    let mut current_block: Option<usize> = None;
-    let mut current_text_part: Option<String> = None;
-    let mut output_blocks: HashMap<u64, usize> = HashMap::new();
+    let mut saw_terminal_response_event = false;
+    let mut output_slots: HashMap<u64, ResponsesOutputSlot> = HashMap::new();
+    let mut reasoning_blocks_by_id: HashMap<String, usize> = HashMap::new();
     let mut partial_json: HashMap<usize, String> = HashMap::new();
     let mut custom_tool_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)> =
         HashMap::new();
@@ -284,126 +419,17 @@ async fn run_stream(
                 let Some(item) = parsed.get("item") else {
                     continue;
                 };
-                current_item = Some(item.clone());
-                match item.get("type").and_then(Value::as_str) {
-                    Some("reasoning") => {
-                        output
-                            .content
-                            .push(AssistantContent::Thinking(ThinkingContent {
-                                thinking: String::new(),
-                                thinking_signature: None,
-                                redacted: None,
-                            }));
-                        let index = output.content.len() - 1;
-                        current_block = Some(index);
-                        if let Some(output_index) =
-                            parsed.get("output_index").and_then(Value::as_u64)
-                        {
-                            output_blocks.insert(output_index, index);
-                        }
-                        sender.push(AssistantMessageEvent::ThinkingStart {
-                            content_index: index,
-                            partial: output.clone(),
-                        });
-                    }
-                    Some("message") => {
-                        current_text_part = item
-                            .get("content")
-                            .and_then(Value::as_array)
-                            .and_then(|parts| parts.last())
-                            .and_then(response_text_part_type);
-                        output.content.push(AssistantContent::Text(TextContent {
-                            text: String::new(),
-                            text_signature: None,
-                        }));
-                        let index = output.content.len() - 1;
-                        current_block = Some(index);
-                        if let Some(output_index) =
-                            parsed.get("output_index").and_then(Value::as_u64)
-                        {
-                            output_blocks.insert(output_index, index);
-                        }
-                        sender.push(AssistantMessageEvent::TextStart {
-                            content_index: index,
-                            partial: output.clone(),
-                        });
-                    }
-                    Some("function_call" | "custom_tool_call") => {
-                        let index = output.content.len();
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                        let is_custom =
-                            item.get("type").and_then(Value::as_str) == Some("custom_tool_call");
-                        let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                        let input_property = is_custom.then(|| {
-                            grammar_tool_input_properties
-                                .get(name)
-                                .cloned()
-                                .unwrap_or_else(|| "input".to_string())
-                        });
-                        let input = item
-                            .get(if is_custom { "input" } else { "arguments" })
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        output.content.push(AssistantContent::ToolCall(ToolCall {
-                            id: format!("{call_id}|{item_id}"),
-                            name: name.to_string(),
-                            arguments: input_property
-                                .as_deref()
-                                .map(|property| grammar_arguments(property, input))
-                                .unwrap_or_else(|| json!({})),
-                            thought_signature: None,
-                        }));
-                        if let Some(input_property) = input_property {
-                            custom_tool_inputs.insert(
-                                index,
-                                (input_property, GrammarToolInputJsonBuffer::default()),
-                            );
-                        } else {
-                            partial_json.insert(index, input.to_string());
-                        }
-                        current_block = Some(index);
-                        if let Some(output_index) =
-                            parsed.get("output_index").and_then(Value::as_u64)
-                        {
-                            output_blocks.insert(output_index, index);
-                        }
-                        sender.push(AssistantMessageEvent::ToolCallStart {
-                            content_index: index,
-                            partial: output.clone(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            "response.content_part.added" => {
-                if current_item
-                    .as_ref()
-                    .and_then(|item| item.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("message")
-                    && let Some(part_type) = parsed.get("part").and_then(response_text_part_type)
-                {
-                    current_text_part = Some(part_type);
-                }
-            }
-            "response.reasoning_summary_part.added" => {
-                if current_item
-                    .as_ref()
-                    .and_then(|item| item.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("reasoning")
-                    && let Some(item) = current_item.as_mut()
-                {
-                    let part = parsed.get("part").cloned().unwrap_or(Value::Null);
-                    if let Some(Value::Array(summary)) = item.get_mut("summary") {
-                        summary.push(part);
-                    } else {
-                        item["summary"] = json!([part]);
-                    }
+                if let Some(output_index) = parsed.get("output_index").and_then(Value::as_u64) {
+                    create_slot(
+                        output_index,
+                        item,
+                        &mut output_slots,
+                        &mut output,
+                        sender,
+                        &grammar_tool_input_properties,
+                        &mut partial_json,
+                        &mut custom_tool_inputs,
+                    );
                 }
             }
             "response.reasoning_summary_text.delta" => {
@@ -411,19 +437,16 @@ async fn run_stream(
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let has_summary_part = current_item
-                    .as_mut()
-                    .and_then(|item| item.get_mut("summary"))
-                    .and_then(Value::as_array_mut)
-                    .and_then(|summary| summary.last_mut())
-                    .map(|part| {
-                        if let Some(Value::String(text)) = part.get_mut("text") {
-                            text.push_str(delta);
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::Thinking { content_index } => Some(*content_index),
+                        ResponsesOutputSlot::Text { .. } | ResponsesOutputSlot::ToolCall { .. } => {
+                            None
                         }
                     })
-                    .is_some();
-                if has_summary_part
-                    && let Some(index) = current_block
                     && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
                 {
                     block.thinking.push_str(delta);
@@ -439,7 +462,16 @@ async fn run_stream(
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::Thinking { content_index } => Some(*content_index),
+                        ResponsesOutputSlot::Text { .. } | ResponsesOutputSlot::ToolCall { .. } => {
+                            None
+                        }
+                    })
                     && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
                 {
                     block.thinking.push_str(delta);
@@ -451,19 +483,16 @@ async fn run_stream(
                 }
             }
             "response.reasoning_summary_part.done" => {
-                let has_summary_part = current_item
-                    .as_mut()
-                    .and_then(|item| item.get_mut("summary"))
-                    .and_then(Value::as_array_mut)
-                    .and_then(|summary| summary.last_mut())
-                    .map(|part| {
-                        if let Some(Value::String(text)) = part.get_mut("text") {
-                            text.push_str("\n\n");
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::Thinking { content_index } => Some(*content_index),
+                        ResponsesOutputSlot::Text { .. } | ResponsesOutputSlot::ToolCall { .. } => {
+                            None
                         }
                     })
-                    .is_some();
-                if has_summary_part
-                    && let Some(index) = current_block
                     && let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
                 {
                     block.thinking.push_str("\n\n");
@@ -475,19 +504,19 @@ async fn run_stream(
                 }
             }
             "response.output_text.delta" | "response.refusal.delta" => {
-                let expected_part = if event_type == "response.output_text.delta" {
-                    "output_text"
-                } else {
-                    "refusal"
-                };
-                if current_text_part.as_deref() != Some(expected_part) {
-                    continue;
-                }
                 let delta = parsed
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::Text { content_index } => Some(*content_index),
+                        ResponsesOutputSlot::Thinking { .. }
+                        | ResponsesOutputSlot::ToolCall { .. } => None,
+                    })
                     && let Some(AssistantContent::Text(block)) = output.content.get_mut(index)
                 {
                     block.text.push_str(delta);
@@ -503,7 +532,21 @@ async fn run_stream(
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block {
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::ToolCall { content_index }
+                            if partial_json.contains_key(content_index) =>
+                        {
+                            Some(*content_index)
+                        }
+                        ResponsesOutputSlot::Thinking { .. }
+                        | ResponsesOutputSlot::Text { .. }
+                        | ResponsesOutputSlot::ToolCall { .. } => None,
+                    })
+                {
                     let entry = partial_json.entry(index).or_default();
                     entry.push_str(delta);
                     if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index) {
@@ -521,7 +564,21 @@ async fn run_stream(
                     .get("arguments")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = current_block {
+                if let Some(index) = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::ToolCall { content_index }
+                            if partial_json.contains_key(content_index) =>
+                        {
+                            Some(*content_index)
+                        }
+                        ResponsesOutputSlot::Thinking { .. }
+                        | ResponsesOutputSlot::Text { .. }
+                        | ResponsesOutputSlot::ToolCall { .. } => None,
+                    })
+                {
                     let previous = partial_json
                         .insert(index, arguments.to_string())
                         .unwrap_or_default();
@@ -547,8 +604,17 @@ async fn run_stream(
                 let index = parsed
                     .get("output_index")
                     .and_then(Value::as_u64)
-                    .and_then(|output_index| output_blocks.get(&output_index).copied())
-                    .or(current_block);
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::ToolCall { content_index }
+                            if custom_tool_inputs.contains_key(content_index) =>
+                        {
+                            Some(*content_index)
+                        }
+                        ResponsesOutputSlot::Thinking { .. }
+                        | ResponsesOutputSlot::Text { .. }
+                        | ResponsesOutputSlot::ToolCall { .. } => None,
+                    });
                 if let Some(index) = index
                     && let Some((input_property, buffer)) = custom_tool_inputs.get_mut(&index)
                 {
@@ -591,8 +657,17 @@ async fn run_stream(
                 let index = parsed
                     .get("output_index")
                     .and_then(Value::as_u64)
-                    .and_then(|output_index| output_blocks.get(&output_index).copied())
-                    .or(current_block);
+                    .and_then(|output_index| output_slots.get(&output_index))
+                    .and_then(|slot| match slot {
+                        ResponsesOutputSlot::ToolCall { content_index }
+                            if custom_tool_inputs.contains_key(content_index) =>
+                        {
+                            Some(*content_index)
+                        }
+                        ResponsesOutputSlot::Thinking { .. }
+                        | ResponsesOutputSlot::Text { .. }
+                        | ResponsesOutputSlot::ToolCall { .. } => None,
+                    });
                 if let Some(index) = index
                     && let Some((input_property, buffer)) = custom_tool_inputs.get_mut(&index)
                 {
@@ -613,13 +688,23 @@ async fn run_stream(
             }
             "response.output_item.done" => {
                 let item = parsed.get("item").cloned().unwrap_or_default();
-                let output_index = parsed.get("output_index").and_then(Value::as_u64);
-                let index = output_index
-                    .and_then(|output_index| output_blocks.get(&output_index).copied())
-                    .or(current_block);
-                if let Some(index) = index {
-                    match item.get("type").and_then(Value::as_str) {
-                        Some("reasoning") => {
+                let Some(output_index) = parsed.get("output_index").and_then(Value::as_u64) else {
+                    continue;
+                };
+                let slot = get_or_create_slot(
+                    output_index,
+                    &item,
+                    &mut output_slots,
+                    &mut output,
+                    sender,
+                    &grammar_tool_input_properties,
+                    &mut partial_json,
+                    &mut custom_tool_inputs,
+                );
+                if let Some(slot) = slot {
+                    let index = slot.content_index();
+                    match (item.get("type").and_then(Value::as_str), slot) {
+                        (Some("reasoning"), ResponsesOutputSlot::Thinking { .. }) => {
                             if let Some(AssistantContent::Thinking(block)) =
                                 output.content.get_mut(index)
                             {
@@ -657,14 +742,18 @@ async fn run_stream(
                                     };
                                 }
                                 block.thinking_signature = Some(item.to_string());
+                                if let Some(id) = item.get("id").and_then(Value::as_str) {
+                                    reasoning_blocks_by_id.insert(id.to_string(), index);
+                                }
                                 sender.push(AssistantMessageEvent::ThinkingEnd {
                                     content_index: index,
                                     content: block.thinking.clone(),
                                     partial: output.clone(),
                                 });
+                                output_slots.remove(&output_index);
                             }
                         }
-                        Some("message") => {
+                        (Some("message"), ResponsesOutputSlot::Text { .. }) => {
                             if let Some(AssistantContent::Text(block)) =
                                 output.content.get_mut(index)
                             {
@@ -702,45 +791,69 @@ async fn run_stream(
                                     content: block.text.clone(),
                                     partial: output.clone(),
                                 });
+                                output_slots.remove(&output_index);
                             }
                         }
-                        Some("function_call") => {
+                        (Some("function_call"), ResponsesOutputSlot::ToolCall { .. })
+                            if partial_json.contains_key(&index) =>
+                        {
                             if let Some(AssistantContent::ToolCall(block)) =
                                 output.content.get_mut(index)
                             {
-                                let args = partial_json
-                                    .get(&index)
+                                let args = item
+                                    .get("arguments")
+                                    .and_then(Value::as_str)
                                     .filter(|args| !args.is_empty())
-                                    .map(String::as_str)
-                                    .or_else(|| item.get("arguments").and_then(Value::as_str))
+                                    .or_else(|| {
+                                        partial_json
+                                            .get(&index)
+                                            .filter(|args| !args.is_empty())
+                                            .map(String::as_str)
+                                    })
                                     .unwrap_or("{}");
                                 block.arguments = parse_streaming_json(Some(args));
+                                partial_json.remove(&index);
                                 sender.push(AssistantMessageEvent::ToolCallEnd {
                                     content_index: index,
                                     tool_call: block.clone(),
                                     partial: output.clone(),
                                 });
+                                output_slots.remove(&output_index);
                             }
                         }
-                        Some("custom_tool_call") => {
-                            let input = item
-                                .get("input")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
+                        (Some("custom_tool_call"), ResponsesOutputSlot::ToolCall { .. })
+                            if custom_tool_inputs.contains_key(&index) =>
+                        {
                             if let Some((input_property, buffer)) =
                                 custom_tool_inputs.get_mut(&index)
                             {
+                                let input = item
+                                    .get("input")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| {
+                                        output.content.get(index).and_then(
+                                            |content| match content {
+                                                AssistantContent::ToolCall(block) => block
+                                                    .arguments
+                                                    .get(input_property.as_str())
+                                                    .and_then(Value::as_str),
+                                                _ => None,
+                                            },
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                                    .to_string();
                                 let emitted_delta = append_grammar_tool_input_json_delta(
                                     buffer,
                                     input_property,
-                                    input,
+                                    &input,
                                     true,
                                 )
                                 .map_err(|error| StreamFailure::new(output.clone(), error))?;
                                 if let Some(AssistantContent::ToolCall(block)) =
                                     output.content.get_mut(index)
                                 {
-                                    block.arguments = grammar_arguments(input_property, input);
+                                    block.arguments = grammar_arguments(input_property, &input);
                                 }
                                 if let Some(delta) = emitted_delta {
                                     sender.push(AssistantMessageEvent::ToolCallDelta {
@@ -759,19 +872,60 @@ async fn run_stream(
                                     });
                                 }
                             }
+                            custom_tool_inputs.remove(&index);
+                            output_slots.remove(&output_index);
                         }
-                        _ => {}
+                        (
+                            _,
+                            ResponsesOutputSlot::Thinking { .. }
+                            | ResponsesOutputSlot::Text { .. }
+                            | ResponsesOutputSlot::ToolCall { .. },
+                        ) => {}
                     }
                 }
-                if let Some(output_index) = output_index {
-                    output_blocks.remove(&output_index);
-                }
-                current_block = None;
-                current_item = None;
-                current_text_part = None;
             }
-            "response.completed" | "response.done" | "response.incomplete" => {
+            "response.completed" | "response.incomplete" => {
+                saw_terminal_response_event = true;
                 let response = parsed.get("response").unwrap_or(&parsed);
+                if let Some(response_output) = response.get("output").and_then(Value::as_array) {
+                    for item in response_output {
+                        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+                            continue;
+                        }
+                        let Some(encrypted_content) = item
+                            .get("encrypted_content")
+                            .filter(|value| !value.is_null())
+                        else {
+                            continue;
+                        };
+                        let Some(index) = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| reasoning_blocks_by_id.get(id))
+                            .copied()
+                        else {
+                            continue;
+                        };
+                        let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index)
+                        else {
+                            continue;
+                        };
+                        let Some(signature) = block.thinking_signature.as_deref() else {
+                            continue;
+                        };
+                        let Ok(mut stored_item) = serde_json::from_str::<Value>(signature) else {
+                            continue;
+                        };
+                        if stored_item
+                            .get("encrypted_content")
+                            .is_some_and(|value| !value.is_null())
+                        {
+                            continue;
+                        }
+                        stored_item["encrypted_content"] = encrypted_content.clone();
+                        block.thinking_signature = Some(stored_item.to_string());
+                    }
+                }
                 if let Some(id) = response.get("id").and_then(Value::as_str) {
                     output.response_id = Some(id.to_string());
                 }
@@ -851,6 +1005,12 @@ async fn run_stream(
         .is_some_and(|token| token.is_cancelled())
     {
         return Err(StreamFailure::cancelled(output));
+    }
+    if !saw_terminal_response_event {
+        return Err(StreamFailure::new(
+            output,
+            "OpenAI Responses stream ended before a terminal response event",
+        ));
     }
     if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
         return Err(StreamFailure::new(output, "An unknown error occurred"));
@@ -1343,13 +1503,6 @@ fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<TextP
         return Some((id.to_string(), phase));
     }
     Some((signature.to_string(), None))
-}
-
-fn response_text_part_type(part: &Value) -> Option<String> {
-    part.get("type")
-        .and_then(Value::as_str)
-        .filter(|part_type| matches!(*part_type, "output_text" | "refusal"))
-        .map(ToString::to_string)
 }
 
 fn parse_response_usage(raw: &Value, model: &Model) -> Usage {
@@ -2824,10 +2977,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_text_delta_ignores_unsupported_content_parts() {
+    async fn response_text_delta_uses_output_index() {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "message",
                     "id": "msg_test",
@@ -2836,23 +2990,13 @@ mod tests {
                 }
             }),
             json!({
-                "type": "response.content_part.added",
-                "part": { "type": "reasoning_text", "text": "" }
-            }),
-            json!({
                 "type": "response.output_text.delta",
-                "delta": "hidden"
-            }),
-            json!({
-                "type": "response.content_part.added",
-                "part": { "type": "output_text", "text": "" }
-            }),
-            json!({
-                "type": "response.output_text.delta",
+                "output_index": 0,
                 "delta": "visible"
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "message",
                     "id": "msg_test",
@@ -2919,6 +3063,205 @@ mod tests {
                     .unwrap()
                 ),
             })]
+        );
+    }
+
+    async fn stream_reasoning_signature(done_item: Value, completed_item: Value) -> Value {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": done_item["id"],
+                    "summary": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": done_item
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "output": [completed_item]
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+        let AssistantContent::Thinking(block) = &result.content[0] else {
+            panic!("expected reasoning content");
+        };
+        serde_json::from_str(block.thinking_signature.as_deref().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn preserves_existing_encrypted_content_from_output_item_done() {
+        let signature = stream_reasoning_signature(
+            json!({
+                "type": "reasoning",
+                "id": "rs_done",
+                "summary": [],
+                "encrypted_content": "from-output-item-done"
+            }),
+            json!({
+                "type": "reasoning",
+                "id": "rs_done",
+                "summary": [],
+                "encrypted_content": "from-response-completed"
+            }),
+        )
+        .await;
+
+        assert_eq!(signature["encrypted_content"], "from-output-item-done");
+    }
+
+    #[tokio::test]
+    async fn backfills_encrypted_content_from_response_completed() {
+        let signature = stream_reasoning_signature(
+            json!({
+                "type": "reasoning",
+                "id": "rs_missing",
+                "summary": []
+            }),
+            json!({
+                "type": "reasoning",
+                "id": "rs_missing",
+                "summary": [],
+                "encrypted_content": "from-response-completed"
+            }),
+        )
+        .await;
+
+        assert_eq!(signature["encrypted_content"], "from-response-completed");
+    }
+
+    #[tokio::test]
+    async fn interleaved_reasoning_and_function_call_use_output_index() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_test",
+                    "summary": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.reasoning_text.delta",
+                "output_index": 0,
+                "delta": "thinking"
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 1,
+                "delta": r#"{"path":"README.md"}"#
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_test",
+                    "call_id": "call_test",
+                    "name": "read",
+                    "arguments": r#"{"path":"README.md"}"#
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_test",
+                    "summary": []
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed"
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.content,
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "thinking".to_string(),
+                    thinking_signature: Some(
+                        json!({
+                            "type": "reasoning",
+                            "id": "rs_test",
+                            "summary": []
+                        })
+                        .to_string()
+                    ),
+                    redacted: None,
+                }),
+                AssistantContent::ToolCall(ToolCall {
+                    id: "call_test|fc_test".to_string(),
+                    name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                    thought_signature: None,
+                }),
+            ]
         );
     }
 
@@ -3029,6 +3372,7 @@ mod tests {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3039,18 +3383,22 @@ mod tests {
             }),
             json!({
                 "type": "response.function_call_arguments.delta",
+                "output_index": 0,
                 "delta": r#"{"path":"README.md""#
             }),
             json!({
                 "type": "response.function_call_arguments.delta",
+                "output_index": 0,
                 "delta": r#","content":"updated"}"#
             }),
             json!({
                 "type": "response.function_call_arguments.done",
+                "output_index": 0,
                 "arguments": arguments
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3127,10 +3475,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reasoning_summary_delta_ignores_missing_summary_part() {
+    async fn reasoning_deltas_use_output_index_without_summary_parts() {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "reasoning",
                     "id": "rs_test",
@@ -3139,17 +3488,21 @@ mod tests {
             }),
             json!({
                 "type": "response.reasoning_summary_text.delta",
+                "output_index": 0,
                 "delta": "ignored"
             }),
             json!({
-                "type": "response.reasoning_summary_part.done"
+                "type": "response.reasoning_summary_part.done",
+                "output_index": 0
             }),
             json!({
                 "type": "response.reasoning_text.delta",
+                "output_index": 0,
                 "delta": "raw reasoning"
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "reasoning",
                     "id": "rs_test",
@@ -3202,11 +3555,11 @@ mod tests {
         }
         let result = result.expect("final message");
 
-        assert_eq!(deltas, vec!["raw reasoning"]);
+        assert_eq!(deltas, vec!["ignored", "\n\n", "raw reasoning"]);
         assert_eq!(
             result.content,
             vec![AssistantContent::Thinking(ThinkingContent {
-                thinking: "raw reasoning".to_string(),
+                thinking: "ignored\n\nraw reasoning".to_string(),
                 thinking_signature: Some(
                     json!({
                         "type": "reasoning",
@@ -3225,6 +3578,7 @@ mod tests {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "reasoning",
                     "id": "rs_test",
@@ -3233,17 +3587,21 @@ mod tests {
             }),
             json!({
                 "type": "response.reasoning_summary_part.added",
+                "output_index": 0,
                 "part": { "type": "summary_text", "text": "" }
             }),
             json!({
                 "type": "response.reasoning_summary_text.delta",
+                "output_index": 0,
                 "delta": "kept"
             }),
             json!({
-                "type": "response.reasoning_summary_part.done"
+                "type": "response.reasoning_summary_part.done",
+                "output_index": 0
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "reasoning",
                     "id": "rs_test",
@@ -3556,6 +3914,7 @@ mod tests {
         let (base_url, release_server) = spawn_hanging_sse_server(sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "message",
                     "id": "msg_abort",
@@ -3569,6 +3928,7 @@ mod tests {
             }),
             json!({
                 "type": "response.output_text.delta",
+                "output_index": 0,
                 "delta": "partial"
             }),
         ]))
@@ -3688,6 +4048,7 @@ mod tests {
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3893,6 +4254,7 @@ mod tests {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3903,6 +4265,7 @@ mod tests {
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3983,6 +4346,7 @@ mod tests {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
@@ -3993,18 +4357,22 @@ mod tests {
             }),
             json!({
                 "type": "response.function_call_arguments.delta",
+                "output_index": 0,
                 "delta": "{\"path\":\"README.md\""
             }),
             json!({
                 "type": "response.function_call_arguments.delta",
+                "output_index": 0,
                 "delta": ",\"content\":\"updated\"}"
             }),
             json!({
                 "type": "response.function_call_arguments.done",
+                "output_index": 0,
                 "arguments": "{\"path\":\"README.md\",\"content\":\"updated\"}"
             }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": {
                     "type": "function_call",
                     "id": "fc_test",
