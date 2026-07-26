@@ -14,17 +14,19 @@ use crate::providers::simple_options::build_base_options;
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
-    ImageContent, Model, ModelInput, ModelThinkingLevel, SimpleStreamOptions, StopReason,
-    StreamOptions, TextContent, TextPhase, TextSignatureV1, ThinkingContent, Tool, ToolCall,
-    ToolResultContent, Usage, UserContent, UserMessageContent,
+    ImageContent, Model, ModelInput, ModelThinkingLevel, SessionAffinityFormat,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, TextPhase, TextSignatureV1,
+    ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
 };
 use crate::utils::hash::short_hash;
+use crate::utils::headers::apply_provider_headers;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::sse;
 use crate::{Error, Result};
 
 const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai"];
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u32 = 16;
 
 #[derive(Clone, Default)]
 pub struct OpenAIResponsesOptions {
@@ -32,12 +34,15 @@ pub struct OpenAIResponsesOptions {
     pub reasoning_effort: Option<ModelThinkingLevel>,
     pub reasoning_summary: Option<Option<String>>,
     pub service_tier: Option<String>,
+    pub tool_choice: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedOpenAIResponsesCompat {
-    pub send_session_id_header: bool,
+    pub supports_developer_role: bool,
+    pub session_affinity_format: SessionAffinityFormat,
     pub supports_long_cache_retention: bool,
+    pub supports_explicit_prompt_cache_mode: bool,
 }
 
 pub fn stream_simple_openai_responses(
@@ -61,8 +66,13 @@ pub fn stream_simple_openai_responses(
             reasoning_effort,
             reasoning_summary: None,
             service_tier: None,
+            tool_choice: simple_tool_choice(&options),
         },
     ))
+}
+
+fn simple_tool_choice(options: &SimpleStreamOptions) -> Option<Value> {
+    options.stream.provider_options.get("toolChoice").cloned()
 }
 
 pub fn stream_openai_responses(
@@ -706,6 +716,7 @@ fn try_build_responses_payload(
         context,
         &OPENAI_TOOL_CALL_PROVIDERS.iter().copied().collect(),
         true,
+        compat.supports_developer_role,
     )?;
     let mut payload = json!({
         "model": model.id,
@@ -715,7 +726,10 @@ fn try_build_responses_payload(
     let object = payload.as_object_mut().expect("payload object");
     object.insert("store".to_string(), json!(false));
     if let Some(max_tokens) = options.base.max_tokens.filter(|max_tokens| *max_tokens > 0) {
-        object.insert("max_output_tokens".to_string(), json!(max_tokens));
+        object.insert(
+            "max_output_tokens".to_string(),
+            json!(max_tokens.max(OPENAI_RESPONSES_MIN_OUTPUT_TOKENS)),
+        );
     }
     if let Some(temperature) = options.base.temperature {
         object.insert("temperature".to_string(), json!(temperature));
@@ -729,6 +743,9 @@ fn try_build_responses_payload(
             Value::Array(convert_responses_tools(&context.tools, Some(false))),
         );
     }
+    if let Some(tool_choice) = &options.tool_choice {
+        object.insert("tool_choice".to_string(), tool_choice.clone());
+    }
     if cache_retention != CacheRetention::None
         && let Some(session_id) = &options.base.session_id
     {
@@ -739,6 +756,12 @@ fn try_build_responses_payload(
     }
     if cache_retention == CacheRetention::Long && compat.supports_long_cache_retention {
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
+    }
+    if cache_retention == CacheRetention::None && compat.supports_explicit_prompt_cache_mode {
+        object.insert(
+            "prompt_cache_options".to_string(),
+            json!({ "mode": "explicit" }),
+        );
     }
     if model.reasoning {
         let reasoning_effort = options
@@ -797,6 +820,11 @@ fn convert_responses_messages(
         context,
         allowed_tool_call_providers,
         include_system_prompt,
+        model
+            .compat
+            .openai_responses
+            .supports_developer_role
+            .unwrap_or(true),
     )
     .expect("valid OpenAI Responses message history")
 }
@@ -806,6 +834,7 @@ fn try_convert_responses_messages(
     context: &Context,
     allowed_tool_call_providers: &HashSet<&str>,
     include_system_prompt: bool,
+    supports_developer_role: bool,
 ) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     let transformed = transform_messages(
@@ -820,7 +849,7 @@ fn try_convert_responses_messages(
         && !system_prompt.is_empty()
     {
         messages.push(json!({
-            "role": if model.reasoning { "developer" } else { "system" },
+            "role": if model.reasoning && supports_developer_role { "developer" } else { "system" },
             "content": system_prompt,
         }));
     }
@@ -1107,27 +1136,40 @@ fn map_status(status: Option<&str>) -> std::result::Result<StopReason, String> {
 }
 
 fn get_compat(model: &Model) -> ResolvedOpenAIResponsesCompat {
+    let compat = &model.compat.openai_responses;
     ResolvedOpenAIResponsesCompat {
-        send_session_id_header: model
-            .compat
-            .openai_responses
-            .send_session_id_header
-            .unwrap_or(true),
+        supports_developer_role: compat.supports_developer_role.unwrap_or(true),
+        session_affinity_format: compat.session_affinity_format.unwrap_or_else(|| {
+            match compat.send_session_id_header {
+                Some(false) => SessionAffinityFormat::OpenaiNosession,
+                Some(true) => SessionAffinityFormat::Openai,
+                None => detect_session_affinity_format(model),
+            }
+        }),
         supports_long_cache_retention: model
             .compat
             .openai_responses
             .supports_long_cache_retention
             .unwrap_or(true),
+        supports_explicit_prompt_cache_mode: compat
+            .supports_explicit_prompt_cache_mode
+            .unwrap_or(false),
+    }
+}
+
+fn detect_session_affinity_format(model: &Model) -> SessionAffinityFormat {
+    if model.provider == "openrouter" || model.base_url.contains("openrouter.ai") {
+        SessionAffinityFormat::Openrouter
+    } else {
+        SessionAffinityFormat::Openai
     }
 }
 
 fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
-    cache_retention
-        .or_else(|| {
-            (std::env::var("PI_CACHE_RETENTION").ok().as_deref() == Some("long"))
-                .then_some(CacheRetention::Long)
-        })
-        .unwrap_or(CacheRetention::Short)
+    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
+    // ai.rs is a library: applications that want environment-driven policy can
+    // translate it into StreamOptions::cache_retention at their boundary.
+    cache_retention.unwrap_or(CacheRetention::Short)
 }
 
 fn headers(
@@ -1171,27 +1213,21 @@ fn headers(
     if let Some(session_id) = &options.session_id
         && cache_retention != CacheRetention::None
     {
-        if compat.send_session_id_header {
-            headers.insert(
-                HeaderName::from_static("session_id"),
-                HeaderValue::from_str(session_id)
-                    .map_err(|e| Error::InvalidHeaderValue("session_id".to_string(), e))?,
-            );
+        let value = HeaderValue::from_str(session_id)
+            .map_err(|e| Error::InvalidHeaderValue("session affinity".to_string(), e))?;
+        match compat.session_affinity_format {
+            SessionAffinityFormat::Openrouter => {
+                headers.insert(HeaderName::from_static("x-session-id"), value);
+            }
+            SessionAffinityFormat::Openai | SessionAffinityFormat::OpenaiNosession => {
+                if compat.session_affinity_format == SessionAffinityFormat::Openai {
+                    headers.insert(HeaderName::from_static("session_id"), value.clone());
+                }
+                headers.insert(HeaderName::from_static("x-client-request-id"), value);
+            }
         }
-        headers.insert(
-            HeaderName::from_static("x-client-request-id"),
-            HeaderValue::from_str(session_id)
-                .map_err(|e| Error::InvalidHeaderValue("x-client-request-id".to_string(), e))?,
-        );
     }
-    for (name, value) in &options.headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let value = HeaderValue::from_str(value)
-            .map_err(|e| Error::InvalidHeaderValue(name.to_string(), e))?;
-        headers.insert(name, value);
-    }
+    apply_provider_headers(&mut headers, &options.headers)?;
     Ok(headers)
 }
 
@@ -1792,34 +1828,6 @@ mod tests {
     }
 
     #[test]
-    fn response_payload_uses_pi_cache_retention_for_openai_requests() {
-        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
-        let model = model();
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let options = OpenAIResponsesOptions {
-            base: StreamOptions {
-                session_id: Some("session-env".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let payload = build_responses_payload(
-            &model,
-            &context,
-            &options,
-            &get_compat(&model),
-            resolve_cache_retention(options.base.cache_retention),
-        );
-
-        assert_eq!(payload["prompt_cache_key"], json!("session-env"));
-        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
-    }
-
-    #[test]
     fn response_payload_omits_long_retention_when_compat_disables_it() {
         let mut model = model();
         model.compat.openai_responses.supports_long_cache_retention = Some(false);
@@ -1915,6 +1923,110 @@ mod tests {
         );
 
         assert_eq!(payload["max_output_tokens"], json!(1234));
+    }
+
+    #[test]
+    fn response_payload_clamps_positive_max_output_tokens_to_openai_minimum() {
+        let model = model();
+        let options = OpenAIResponsesOptions {
+            base: StreamOptions {
+                max_tokens: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &Context::default(),
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["max_output_tokens"], json!(16));
+    }
+
+    #[test]
+    fn response_payload_forwards_required_tool_choice() {
+        let model = model();
+        let options = OpenAIResponsesOptions {
+            tool_choice: Some(json!("required")),
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &Context::default(),
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["tool_choice"], json!("required"));
+    }
+
+    #[test]
+    fn response_payload_uses_system_role_when_developer_role_is_unsupported() {
+        let mut model = model();
+        model.compat.openai_responses.supports_developer_role = Some(false);
+        let context = Context {
+            system_prompt: Some("You are terse.".to_string()),
+            ..Default::default()
+        };
+
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["input"][0]["role"], json!("system"));
+    }
+
+    #[test]
+    fn response_payload_emits_explicit_prompt_cache_mode_only_when_supported_and_disabled() {
+        let mut model = model();
+        model
+            .compat
+            .openai_responses
+            .supports_explicit_prompt_cache_mode = Some(true);
+        let compat = get_compat(&model);
+
+        let disabled = build_responses_payload(
+            &model,
+            &Context::default(),
+            &OpenAIResponsesOptions::default(),
+            &compat,
+            CacheRetention::None,
+        );
+        let enabled = build_responses_payload(
+            &model,
+            &Context::default(),
+            &OpenAIResponsesOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+        model
+            .compat
+            .openai_responses
+            .supports_explicit_prompt_cache_mode = Some(false);
+        let unsupported = build_responses_payload(
+            &model,
+            &Context::default(),
+            &OpenAIResponsesOptions::default(),
+            &get_compat(&model),
+            CacheRetention::None,
+        );
+
+        assert_eq!(
+            disabled["prompt_cache_options"],
+            json!({ "mode": "explicit" })
+        );
+        assert!(enabled.get("prompt_cache_options").is_none());
+        assert!(unsupported.get("prompt_cache_options").is_none());
     }
 
     #[test]
@@ -2021,6 +2133,158 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("session-123")
         );
+    }
+
+    #[test]
+    fn response_headers_use_explicit_openai_no_session_format() {
+        let mut model = model();
+        model.compat.openai_responses.session_affinity_format =
+            Some(SessionAffinityFormat::OpenaiNosession);
+        let options = StreamOptions {
+            session_id: Some("session-nosession".to_string()),
+            ..Default::default()
+        };
+
+        let request_headers = headers(
+            &model,
+            &Context::default(),
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert!(request_headers.get("session_id").is_none());
+        assert_eq!(
+            request_headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-nosession")
+        );
+        assert!(request_headers.get("x-session-id").is_none());
+    }
+
+    #[test]
+    fn response_affinity_format_does_not_change_prompt_cache_key() {
+        for format in [
+            SessionAffinityFormat::OpenaiNosession,
+            SessionAffinityFormat::Openrouter,
+        ] {
+            let mut model = model();
+            model.compat.openai_responses.session_affinity_format = Some(format);
+            let options = OpenAIResponsesOptions {
+                base: StreamOptions {
+                    session_id: Some("session-cache".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let payload = build_responses_payload(
+                &model,
+                &Context::default(),
+                &options,
+                &get_compat(&model),
+                CacheRetention::Short,
+            );
+
+            assert_eq!(payload["prompt_cache_key"], json!("session-cache"));
+            assert!(payload.get("session_id").is_none());
+        }
+    }
+
+    #[test]
+    fn response_headers_use_explicit_and_detected_openrouter_format() {
+        for explicit in [false, true] {
+            let mut model = model();
+            model.provider = "openrouter".to_string();
+            model.base_url = "https://openrouter.ai/api/v1".to_string();
+            if explicit {
+                model.compat.openai_responses.session_affinity_format =
+                    Some(SessionAffinityFormat::Openrouter);
+            }
+            let options = StreamOptions {
+                session_id: Some("session-openrouter".to_string()),
+                ..Default::default()
+            };
+
+            let request_headers = headers(
+                &model,
+                &Context::default(),
+                &options,
+                "test-key",
+                &get_compat(&model),
+                CacheRetention::Short,
+            )
+            .unwrap();
+
+            assert_eq!(
+                request_headers
+                    .get("x-session-id")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-openrouter")
+            );
+            assert!(request_headers.get("session_id").is_none());
+            assert!(request_headers.get("x-client-request-id").is_none());
+        }
+    }
+
+    #[test]
+    fn response_new_affinity_format_wins_over_legacy_flag() {
+        let mut model = model();
+        model.compat.openai_responses.send_session_id_header = Some(false);
+        model.compat.openai_responses.session_affinity_format =
+            Some(SessionAffinityFormat::Openrouter);
+
+        assert_eq!(
+            get_compat(&model).session_affinity_format,
+            SessionAffinityFormat::Openrouter
+        );
+    }
+
+    #[test]
+    fn response_legacy_true_preserves_openai_format_on_openrouter_endpoints() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.compat.openai_responses.send_session_id_header = Some(true);
+
+        assert_eq!(
+            get_compat(&model).session_affinity_format,
+            SessionAffinityFormat::Openai
+        );
+    }
+
+    #[test]
+    fn response_headers_apply_case_insensitive_overrides_and_null_suppression() {
+        let model = model();
+        let mut options = StreamOptions {
+            session_id: Some("session-default".to_string()),
+            ..Default::default()
+        };
+        options
+            .headers
+            .insert("SESSION_ID", "session-override".to_string());
+        options.headers.insert("X-Client-Request-Id", None);
+
+        let request_headers = headers(
+            &model,
+            &Context::default(),
+            &options,
+            "test-key",
+            &get_compat(&model),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request_headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-override")
+        );
+        assert!(request_headers.get("x-client-request-id").is_none());
     }
 
     #[test]

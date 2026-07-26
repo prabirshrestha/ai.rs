@@ -15,9 +15,6 @@ pub mod stream;
 pub mod types;
 pub mod utils;
 
-#[cfg(test)]
-pub(crate) mod test_env;
-
 pub use agent::{
     Agent, AgentOptions, AgentOptionsBuilder, AgentPrepareNextTurnFn, AgentState,
     AgentStateBuilder, AgentSubscription,
