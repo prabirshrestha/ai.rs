@@ -13,7 +13,10 @@ use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
 use crate::providers::simple_options;
-use crate::providers::simple_options::{adjust_max_tokens_for_thinking, clamped_reasoning};
+use crate::providers::simple_options::{
+    adjust_max_tokens_for_thinking, build_base_options, clamp_max_tokens_to_context,
+    clamped_reasoning,
+};
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AnthropicMessagesCompat, AssistantContent, AssistantMessage, AssistantMessageEvent,
@@ -304,8 +307,7 @@ pub fn stream_simple_anthropic(
     if api_key.is_none() && !has_authorization_header(&options.stream.headers) {
         return Err(crate::Error::MissingApiKey(model.provider));
     }
-    let mut base = options.stream.clone();
-    base.api_key = api_key;
+    let base = build_base_options(&model, &context, &options, api_key);
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
         return Ok(stream_anthropic(
@@ -338,15 +340,24 @@ pub fn stream_simple_anthropic(
         Some(reasoning),
         options.thinking_budgets.as_ref(),
     );
+    let max_tokens = clamp_max_tokens_to_context(
+        &model,
+        &context,
+        adjusted.max_tokens.unwrap_or(model.max_tokens),
+    );
     let mut adjusted_base = base;
-    adjusted_base.max_tokens = adjusted.max_tokens;
+    adjusted_base.max_tokens = Some(max_tokens);
     Ok(stream_anthropic(
         model,
         context,
         AnthropicOptions {
             base: adjusted_base,
             thinking_enabled: Some(true),
-            thinking_budget_tokens: Some(adjusted.thinking_budget),
+            thinking_budget_tokens: Some(
+                adjusted
+                    .thinking_budget
+                    .min(max_tokens.saturating_sub(1_024)),
+            ),
             ..Default::default()
         },
     ))
@@ -1513,7 +1524,7 @@ mod tests {
 
     use super::*;
     use crate::types::{
-        AssistantContent, CacheRetention, ModelCost, ModelInput, ResponseHook, Usage,
+        AssistantContent, CacheRetention, ModelCost, ModelInput, PayloadHook, ResponseHook, Usage,
     };
 
     fn anthropic_model(id: &str) -> Model {
@@ -2026,6 +2037,60 @@ mod tests {
         };
 
         assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "anthropic"));
+    }
+
+    #[tokio::test]
+    async fn stream_simple_clamps_max_tokens_and_thinking_budget_to_remaining_context() {
+        let mut model = anthropic_model("claude-test");
+        model.context_window = 10_000;
+        model.max_tokens = 8_000;
+        model.base_url = spawn_sse_server(successful_anthropic_sse_body()).await;
+
+        let captured_payload = Arc::new(std::sync::Mutex::new(None));
+        let hook_capture = Arc::clone(&captured_payload);
+        let on_payload: PayloadHook = Arc::new(move |payload, _model| {
+            let hook_capture = Arc::clone(&hook_capture);
+            Box::pin(async move {
+                *hook_capture.lock().unwrap() = Some(payload.clone());
+                Ok(Some(payload))
+            })
+        });
+
+        let stream = stream_simple_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("x".repeat(8_000))],
+                ..Default::default()
+            },
+            SimpleStreamOptions {
+                stream: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    max_tokens: Some(7_000),
+                    cache_retention: Some(CacheRetention::None),
+                    on_payload: Some(on_payload),
+                    ..Default::default()
+                },
+                reasoning: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+        )
+        .expect("stream");
+
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .expect("final message");
+        let payload = captured_payload.lock().unwrap().take().expect("payload");
+
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(payload["max_tokens"], json!(3_904));
+        assert_eq!(
+            payload["thinking"],
+            json!({
+                "type": "enabled",
+                "budget_tokens": 2_880,
+                "display": "summarized"
+            })
+        );
     }
 
     fn assistant_with_thinking(signature: &str) -> crate::types::Message {

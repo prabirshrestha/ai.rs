@@ -60,7 +60,7 @@ pub fn stream_simple_openai_responses(
     let Some(api_key) = options.stream.api_key.clone() else {
         return Err(crate::Error::MissingApiKey(model.provider));
     };
-    let base = build_base_options(&model, &options, api_key);
+    let base = build_base_options(&model, &context, &options, Some(api_key));
     let reasoning_effort = options.reasoning.and_then(|reasoning| {
         let clamped = clamp_thinking_level(&model, reasoning);
         (clamped != ModelThinkingLevel::Off).then_some(clamped)
@@ -2469,6 +2469,66 @@ mod tests {
         );
 
         assert_eq!(payload["max_output_tokens"], json!(1234));
+    }
+
+    #[tokio::test]
+    async fn stream_simple_clamps_default_and_explicit_max_tokens_to_remaining_context() {
+        for requested_max_tokens in [None, Some(7_000)] {
+            let body = sse_body(&[json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_context_clamp",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            })]);
+            let mut responses_model = model();
+            responses_model.context_window = 10_000;
+            responses_model.max_tokens = 8_000;
+            responses_model.base_url = spawn_sse_server(body).await;
+
+            let captured_payload = Arc::new(Mutex::new(None));
+            let hook_capture = Arc::clone(&captured_payload);
+            let on_payload: PayloadHook = Arc::new(move |payload, _model| {
+                let hook_capture = Arc::clone(&hook_capture);
+                Box::pin(async move {
+                    *hook_capture.lock().unwrap() = Some(payload.clone());
+                    Ok(Some(payload))
+                })
+            });
+
+            let stream = stream_simple_openai_responses(
+                responses_model,
+                Context {
+                    messages: vec![Message::user_text("x".repeat(8_000))],
+                    ..Default::default()
+                },
+                SimpleStreamOptions {
+                    stream: StreamOptions {
+                        api_key: Some("test-key".to_string()),
+                        max_tokens: requested_max_tokens,
+                        cache_retention: Some(CacheRetention::None),
+                        on_payload: Some(on_payload),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("stream");
+
+            let message = crate::stream::final_message_from_stream(stream)
+                .await
+                .expect("final message");
+            let payload = captured_payload.lock().unwrap().take().expect("payload");
+
+            assert_eq!(message.stop_reason, StopReason::Stop);
+            assert_eq!(payload["max_output_tokens"], json!(3_904));
+        }
     }
 
     #[test]

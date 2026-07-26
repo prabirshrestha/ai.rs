@@ -1,17 +1,39 @@
 use crate::models::clamp_thinking_level;
 use crate::providers::{anthropic, openai_completions, openai_responses};
 use crate::types::{
-    Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
+    Context, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
 };
+use crate::utils::estimate::estimate_context_tokens;
 use serde_json::Value;
 
+const CONTEXT_SAFETY_TOKENS: u32 = 4_096;
+const MIN_MAX_TOKENS: u32 = 1;
+
+pub fn clamp_max_tokens_to_context(model: &Model, context: &Context, max_tokens: u32) -> u32 {
+    if model.context_window == 0 {
+        return max_tokens.max(MIN_MAX_TOKENS);
+    }
+    let available = model
+        .context_window
+        .saturating_sub(estimate_context_tokens(context).tokens)
+        .saturating_sub(CONTEXT_SAFETY_TOKENS)
+        .max(MIN_MAX_TOKENS);
+    max_tokens.min(available)
+}
+
 pub fn build_base_options(
-    _model: &Model,
+    model: &Model,
+    context: &Context,
     options: &SimpleStreamOptions,
-    api_key: String,
+    api_key: Option<String>,
 ) -> StreamOptions {
     let mut base = options.stream.clone();
-    base.api_key = Some(api_key);
+    base.api_key = api_key;
+    base.max_tokens = Some(clamp_max_tokens_to_context(
+        model,
+        context,
+        base.max_tokens.unwrap_or(model.max_tokens),
+    ));
     base
 }
 
