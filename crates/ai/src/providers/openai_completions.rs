@@ -822,9 +822,7 @@ fn try_build_chat_completions_payload(
         object.insert("prompt_cache_retention".to_string(), json!("24h"));
     }
 
-    if model.base_url.contains("openrouter.ai")
-        && let Some(routing) = &compat.open_router_routing
-    {
+    if let Some(routing) = &compat.open_router_routing {
         object.insert("provider".to_string(), routing.clone());
     }
     if model.base_url.contains("ai-gateway.vercel.sh")
@@ -2363,6 +2361,37 @@ mod tests {
         assert_eq!(
             payload["providerOptions"],
             json!({ "gateway": { "only": ["openai"], "order": ["openai", "anthropic"] } })
+        );
+    }
+
+    #[test]
+    fn chat_payload_forwards_openrouter_compatible_routing_for_custom_providers() {
+        let mut model = model();
+        model.provider = "custom-gateway".to_string();
+        model.base_url = "https://gateway.example/v1".to_string();
+        model.compat.openai_completions.open_router_routing = Some(json!({
+            "only": ["anthropic"],
+            "order": ["anthropic", "openai"]
+        }));
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["provider"],
+            json!({
+                "only": ["anthropic"],
+                "order": ["anthropic", "openai"]
+            })
         );
     }
 
