@@ -962,7 +962,9 @@ fn try_build_anthropic_payload(
                     }),
                 );
             }
-        } else if options.thinking_enabled == Some(false) {
+        } else if options.thinking_enabled == Some(false)
+            && model.thinking_level_map.get("off") != Some(&None)
+        {
             object.insert("thinking".to_string(), json!({ "type": "disabled" }));
         }
     }
@@ -2488,6 +2490,28 @@ mod tests {
         );
 
         assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn omits_disabled_thinking_when_the_model_marks_off_as_unsupported() {
+        let mut model = anthropic_model("claude-fable-5");
+        model.thinking_level_map.insert("off".to_string(), None);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert!(payload.get("thinking").is_none());
         assert!(payload.get("output_config").is_none());
     }
 
