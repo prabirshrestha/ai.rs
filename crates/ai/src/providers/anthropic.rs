@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::env_api_keys::{KnownProvider, get_env_api_key};
+use crate::env_api_keys::{KnownProvider, get_anthropic_auth_token, get_env_api_key};
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
@@ -12,9 +12,7 @@ use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
 use crate::providers::simple_options;
-use crate::providers::simple_options::{
-    adjust_max_tokens_for_thinking, build_base_options, clamped_reasoning,
-};
+use crate::providers::simple_options::{adjust_max_tokens_for_thinking, clamped_reasoning};
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model,
@@ -36,6 +34,7 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 pub struct Anthropic {
     provider_id: String,
     api_key: Option<String>,
+    auth_token: Option<String>,
     base_url: String,
     http_client: Option<reqwest::Client>,
 }
@@ -46,6 +45,9 @@ impl Anthropic {
     }
 
     pub fn from_env() -> Result<Self> {
+        if let Some(auth_token) = get_anthropic_auth_token() {
+            return Self::builder().auth_token(auth_token).build();
+        }
         let api_key = get_env_api_key(DEFAULT_PROVIDER_ID)
             .ok_or_else(|| Error::MissingApiKey(DEFAULT_PROVIDER_ID.into()))?;
         Self::builder().api_key(api_key).build()
@@ -71,6 +73,7 @@ impl Provider for Anthropic {
     fn model(&self, id: &str) -> ModelBuilder {
         let runtime = Arc::new(AnthropicLanguageModelApi {
             api_key: self.api_key.clone(),
+            auth_token: self.auth_token.clone(),
             http_client: self.http_client.clone(),
         });
         ModelBuilder::new(&self.provider_id, id, runtime)
@@ -85,6 +88,7 @@ impl Provider for Anthropic {
 pub struct AnthropicBuilder {
     provider_id: Option<String>,
     api_key: Option<String>,
+    auth_token: Option<String>,
     base_url: Option<String>,
     http_client: Option<reqwest::Client>,
 }
@@ -97,6 +101,13 @@ impl AnthropicBuilder {
 
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Use Anthropic bearer authentication without enabling Claude Code OAuth
+    /// request shaping.
+    pub fn auth_token(mut self, auth_token: impl Into<String>) -> Self {
+        self.auth_token = Some(auth_token.into());
         self
     }
 
@@ -116,6 +127,7 @@ impl AnthropicBuilder {
                 .provider_id
                 .unwrap_or_else(|| DEFAULT_PROVIDER_ID.into()),
             api_key: self.api_key,
+            auth_token: self.auth_token,
             base_url: self
                 .base_url
                 .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
@@ -127,6 +139,7 @@ impl AnthropicBuilder {
 #[derive(Clone)]
 struct AnthropicLanguageModelApi {
     api_key: Option<String>,
+    auth_token: Option<String>,
     http_client: Option<reqwest::Client>,
 }
 
@@ -138,6 +151,17 @@ impl AnthropicLanguageModelApi {
             .is_none_or(|api_key| api_key.trim().is_empty())
         {
             options.api_key = self.api_key.clone();
+        }
+        if options.api_key.is_none()
+            && !has_authorization_override(&options.headers)
+            && let Some(auth_token) = self
+                .auth_token
+                .as_deref()
+                .filter(|auth_token| !auth_token.trim().is_empty())
+        {
+            options
+                .headers
+                .insert("Authorization", Some(format!("Bearer {auth_token}")));
         }
         if options.http_client.is_none() {
             options.http_client = self.http_client.clone();
@@ -254,6 +278,7 @@ struct ResolvedAnthropicCompat {
     pub supports_long_cache_retention: bool,
     pub send_session_affinity_headers: bool,
     pub supports_cache_control_on_tools: bool,
+    pub supports_temperature: bool,
 }
 
 pub fn stream_simple_anthropic(
@@ -266,10 +291,11 @@ pub fn stream_simple_anthropic(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    let Some(api_key) = api_key else {
+    if api_key.is_none() && !has_authorization_header(&options.stream.headers) {
         return Err(crate::Error::MissingApiKey(model.provider));
-    };
-    let base = build_base_options(&model, &options, api_key);
+    }
+    let mut base = options.stream.clone();
+    base.api_key = api_key;
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
         return Ok(stream_anthropic(
@@ -388,13 +414,13 @@ async fn run_stream(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    let Some(api_key) = api_key else {
+    if api_key.is_none() && !has_authorization_header(&options.base.headers) {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
         ));
-    };
-    let is_oauth = is_oauth_token(&api_key);
+    }
+    let is_oauth = api_key.as_deref().is_some_and(is_oauth_token);
     let compat = get_anthropic_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let cache_control = cache_control(&model, cache_retention, compat);
@@ -417,7 +443,7 @@ async fn run_stream(
         &model,
         &context,
         &options,
-        &api_key,
+        api_key.as_deref(),
         is_oauth,
         compat,
         cache_retention,
@@ -716,10 +742,14 @@ async fn run_stream(
             }
             Some("message_delta") => {
                 if let Some(reason) = parsed.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                    output.stop_reason = match map_stop_reason(reason) {
-                        Ok(stop_reason) => stop_reason,
+                    let stop_details = parsed.pointer("/delta/stop_details");
+                    match map_stop_reason(reason, stop_details) {
+                        Ok((stop_reason, error_message)) => {
+                            output.stop_reason = stop_reason;
+                            output.error_message = error_message;
+                        }
                         Err(message) => return Err(StreamFailure::new(output, message)),
-                    };
+                    }
                 }
                 if let Some(usage) = parsed.get("usage") {
                     update_anthropic_usage(&mut output, usage, &model);
@@ -747,7 +777,11 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
     if matches!(output.stop_reason, StopReason::Aborted | StopReason::Error) {
-        return Err(StreamFailure::new(output, "An unknown error occurred"));
+        let message = output
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "An unknown error occurred".to_string());
+        return Err(StreamFailure::new(output, message));
     }
     sender.push(AssistantMessageEvent::Done {
         reason: output.stop_reason,
@@ -807,6 +841,7 @@ fn build_anthropic_payload(
 
     if let Some(temperature) = options.base.temperature
         && options.thinking_enabled != Some(true)
+        && get_anthropic_compat(model).supports_temperature
     {
         object.insert("temperature".to_string(), json!(temperature));
     }
@@ -925,8 +960,15 @@ fn convert_messages(
                                 blocks.push(json!({ "type": "redacted_thinking", "data": signature }));
                             }
                         }
-                        AssistantContent::Thinking(thinking) if !thinking.thinking.trim().is_empty() => {
-                            match thinking.thinking_signature.as_deref().filter(|s| !s.trim().is_empty()) {
+                        AssistantContent::Thinking(thinking) => {
+                            let signature = thinking
+                                .thinking_signature
+                                .as_deref()
+                                .filter(|signature| !signature.trim().is_empty());
+                            if thinking.thinking.trim().is_empty() && signature.is_none() {
+                                continue;
+                            }
+                            match signature {
                                 Some(signature) => blocks.push(json!({
                                     "type": "thinking",
                                     "thinking": &thinking.thinking,
@@ -1141,6 +1183,7 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         supports_long_cache_retention: compat.supports_long_cache_retention.unwrap_or(true),
         send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(false),
         supports_cache_control_on_tools: compat.supports_cache_control_on_tools.unwrap_or(true),
+        supports_temperature: compat.supports_temperature.unwrap_or(true),
     }
 }
 
@@ -1174,7 +1217,7 @@ fn headers(
     model: &Model,
     context: &Context,
     options: &AnthropicOptions,
-    api_key: &str,
+    api_key: Option<&str>,
     is_oauth: bool,
     compat: ResolvedAnthropicCompat,
     cache_retention: CacheRetention,
@@ -1205,6 +1248,7 @@ fn headers(
     }
 
     if model.provider == "github-copilot" || is_oauth {
+        let api_key = api_key.unwrap_or_default();
         headers.insert(
             HeaderName::from_static("authorization"),
             HeaderValue::from_str(&format!("Bearer {api_key}"))
@@ -1223,7 +1267,7 @@ fn headers(
                 HeaderValue::from_static("cli"),
             );
         }
-    } else if !api_key.is_empty() {
+    } else if let Some(api_key) = api_key.filter(|api_key| !api_key.is_empty()) {
         headers.insert(
             HeaderName::from_static("x-api-key"),
             HeaderValue::from_str(api_key)
@@ -1280,6 +1324,21 @@ fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
+fn has_authorization_header(headers: &crate::types::ProviderHeaders) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("authorization")
+            && value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
+fn has_authorization_override(headers: &crate::types::ProviderHeaders) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+}
+
 fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) -> AnthropicEffort {
     if let Some(Some(mapped)) = model.thinking_level_map.get(level.as_str()) {
         return match mapped.as_str() {
@@ -1313,12 +1372,25 @@ fn normalize_tool_call_id(id: &str) -> String {
         .collect()
 }
 
-fn map_stop_reason(reason: &str) -> std::result::Result<StopReason, String> {
+fn map_stop_reason(
+    reason: &str,
+    stop_details: Option<&Value>,
+) -> std::result::Result<(StopReason, Option<String>), String> {
     match reason {
-        "end_turn" | "pause_turn" | "stop_sequence" => Ok(StopReason::Stop),
-        "max_tokens" => Ok(StopReason::Length),
-        "tool_use" => Ok(StopReason::ToolUse),
-        "refusal" | "sensitive" => Ok(StopReason::Error),
+        "end_turn" | "pause_turn" | "stop_sequence" => Ok((StopReason::Stop, None)),
+        "max_tokens" => Ok((StopReason::Length, None)),
+        "tool_use" => Ok((StopReason::ToolUse, None)),
+        "refusal" => Ok((
+            StopReason::Error,
+            Some(
+                stop_details
+                    .and_then(|details| details.get("explanation"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("The model refused to complete the request")
+                    .to_string(),
+            ),
+        )),
+        "sensitive" => Ok((StopReason::Error, None)),
         _ => Err(format!("Unhandled stop reason: {reason}")),
     }
 }
@@ -1405,6 +1477,172 @@ mod tests {
             max_tokens: 1024,
             ..Default::default()
         }
+    }
+
+    struct SavedEnv {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl SavedEnv {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var(key).ok(),
+            }
+        }
+
+        fn restore(self) {
+            unsafe {
+                if let Some(value) = self.value {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_prefers_anthropic_auth_token_as_bearer_credentials() {
+        use crate::env_api_keys::{
+            ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
+            ENV_LOCK,
+        };
+
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+        let oauth = SavedEnv::capture(ANTHROPIC_OAUTH_TOKEN_ENV_VAR);
+        let api_key = SavedEnv::capture(ANTHROPIC_API_KEY_ENV_VAR);
+        unsafe {
+            std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "auth-token");
+            std::env::set_var(ANTHROPIC_OAUTH_TOKEN_ENV_VAR, "oauth-token");
+            std::env::set_var(ANTHROPIC_API_KEY_ENV_VAR, "api-key");
+        }
+
+        let provider = from_env().expect("provider");
+
+        assert_eq!(provider.api_key, None);
+        assert_eq!(provider.auth_token.as_deref(), Some("auth-token"));
+
+        auth.restore();
+        oauth.restore();
+        api_key.restore();
+    }
+
+    #[tokio::test]
+    async fn from_env_sends_auth_token_as_bearer_without_oauth_shaping() {
+        use crate::env_api_keys::{
+            ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
+            ENV_LOCK,
+        };
+
+        let (base_url, request) =
+            spawn_request_capture_server(successful_anthropic_sse_body()).await;
+        let stream = {
+            let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+            let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+            let oauth = SavedEnv::capture(ANTHROPIC_OAUTH_TOKEN_ENV_VAR);
+            let api_key = SavedEnv::capture(ANTHROPIC_API_KEY_ENV_VAR);
+            unsafe {
+                std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "auth-token");
+                std::env::set_var(ANTHROPIC_OAUTH_TOKEN_ENV_VAR, "oauth-token");
+                std::env::set_var(ANTHROPIC_API_KEY_ENV_VAR, "api-key");
+            }
+            let mut provider = from_env().expect("provider");
+            provider.base_url = base_url;
+            let model = provider.model("claude-test").build().expect("model");
+            let stream = crate::stream_simple(
+                model,
+                Context {
+                    system_prompt: Some("System prompt.".to_string()),
+                    messages: vec![crate::types::Message::user_text("Hello")],
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("stream");
+            auth.restore();
+            oauth.restore();
+            api_key.restore();
+            stream
+        };
+        let result = crate::stream::final_message_from_stream(stream)
+            .await
+            .expect("response");
+        let request = request.await.expect("captured request");
+        let request_lower = request.to_ascii_lowercase();
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert!(request_lower.contains("authorization: bearer auth-token"));
+        assert!(!request_lower.contains("x-api-key:"));
+        assert!(!request_lower.contains("oauth-2025-04-20"));
+        assert!(request.contains("System prompt."));
+        assert!(!request.contains("You are Claude Code"));
+    }
+
+    #[test]
+    fn bearer_authorization_does_not_enable_oauth_request_shaping() {
+        let model = anthropic_model("claude-test");
+        let context = Context {
+            system_prompt: Some("System prompt.".to_string()),
+            messages: vec![crate::types::Message::user_text("Hello")],
+            ..Default::default()
+        };
+        let mut options = AnthropicOptions::default();
+        options
+            .base
+            .headers
+            .insert("Authorization", Some("Bearer gateway-token".to_string()));
+        let request_headers = headers(
+            &model,
+            &context,
+            &options,
+            None,
+            false,
+            get_anthropic_compat(&model),
+            CacheRetention::None,
+        )
+        .unwrap();
+        let payload = build_anthropic_payload(&model, &context, &options, false, None);
+
+        assert_eq!(
+            request_headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer gateway-token")
+        );
+        assert!(request_headers.get("x-api-key").is_none());
+        assert!(
+            request_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok())
+                .is_none_or(|value| !value.contains("oauth-2025-04-20"))
+        );
+        assert_eq!(
+            payload["system"],
+            json!([{ "type": "text", "text": "System prompt." }])
+        );
+    }
+
+    #[test]
+    fn explicit_authorization_overrides_provider_auth_token() {
+        let runtime = AnthropicLanguageModelApi {
+            api_key: None,
+            auth_token: Some("provider-token".to_string()),
+            http_client: None,
+        };
+        let mut options = StreamOptions::default();
+        options
+            .headers
+            .insert("Authorization", Some("Bearer explicit-token".to_string()));
+
+        let options = runtime.with_api_key(options);
+
+        assert_eq!(
+            options.headers.get("Authorization"),
+            Some(&Some("Bearer explicit-token".to_string()))
+        );
     }
 
     #[test]
@@ -1562,6 +1800,77 @@ mod tests {
         assert_eq!(result.usage.cost.cache_write, 7.75);
     }
 
+    #[tokio::test]
+    async fn preserves_refusal_stop_details_from_message_delta() {
+        let explanation = "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy.";
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_refusal",
+                        "usage": {
+                            "input_tokens": 412,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "refusal",
+                        "stop_details": {
+                            "type": "refusal",
+                            "category": "cyber",
+                            "explanation": explanation
+                        }
+                    },
+                    "usage": {
+                        "input_tokens": 412,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ]);
+        let mut model = anthropic_model("claude-fable-5");
+        model.base_url = spawn_sse_server(body).await;
+
+        let result = crate::stream::final_message_from_stream(stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("blocked request")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some(explanation));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn model_carries_runtime_dispatch() {
         let anthropic = builder()
@@ -1656,9 +1965,13 @@ mod tests {
     }
 
     fn assistant_with_thinking(signature: &str) -> crate::types::Message {
+        assistant_with_thinking_text(signature, "internal reasoning")
+    }
+
+    fn assistant_with_thinking_text(signature: &str, thinking: &str) -> crate::types::Message {
         crate::types::Message::Assistant(AssistantMessage {
             content: vec![AssistantContent::Thinking(ThinkingContent {
-                thinking: "internal reasoning".to_string(),
+                thinking: thinking.to_string(),
                 thinking_signature: Some(signature.to_string()),
                 redacted: None,
             })],
@@ -1727,6 +2040,28 @@ mod tests {
         assert_eq!(
             assistant["content"],
             json!([{ "type": "thinking", "thinking": "internal reasoning", "signature": "" }])
+        );
+    }
+
+    #[test]
+    fn preserves_empty_thinking_text_when_signature_is_present() {
+        let mut model = anthropic_model("mimo-v2.5-pro");
+        model.provider = "xiaomi-token-plan-ams".to_string();
+        let messages = vec![
+            crate::types::Message::user_text("first"),
+            assistant_with_thinking_text("signed-thinking", ""),
+            crate::types::Message::user_text("second"),
+        ];
+
+        let converted = convert_messages(&messages, &model, false, None, false);
+        let assistant = converted
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message");
+
+        assert_eq!(
+            assistant["content"],
+            json!([{ "type": "thinking", "thinking": "", "signature": "signed-thinking" }])
         );
     }
 
@@ -2010,6 +2345,31 @@ mod tests {
 
         assert!(with_thinking.get("temperature").is_none());
         assert_eq!(without_thinking["temperature"], json!(0.2));
+    }
+
+    #[test]
+    fn temperature_is_omitted_when_compat_disables_it() {
+        let mut model = anthropic_model("vendor--claude-opus-4-7");
+        model.compat.anthropic_messages.supports_temperature = Some(false);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                base: StreamOptions {
+                    temperature: Some(0.0),
+                    ..Default::default()
+                },
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert!(payload.get("temperature").is_none());
     }
 
     #[test]
@@ -2341,7 +2701,7 @@ mod tests {
             &model,
             &context,
             &options,
-            "test-key",
+            Some("test-key"),
             false,
             compat,
             CacheRetention::Short,
@@ -2358,7 +2718,7 @@ mod tests {
             &model,
             &context,
             &options,
-            "test-key",
+            Some("test-key"),
             false,
             compat,
             CacheRetention::None,
@@ -2374,7 +2734,7 @@ mod tests {
             &model,
             &context,
             &options,
-            "test-key",
+            Some("test-key"),
             false,
             compat,
             CacheRetention::Short,
@@ -2481,7 +2841,7 @@ mod tests {
             &model,
             &context,
             &AnthropicOptions::default(),
-            "test-key",
+            Some("test-key"),
             false,
             get_anthropic_compat(&model),
             CacheRetention::None,
@@ -2512,7 +2872,7 @@ mod tests {
             &model,
             &context,
             &AnthropicOptions::default(),
-            "test-key",
+            Some("test-key"),
             false,
             get_anthropic_compat(&model),
             CacheRetention::None,
@@ -2544,7 +2904,7 @@ mod tests {
             &model,
             &context,
             &AnthropicOptions::default(),
-            "test-key",
+            Some("test-key"),
             false,
             get_anthropic_compat(&model),
             CacheRetention::None,
@@ -2581,7 +2941,7 @@ mod tests {
             &model,
             &context,
             &AnthropicOptions::default(),
-            "tid_copilot_session_test_token",
+            Some("tid_copilot_session_test_token"),
             false,
             get_anthropic_compat(&model),
             CacheRetention::Short,
@@ -2646,7 +3006,7 @@ mod tests {
                 interleaved_thinking: true,
                 ..Default::default()
             },
-            "tid_copilot_session_test_token",
+            Some("tid_copilot_session_test_token"),
             false,
             get_anthropic_compat(&model),
             CacheRetention::Short,
@@ -2827,6 +3187,28 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    async fn spawn_request_capture_server(
+        body: String,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 16 * 1024];
+            let read = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let _ = request_tx.send(request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (format!("http://{addr}"), request_rx)
     }
 
     async fn spawn_retrying_sse_server(body: String, attempts: Arc<AtomicUsize>) -> String {

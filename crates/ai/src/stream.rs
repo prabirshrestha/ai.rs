@@ -1,5 +1,5 @@
 use crate::AssistantEventStream;
-use crate::env_api_keys::get_env_api_key;
+use crate::env_api_keys::{KnownProvider, get_anthropic_auth_token, get_env_api_key};
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions, StreamOptions,
 };
@@ -11,10 +11,30 @@ fn has_explicit_api_key(api_key: &Option<String>) -> bool {
         .is_some_and(|api_key| !api_key.trim().is_empty())
 }
 
+fn has_authorization_override(options: &StreamOptions) -> bool {
+    options
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+}
+
 fn with_env_api_key(model: &Model, mut options: StreamOptions) -> StreamOptions {
-    if !has_explicit_api_key(&options.api_key)
-        && let Some(api_key) = get_env_api_key(&model.provider)
-    {
+    if has_explicit_api_key(&options.api_key) {
+        return options;
+    }
+    if model.provider == KnownProvider::Anthropic.as_str() {
+        if !has_authorization_override(&options)
+            && let Some(auth_token) = get_anthropic_auth_token()
+        {
+            options
+                .headers
+                .insert("Authorization", Some(format!("Bearer {auth_token}")));
+        }
+        if has_authorization_override(&options) {
+            return options;
+        }
+    }
+    if let Some(api_key) = get_env_api_key(&model.provider) {
         options.api_key = Some(api_key);
     }
     options
@@ -268,6 +288,40 @@ mod tests {
         );
 
         openai.restore();
+    }
+
+    #[test]
+    fn anthropic_auth_token_precedes_oauth_and_api_key_at_dispatch() {
+        use crate::env_api_keys::{
+            ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
+            ENV_LOCK as ANTHROPIC_ENV_LOCK,
+        };
+
+        let _guard = ANTHROPIC_ENV_LOCK.lock().expect("env lock poisoned");
+        let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+        let oauth = SavedEnv::capture(ANTHROPIC_OAUTH_TOKEN_ENV_VAR);
+        let api_key = SavedEnv::capture(ANTHROPIC_API_KEY_ENV_VAR);
+        unsafe {
+            std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "auth-token");
+            std::env::set_var(ANTHROPIC_OAUTH_TOKEN_ENV_VAR, "oauth-token");
+            std::env::set_var(ANTHROPIC_API_KEY_ENV_VAR, "api-key");
+        }
+        let model = Model {
+            provider: KnownProvider::Anthropic.as_str().to_string(),
+            ..Model::default()
+        };
+
+        let options = with_env_api_key(&model, StreamOptions::default());
+
+        assert_eq!(options.api_key, None);
+        assert_eq!(
+            options.headers.get("Authorization"),
+            Some(&Some("Bearer auth-token".to_string()))
+        );
+
+        auth.restore();
+        oauth.restore();
+        api_key.restore();
     }
 
     #[test]
