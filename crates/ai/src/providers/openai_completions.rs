@@ -889,10 +889,23 @@ fn apply_reasoning_options(
 
     match compat.thinking_format {
         OpenAIThinkingFormat::Zai => {
-            object.insert(
-                "thinking".to_string(),
-                json!({ "type": if mapped_effort.is_some() { "enabled" } else { "disabled" } }),
-            );
+            if let Some(effort) = effort {
+                object.insert(
+                    "thinking".to_string(),
+                    json!({ "type": "enabled", "clear_thinking": false }),
+                );
+                if compat.supports_reasoning_effort {
+                    let effort = match model.thinking_level_map.get(effort.as_str()) {
+                        Some(mapped) => mapped.clone(),
+                        None => Some(effort.as_str().to_string()),
+                    };
+                    if let Some(effort) = effort {
+                        object.insert("reasoning_effort".to_string(), json!(effort));
+                    }
+                }
+            } else {
+                object.insert("thinking".to_string(), json!({ "type": "disabled" }));
+            }
         }
         OpenAIThinkingFormat::Qwen => {
             object.insert(
@@ -5168,10 +5181,143 @@ mod tests {
             CacheRetention::Short,
         );
 
-        assert_eq!(enabled["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(
+            enabled["thinking"],
+            json!({ "type": "enabled", "clear_thinking": false })
+        );
         assert_eq!(disabled["thinking"], json!({ "type": "disabled" }));
         assert!(enabled.get("enable_thinking").is_none());
         assert!(disabled.get("enable_thinking").is_none());
+    }
+
+    #[test]
+    fn zai_thinking_levels_map_to_reasoning_effort() {
+        let mut model = model();
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Zai);
+        model.compat.openai_completions.supports_reasoning_effort = Some(true);
+        model.thinking_level_map.insert("minimal".to_string(), None);
+        for (level, mapped) in [
+            (ModelThinkingLevel::Low, "high"),
+            (ModelThinkingLevel::Medium, "high"),
+            (ModelThinkingLevel::High, "high"),
+            (ModelThinkingLevel::Xhigh, "max"),
+        ] {
+            model
+                .thinking_level_map
+                .insert(level.as_str().to_string(), Some(mapped.to_string()));
+        }
+        let context = Context {
+            messages: vec![Message::user_text("Hi")],
+            ..Default::default()
+        };
+
+        for (reasoning_effort, expected) in [
+            (ModelThinkingLevel::Low, "high"),
+            (ModelThinkingLevel::Medium, "high"),
+            (ModelThinkingLevel::High, "high"),
+            (ModelThinkingLevel::Xhigh, "max"),
+        ] {
+            let payload = build_chat_completions_payload(
+                &model,
+                &context,
+                &OpenAICompletionsOptions {
+                    reasoning_effort: Some(reasoning_effort),
+                    ..Default::default()
+                },
+                &get_compat(&model),
+                CacheRetention::Short,
+            );
+
+            assert_eq!(
+                payload["thinking"],
+                json!({ "type": "enabled", "clear_thinking": false })
+            );
+            assert_eq!(payload["reasoning_effort"], json!(expected));
+        }
+
+        let minimal = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::Minimal),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+        assert_eq!(
+            minimal["thinking"],
+            json!({ "type": "enabled", "clear_thinking": false })
+        );
+        assert!(minimal.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn zai_preserves_replayed_reasoning_content() {
+        let mut model = model();
+        model.id = "glm-5.2".to_string();
+        model.provider = "zai".to_string();
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Zai);
+        let assistant = assistant_message(
+            vec![
+                AssistantContent::Thinking(ThinkingContent {
+                    thinking: "prior reasoning".to_string(),
+                    thinking_signature: Some("reasoning_content".to_string()),
+                    redacted: None,
+                }),
+                AssistantContent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                    thought_signature: None,
+                }),
+            ],
+            &model,
+        );
+        let context = Context {
+            messages: vec![
+                Message::user_text("Read README.md"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("contents")],
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: false,
+                    timestamp: 3,
+                }),
+                Message::user_text("Continue"),
+            ],
+            ..Default::default()
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+        let replayed_assistant = payload["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant message");
+
+        assert_eq!(
+            replayed_assistant["reasoning_content"],
+            json!("prior reasoning")
+        );
+        assert_eq!(
+            payload["thinking"],
+            json!({ "type": "enabled", "clear_thinking": false })
+        );
     }
 
     #[test]
