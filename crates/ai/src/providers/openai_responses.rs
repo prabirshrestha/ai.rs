@@ -161,6 +161,7 @@ impl ResponsesOutputSlot {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_slot(
     output_index: u64,
     item: &Value,
@@ -256,6 +257,7 @@ fn create_slot(
     Some(slot)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn get_or_create_slot(
     output_index: u64,
     item: &Value,
@@ -1208,6 +1210,7 @@ fn convert_responses_messages(
     .expect("valid OpenAI Responses message history")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_convert_responses_messages(
     model: &Model,
     context: &Context,
@@ -1661,9 +1664,11 @@ fn resolve_cache_retention(
     env: &std::collections::HashMap<String, String>,
 ) -> CacheRetention {
     cache_retention.unwrap_or_else(|| {
-        (get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long"))
-            .then_some(CacheRetention::Long)
-            .unwrap_or(CacheRetention::Short)
+        if get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long") {
+            CacheRetention::Long
+        } else {
+            CacheRetention::Short
+        }
     })
 }
 

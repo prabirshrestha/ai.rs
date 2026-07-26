@@ -1584,9 +1584,11 @@ fn resolve_cache_retention(
     env: &HashMap<String, String>,
 ) -> CacheRetention {
     cache_retention.unwrap_or_else(|| {
-        (get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long"))
-            .then_some(CacheRetention::Long)
-            .unwrap_or(CacheRetention::Short)
+        if get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long") {
+            CacheRetention::Long
+        } else {
+            CacheRetention::Short
+        }
     })
 }
 

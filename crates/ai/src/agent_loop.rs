@@ -1832,11 +1832,12 @@ mod tests {
         .expect("loop succeeds");
         let event_count_after_prompt = events.lock().unwrap().len();
 
-        delayed_update
+        let delayed_update = delayed_update
             .lock()
             .unwrap()
             .clone()
-            .expect("captured update callback")(AgentToolResult {
+            .expect("captured update callback");
+        delayed_update(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
             usage: None,
@@ -1927,11 +1928,12 @@ mod tests {
         settled_ended.notified().await;
         let event_count_before_late_update = events.lock().unwrap().len();
 
-        settled_update
+        let settled_update = settled_update
             .lock()
             .unwrap()
             .clone()
-            .expect("captured update callback")(AgentToolResult {
+            .expect("captured update callback");
+        settled_update(AgentToolResult {
             content: vec![ToolResultContent::text("late")],
             details: Some(json!({ "status": "late" })),
             usage: None,
