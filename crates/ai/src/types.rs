@@ -368,6 +368,12 @@ pub enum UserMessageContent {
     Parts(Vec<UserContent>),
 }
 
+impl Default for UserMessageContent {
+    fn default() -> Self {
+        Self::Parts(Vec::new())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCost {
     pub input: f64,
@@ -520,6 +526,7 @@ impl<'de> Deserialize<'de> for UserMessage {
         #[derive(Deserialize)]
         struct Helper {
             role: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: UserMessageContent,
             timestamp: u64,
         }
@@ -586,6 +593,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
         #[serde(rename_all = "camelCase")]
         struct Helper {
             role: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: Vec<AssistantContent>,
             api: Api,
             provider: ProviderId,
@@ -664,6 +672,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             role: Option<String>,
             tool_call_id: String,
             tool_name: String,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: Vec<ToolResultContent>,
             details: Option<Value>,
             usage: Option<Usage>,
@@ -686,6 +695,14 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             timestamp: helper.timestamp,
         })
     }
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1734,6 +1751,81 @@ mod tests {
                 "apiId": "openai-responses",
                 "id": "gpt-5.5"
             })
+        );
+    }
+
+    #[test]
+    fn deserializes_null_or_missing_message_content_as_empty() {
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {
+                "role": "user",
+                "content": null,
+                "timestamp": 1
+            },
+            {
+                "role": "assistant",
+                "content": null,
+                "api": "openai-completions",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "usage": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 0,
+                    "cost": {
+                        "input": 0.0,
+                        "output": 0.0,
+                        "cacheRead": 0.0,
+                        "cacheWrite": 0.0,
+                        "total": 0.0
+                    }
+                },
+                "stopReason": "stop",
+                "timestamp": 2
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "web_search",
+                "isError": false,
+                "timestamp": 3
+            }
+        ]))
+        .expect("lax messages deserialize");
+
+        assert_eq!(
+            messages,
+            vec![
+                Message::User(UserMessage {
+                    content: UserMessageContent::Parts(Vec::new()),
+                    timestamp: 1,
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: Vec::new(),
+                    api: "openai-completions".to_string(),
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: Vec::new(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 2,
+                }),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "web_search".to_string(),
+                    content: Vec::new(),
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: false,
+                    timestamp: 3,
+                }),
+            ]
         );
     }
 
