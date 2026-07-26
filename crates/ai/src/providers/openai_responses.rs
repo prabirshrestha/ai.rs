@@ -157,7 +157,7 @@ async fn run_stream(
         ));
     };
     let compat = get_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let mut payload =
         match try_build_responses_payload(&model, &context, &options, &compat, cache_retention) {
             Ok(payload) => payload,
@@ -1165,18 +1165,11 @@ fn detect_session_affinity_format(model: &Model) -> SessionAffinityFormat {
     }
 }
 
-fn resolve_cache_retention(
-    cache_retention: Option<CacheRetention>,
-    env: &crate::types::ProviderEnv,
-) -> CacheRetention {
-    cache_retention
-        .or_else(|| {
-            (crate::utils::provider_env::get_provider_env_value("PI_CACHE_RETENTION", env)
-                .as_deref()
-                == Some("long"))
-            .then_some(CacheRetention::Long)
-        })
-        .unwrap_or(CacheRetention::Short)
+fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
+    // ai.rs is a library: applications that want environment-driven policy can
+    // translate it into StreamOptions::cache_retention at their boundary.
+    cache_retention.unwrap_or(CacheRetention::Short)
 }
 
 fn headers(
@@ -1832,34 +1825,6 @@ mod tests {
 
         assert_eq!(payload["prompt_cache_key"], json!("session-short"));
         assert!(payload.get("prompt_cache_retention").is_none());
-    }
-
-    #[test]
-    fn response_payload_uses_pi_cache_retention_for_openai_requests() {
-        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
-        let model = model();
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let options = OpenAIResponsesOptions {
-            base: StreamOptions {
-                session_id: Some("session-env".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let payload = build_responses_payload(
-            &model,
-            &context,
-            &options,
-            &get_compat(&model),
-            resolve_cache_retention(options.base.cache_retention, &options.base.env),
-        );
-
-        assert_eq!(payload["prompt_cache_key"], json!("session-env"));
-        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
     }
 
     #[test]

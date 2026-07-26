@@ -158,7 +158,7 @@ async fn run_stream(
         ));
     };
     let compat = get_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let mut payload =
         build_chat_completions_payload(&model, &context, &options, &compat, cache_retention);
     if let Some(on_payload) = &options.base.on_payload {
@@ -1272,18 +1272,11 @@ fn detect_session_affinity_format(model: &Model) -> SessionAffinityFormat {
     }
 }
 
-fn resolve_cache_retention(
-    cache_retention: Option<CacheRetention>,
-    env: &crate::types::ProviderEnv,
-) -> CacheRetention {
-    cache_retention
-        .or_else(|| {
-            (crate::utils::provider_env::get_provider_env_value("PI_CACHE_RETENTION", env)
-                .as_deref()
-                == Some("long"))
-            .then_some(CacheRetention::Long)
-        })
-        .unwrap_or(CacheRetention::Short)
+fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
+    // ai.rs is a library: applications that want environment-driven policy can
+    // translate it into StreamOptions::cache_retention at their boundary.
+    cache_retention.unwrap_or(CacheRetention::Short)
 }
 
 fn compat_cache_control(
@@ -1753,60 +1746,6 @@ mod tests {
 
         assert_eq!(payload["prompt_cache_key"], json!("session-short"));
         assert!(payload.get("prompt_cache_retention").is_none());
-    }
-
-    #[test]
-    fn chat_payload_uses_pi_cache_retention_for_direct_openai_requests() {
-        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
-        let mut model = model();
-        model.base_url = "https://api.openai.com/v1".to_string();
-        let compat = get_compat(&model);
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Default::default()
-        };
-        let options = OpenAICompletionsOptions {
-            base: StreamOptions {
-                session_id: Some("session-env".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let payload = build_chat_completions_payload(
-            &model,
-            &context,
-            &options,
-            &compat,
-            resolve_cache_retention(options.base.cache_retention, &options.base.env),
-        );
-
-        assert_eq!(payload["prompt_cache_key"], json!("session-env"));
-        assert_eq!(payload["prompt_cache_retention"], json!("24h"));
-    }
-
-    #[test]
-    fn chat_cache_retention_prefers_explicit_then_scoped_then_process_env() {
-        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
-        let scoped_short = [("PI_CACHE_RETENTION".to_string(), "short".to_string())]
-            .into_iter()
-            .collect();
-        let scoped_long = [("PI_CACHE_RETENTION".to_string(), "long".to_string())]
-            .into_iter()
-            .collect();
-
-        assert_eq!(
-            resolve_cache_retention(None, &scoped_short),
-            CacheRetention::Short
-        );
-        assert_eq!(
-            resolve_cache_retention(None, &scoped_long),
-            CacheRetention::Long
-        );
-        assert_eq!(
-            resolve_cache_retention(Some(CacheRetention::None), &scoped_long),
-            CacheRetention::None
-        );
     }
 
     #[test]

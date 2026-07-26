@@ -13,8 +13,6 @@ use crate::provider::LanguageModelApi;
 
 pub type Api = String;
 pub type ProviderId = String;
-pub type ProviderEnv = HashMap<String, String>;
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderHeaders(HashMap<String, Option<String>>);
 
@@ -240,7 +238,6 @@ pub struct StreamOptions {
     pub max_retry_delay_ms: Option<u64>,
     pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
-    pub env: ProviderEnv,
     pub provider_options: HashMap<String, Value>,
 }
 

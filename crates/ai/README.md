@@ -743,10 +743,10 @@ configurations.
 
 Per-request `StreamOptions::headers` are applied last and match header names
 case-insensitively. A string value replaces a generated or model header, and a
-`None` value suppresses it. `StreamOptions::env` provides provider-scoped
-environment overrides; `PI_CACHE_RETENTION` is currently resolved from this
-map before the process environment by OpenAI Chat Completions, OpenAI
-Responses, and Anthropic. An explicit `cache_retention` still takes precedence.
+`None` value suppresses it. Cache retention is configured explicitly through
+`StreamOptions::cache_retention`; ai.rs intentionally does not read pi-specific
+environment variables such as `PI_CACHE_RETENTION`. Applications can translate
+their own environment policy into this option at their boundary.
 
 Responses compatibility also includes `supports_developer_role` and
 `supports_explicit_prompt_cache_mode`. The latter emits

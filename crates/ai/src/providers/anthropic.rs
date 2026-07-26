@@ -396,7 +396,7 @@ async fn run_stream(
     };
     let is_oauth = is_oauth_token(&api_key);
     let compat = get_anthropic_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let cache_control = cache_control(&model, cache_retention, compat);
     let mut payload =
         build_anthropic_payload(&model, &context, &options, is_oauth, cache_control.clone());
@@ -1134,18 +1134,11 @@ fn cache_control(
     Some(value)
 }
 
-fn resolve_cache_retention(
-    cache_retention: Option<CacheRetention>,
-    env: &crate::types::ProviderEnv,
-) -> CacheRetention {
-    cache_retention
-        .or_else(|| {
-            (crate::utils::provider_env::get_provider_env_value("PI_CACHE_RETENTION", env)
-                .as_deref()
-                == Some("long"))
-            .then_some(CacheRetention::Long)
-        })
-        .unwrap_or(CacheRetention::Short)
+fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
+    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
+    // ai.rs is a library: applications that want environment-driven policy can
+    // translate it into StreamOptions::cache_retention at their boundary.
+    cache_retention.unwrap_or(CacheRetention::Short)
 }
 
 fn should_use_fine_grained_tool_streaming_beta(model: &Model, context: &Context) -> bool {
@@ -2076,38 +2069,6 @@ mod tests {
                 get_anthropic_compat(&unsupported),
             ),
             Some(json!({ "type": "ephemeral" }))
-        );
-    }
-
-    #[test]
-    fn payload_uses_pi_cache_retention_for_long_cache_control() {
-        let _env = crate::test_env::EnvVarGuard::set("PI_CACHE_RETENTION", "long");
-        let model = anthropic_model("claude-haiku-4-5");
-        let options = AnthropicOptions::default();
-        let cache_control = cache_control(
-            &model,
-            resolve_cache_retention(options.base.cache_retention, &options.base.env),
-            get_anthropic_compat(&model),
-        );
-        let payload = build_anthropic_payload(
-            &model,
-            &Context {
-                system_prompt: Some("You are helpful.".to_string()),
-                messages: vec![crate::types::Message::user_text("hello")],
-                ..Default::default()
-            },
-            &options,
-            false,
-            cache_control,
-        );
-
-        assert_eq!(
-            payload["system"][0]["cache_control"],
-            json!({ "type": "ephemeral", "ttl": "1h" })
-        );
-        assert_eq!(
-            payload["messages"][0]["content"][0]["cache_control"],
-            json!({ "type": "ephemeral", "ttl": "1h" })
         );
     }
 
