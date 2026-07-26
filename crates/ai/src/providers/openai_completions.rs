@@ -250,6 +250,7 @@ async fn run_stream(
     let mut has_finish_reason = false;
     let mut tool_blocks_by_index: HashMap<i64, usize> = HashMap::new();
     let mut tool_blocks_by_id: HashMap<String, usize> = HashMap::new();
+    let mut pending_reasoning_details_by_tool_call_id: HashMap<String, String> = HashMap::new();
     let mut partial_args: HashMap<usize, String> = HashMap::new();
     let mut custom_tool_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)> =
         HashMap::new();
@@ -387,6 +388,13 @@ async fn run_stream(
                         block.id = id.to_string();
                     }
                     tool_blocks_by_id.insert(id.to_string(), index);
+                    if let Some(reasoning_detail) =
+                        pending_reasoning_details_by_tool_call_id.remove(id)
+                        && let Some(AssistantContent::ToolCall(block)) =
+                            output.content.get_mut(index)
+                    {
+                        block.thought_signature = Some(reasoning_detail);
+                    }
                 }
                 if let Some(name) = tool_call_delta
                     .get("function")
@@ -466,18 +474,21 @@ async fn run_stream(
                 let Some(id) = detail.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                let Some(data) = detail.get("data") else {
+                let Some(data) = detail.get("data").and_then(Value::as_str) else {
                     continue;
                 };
-                if data.is_null() {
+                if data.is_empty() {
                     continue;
                 }
-                for block in output.content.iter_mut() {
-                    if let AssistantContent::ToolCall(tool_call) = block
-                        && tool_call.id == id
-                    {
-                        tool_call.thought_signature = Some(detail.to_string());
-                    }
+                let serialized_detail = detail.to_string();
+                if let Some(index) = tool_blocks_by_id.get(id).copied()
+                    && let Some(AssistantContent::ToolCall(tool_call)) =
+                        output.content.get_mut(index)
+                {
+                    tool_call.thought_signature = Some(serialized_detail);
+                } else {
+                    pending_reasoning_details_by_tool_call_id
+                        .insert(id.to_string(), serialized_detail);
                 }
             }
         }
@@ -3270,6 +3281,87 @@ mod tests {
             .unwrap();
         assert_eq!(message.response_id.as_deref(), Some("chatcmpl-final"));
         assert_eq!(message.stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn preserves_reasoning_details_that_arrive_before_the_matching_tool_call() {
+        let reasoning_detail = json!({
+            "type": "reasoning.encrypted",
+            "id": "call_1",
+            "data": "encrypted-signature"
+        });
+        let mut chat_model = model();
+        chat_model.base_url = spawn_sse_server(chat_sse_body(&[
+            json!({
+                "id": "chatcmpl-test",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "reasoning_details": [reasoning_detail.clone()] },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-test",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-test",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+            }),
+        ]))
+        .await;
+
+        let message = crate::stream::final_message_from_stream(stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("read")],
+                tools: vec![Tool {
+                    name: "read".to_string(),
+                    description: "Read a file".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }),
+                    constrained_sampling: None,
+                }],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            message.content,
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_1".to_string(),
+                name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+                thought_signature: Some(reasoning_detail.to_string()),
+            })]
+        );
     }
 
     #[tokio::test]
