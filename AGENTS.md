@@ -62,6 +62,13 @@ provider is intentionally in scope.
 - Use semantic/conventional commit messages, such as `feat: add provider`,
   `fix: handle stream errors`, `docs: update README`, or
   `chore: update lockfile`.
+- When porting behavior from the original Pi TypeScript implementation to Rust,
+  treat Pi as the source of truth and keep the port as close to 1:1 as Rust
+  permits. Preserve Pi's behavior, control flow, data model, helper boundaries,
+  and naming where possible; make only mechanical adaptations required by the
+  language or this crate's existing public API. Do not add downstream consumer-
+  specific behavior to the port. Document any unavoidable semantic divergence
+  from Pi explicitly.
 - Use the same semantic/conventional style for PR titles, such as
   `feat: add provider`, `fix(example): limit bash tool execution`, or
   `ci: run clippy in workflow`. PR bodies should include concise `Summary` and
