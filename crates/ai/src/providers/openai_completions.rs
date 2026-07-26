@@ -1263,9 +1263,13 @@ fn try_convert_messages(
                         .collect::<Vec<_>>()
                         .join("\n");
                     let has_text = !text_result.is_empty();
+                    let has_images = tool_msg
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ToolResultContent::Image(_)));
                     let mut tool_result = json!({
                         "role": "tool",
-                        "content": if has_text { &text_result } else { "(see attached image)" },
+                        "content": if has_text { &text_result } else if has_images { "(see attached image)" } else { "(no tool output)" },
                         "tool_call_id": tool_msg.tool_call_id
                     });
                     if compat.requires_tool_result_name && !tool_msg.tool_name.is_empty() {
@@ -5684,6 +5688,46 @@ mod tests {
 
         assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
         assert_eq!(image_parts, 2);
+    }
+
+    #[test]
+    fn empty_tool_result_without_images_uses_no_output_placeholder() {
+        let model = model();
+        let compat = get_compat(&model);
+        let assistant = assistant_message(
+            vec![AssistantContent::ToolCall(ToolCall {
+                id: "tool-1".to_string(),
+                name: "bash".to_string(),
+                arguments: json!({ "command": "true" }),
+                thought_signature: None,
+            })],
+            &model,
+        );
+        let context = Context {
+            messages: vec![
+                Message::user_text("Run the command"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "tool-1".to_string(),
+                    tool_name: "bash".to_string(),
+                    content: Vec::new(),
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: false,
+                    timestamp: 3,
+                }),
+            ],
+            ..Default::default()
+        };
+
+        let messages = convert_messages(&model, &context, &compat);
+        let tool_message = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("tool message");
+
+        assert_eq!(tool_message["content"], json!("(no tool output)"));
     }
 
     #[test]
