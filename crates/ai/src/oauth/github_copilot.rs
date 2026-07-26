@@ -307,7 +307,7 @@ async fn refresh_github_user_token_at(
     match parse_device_token_response(response.json::<Value>().await?) {
         OAuthDeviceCodePollResult::Complete(token) => Ok(token),
         OAuthDeviceCodePollResult::Failed(message) => Err(Error::Provider(message)),
-        OAuthDeviceCodePollResult::Pending | OAuthDeviceCodePollResult::SlowDown => {
+        OAuthDeviceCodePollResult::Pending | OAuthDeviceCodePollResult::SlowDown { .. } => {
             Err(Error::Provider(
                 "Unexpected polling response while refreshing GitHub token".to_string(),
             ))
@@ -413,9 +413,10 @@ async fn poll_for_github_access_token(
 ) -> Result<GithubUserToken> {
     let urls = GitHubCopilotUrls::new(domain);
     let client = reqwest::Client::new();
-    poll_oauth_device_code_flow(
+    poll_oauth_device_code_flow_inner(
         device.interval,
         Some(device.expires_in),
+        true,
         cancellation_token,
         move || {
             let client = client.clone();
@@ -472,7 +473,9 @@ fn parse_device_token_response(raw: Value) -> OAuthDeviceCodePollResult<GithubUs
 
     match error {
         "authorization_pending" => OAuthDeviceCodePollResult::Pending,
-        "slow_down" => OAuthDeviceCodePollResult::SlowDown,
+        "slow_down" => OAuthDeviceCodePollResult::SlowDown {
+            interval_seconds: object.get("interval").and_then(Value::as_u64),
+        },
         error => {
             let suffix = object
                 .get("error_description")
@@ -741,9 +744,12 @@ mod tests {
         assert_eq!(
             parse_device_token_response(serde_json::json!({
                 "error": "slow_down",
-                "error_description": "slow down"
+                "error_description": "slow down",
+                "interval": 7
             })),
-            OAuthDeviceCodePollResult::SlowDown
+            OAuthDeviceCodePollResult::SlowDown {
+                interval_seconds: Some(7),
+            }
         );
         assert_eq!(
             parse_device_token_response(serde_json::json!({
