@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::{calculate_cost, clamp_thinking_level};
+use crate::providers::constrained_sampling::{
+    GrammarToolInputJsonBuffer, append_grammar_tool_input_json_delta,
+    create_grammar_tool_input_properties, get_grammar_tool_input, grammar_arguments,
+    resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
+};
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -49,6 +54,7 @@ struct ResolvedOpenAICompletionsCompat {
     vercel_gateway_routing: Option<Value>,
     zai_tool_stream: bool,
     supports_strict_mode: bool,
+    supports_openai_grammar_tools: bool,
     cache_control_format: Option<CacheControlFormat>,
     send_session_affinity_headers: bool,
     session_affinity_format: SessionAffinityFormat,
@@ -158,9 +164,25 @@ async fn run_stream(
         ));
     };
     let compat = get_compat(&model);
+    let grammar_tool_input_properties = match create_grammar_tool_input_properties(
+        &context.tools,
+        compat.supports_openai_grammar_tools,
+    ) {
+        Ok(properties) => properties,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
-    let mut payload =
-        build_chat_completions_payload(&model, &context, &options, &compat, cache_retention);
+    let mut payload = match try_build_chat_completions_payload(
+        &model,
+        &context,
+        &options,
+        &compat,
+        cache_retention,
+        &grammar_tool_input_properties,
+    ) {
+        Ok(payload) => payload,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -227,6 +249,8 @@ async fn run_stream(
     let mut tool_blocks_by_index: HashMap<i64, usize> = HashMap::new();
     let mut tool_blocks_by_id: HashMap<String, usize> = HashMap::new();
     let mut partial_args: HashMap<usize, String> = HashMap::new();
+    let mut custom_tool_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)> =
+        HashMap::new();
 
     let events = sse::events(response, options.base.cancellation_token.clone());
     pin_mut!(events);
@@ -345,6 +369,8 @@ async fn run_stream(
                     tool_call_delta,
                     &mut tool_blocks_by_index,
                     &mut tool_blocks_by_id,
+                    &grammar_tool_input_properties,
+                    &mut custom_tool_inputs,
                     sender,
                 );
 
@@ -362,7 +388,8 @@ async fn run_stream(
                 }
                 if let Some(name) = tool_call_delta
                     .get("function")
-                    .and_then(|function| function.get("name"))
+                    .or_else(|| tool_call_delta.get("custom"))
+                    .and_then(|definition| definition.get("name"))
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index)
@@ -383,9 +410,47 @@ async fn run_stream(
                         block.arguments = parse_streaming_json(Some(entry));
                     }
                 }
+                let custom_input_delta = tool_call_delta
+                    .get("custom")
+                    .and_then(|custom| custom.get("input"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let emitted_delta = if !custom_input_delta.is_empty() {
+                    if let Some((input_property, buffer)) = custom_tool_inputs.get_mut(&index) {
+                        let current_input = output
+                            .content
+                            .get(index)
+                            .and_then(|content| match content {
+                                AssistantContent::ToolCall(block) => block
+                                    .arguments
+                                    .get(input_property.as_str())
+                                    .and_then(Value::as_str),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        let next_input = format!("{current_input}{custom_input_delta}");
+                        let emitted_delta = append_grammar_tool_input_json_delta(
+                            buffer,
+                            input_property,
+                            &next_input,
+                            false,
+                        )
+                        .map_err(|error| StreamFailure::new(output.clone(), error))?;
+                        if let Some(AssistantContent::ToolCall(block)) =
+                            output.content.get_mut(index)
+                        {
+                            block.arguments = grammar_arguments(input_property, next_input);
+                        }
+                        emitted_delta.unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    delta_args.to_string()
+                };
                 sender.push(AssistantMessageEvent::ToolCallDelta {
                     content_index: index,
-                    delta: delta_args.to_string(),
+                    delta: emitted_delta,
                     partial: output.clone(),
                 });
             }
@@ -416,7 +481,8 @@ async fn run_stream(
         }
     }
 
-    finish_open_blocks(&mut output, &partial_args, sender);
+    finish_open_blocks(&mut output, &partial_args, &mut custom_tool_inputs, sender)
+        .map_err(|error| StreamFailure::new(output.clone(), error))?;
 
     if options
         .base
@@ -503,17 +569,36 @@ fn ensure_tool_call_block(
     tool_call_delta: &Value,
     by_index: &mut HashMap<i64, usize>,
     by_id: &mut HashMap<String, usize>,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    custom_tool_inputs: &mut HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
     sender: &mut AssistantMessageEventStreamSender,
 ) -> usize {
     let stream_index = tool_call_delta.get("index").and_then(Value::as_i64);
-    if let Some(index) = stream_index.and_then(|index| by_index.get(&index).copied()) {
-        return index;
-    }
-    if let Some(id) = tool_call_delta.get("id").and_then(Value::as_str)
-        && let Some(index) = by_id.get(id).copied()
-    {
+    let existing_index = stream_index
+        .and_then(|index| by_index.get(&index).copied())
+        .or_else(|| {
+            tool_call_delta
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| by_id.get(id).copied())
+        });
+    if let Some(index) = existing_index {
         if let Some(stream_index) = stream_index {
             by_index.insert(stream_index, index);
+        }
+        if tool_call_delta.get("custom").is_some()
+            && !custom_tool_inputs.contains_key(&index)
+            && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(index)
+        {
+            let input_property = grammar_tool_input_properties
+                .get(&block.name)
+                .cloned()
+                .unwrap_or_else(|| "input".to_string());
+            block.arguments = grammar_arguments(&input_property, "");
+            custom_tool_inputs.insert(
+                index,
+                (input_property, GrammarToolInputJsonBuffer::default()),
+            );
         }
         return index;
     }
@@ -523,16 +608,28 @@ fn ensure_tool_call_block(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let custom = tool_call_delta.get("custom");
     let name = tool_call_delta
         .get("function")
-        .and_then(|function| function.get("name"))
+        .or(custom)
+        .and_then(|definition| definition.get("name"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
     output.content.push(AssistantContent::ToolCall(ToolCall {
         id: id.clone(),
-        name,
-        arguments: Value::Object(Default::default()),
+        name: name.clone(),
+        arguments: custom
+            .map(|_| {
+                grammar_arguments(
+                    grammar_tool_input_properties
+                        .get(&name)
+                        .map(String::as_str)
+                        .unwrap_or("input"),
+                    "",
+                )
+            })
+            .unwrap_or_else(|| Value::Object(Default::default())),
         thought_signature: None,
     }));
     let index = output.content.len() - 1;
@@ -541,6 +638,18 @@ fn ensure_tool_call_block(
     }
     if !id.is_empty() {
         by_id.insert(id, index);
+    }
+    if custom.is_some() {
+        custom_tool_inputs.insert(
+            index,
+            (
+                grammar_tool_input_properties
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| "input".to_string()),
+                GrammarToolInputJsonBuffer::default(),
+            ),
+        );
     }
     sender.push(AssistantMessageEvent::ToolCallStart {
         content_index: index,
@@ -552,8 +661,9 @@ fn ensure_tool_call_block(
 fn finish_open_blocks(
     output: &mut AssistantMessage,
     partial_args: &HashMap<usize, String>,
+    custom_tool_inputs: &mut HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
     sender: &mut AssistantMessageEventStreamSender,
-) {
+) -> Result<()> {
     for index in 0..output.content.len() {
         match output.content.get_mut(index) {
             Some(AssistantContent::Text(block)) => {
@@ -571,20 +681,40 @@ fn finish_open_blocks(
                 });
             }
             Some(AssistantContent::ToolCall(block)) => {
-                if let Some(args) = partial_args.get(&index) {
+                let mut custom_delta = None;
+                if let Some((input_property, buffer)) = custom_tool_inputs.get_mut(&index) {
+                    let input = block
+                        .arguments
+                        .get(input_property.as_str())
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    custom_delta =
+                        append_grammar_tool_input_json_delta(buffer, input_property, input, true)?;
+                } else if let Some(args) = partial_args.get(&index) {
                     block.arguments = parse_streaming_json(Some(args));
+                }
+                let tool_call = block.clone();
+                let _ = block;
+                if let Some(delta) = custom_delta {
+                    sender.push(AssistantMessageEvent::ToolCallDelta {
+                        content_index: index,
+                        delta,
+                        partial: output.clone(),
+                    });
                 }
                 sender.push(AssistantMessageEvent::ToolCallEnd {
                     content_index: index,
-                    tool_call: block.clone(),
+                    tool_call,
                     partial: output.clone(),
                 });
             }
             None => {}
         }
     }
+    Ok(())
 }
 
+#[cfg(test)]
 fn build_chat_completions_payload(
     model: &Model,
     context: &Context,
@@ -592,7 +722,29 @@ fn build_chat_completions_payload(
     compat: &ResolvedOpenAICompletionsCompat,
     cache_retention: CacheRetention,
 ) -> Value {
-    let messages = convert_messages(model, context, compat);
+    let grammar_tool_input_properties =
+        create_grammar_tool_input_properties(&context.tools, compat.supports_openai_grammar_tools)
+            .expect("valid grammar tools");
+    try_build_chat_completions_payload(
+        model,
+        context,
+        options,
+        compat,
+        cache_retention,
+        &grammar_tool_input_properties,
+    )
+    .expect("valid Chat Completions payload")
+}
+
+fn try_build_chat_completions_payload(
+    model: &Model,
+    context: &Context,
+    options: &OpenAICompletionsOptions,
+    compat: &ResolvedOpenAICompletionsCompat,
+    cache_retention: CacheRetention,
+    grammar_tool_input_properties: &HashMap<String, String>,
+) -> Result<Value> {
+    let messages = try_convert_messages(model, context, compat, grammar_tool_input_properties)?;
     let mut payload = json!({
         "model": model.id,
         "messages": messages,
@@ -622,7 +774,7 @@ fn build_chat_completions_payload(
     if !context.tools.is_empty() {
         object.insert(
             "tools".to_string(),
-            Value::Array(convert_tools(&context.tools, compat)),
+            Value::Array(convert_tools(&context.tools, compat)?),
         );
         if compat.zai_tool_stream {
             object.insert("tool_stream".to_string(), json!(true));
@@ -668,7 +820,7 @@ fn build_chat_completions_payload(
         apply_anthropic_cache_control(&mut payload, cache_control);
     }
 
-    payload
+    Ok(payload)
 }
 
 fn gateway_provider_options(routing: &Value) -> Option<Value> {
@@ -831,11 +983,25 @@ fn resolve_chat_template_kwarg_value(
     }
 }
 
+#[cfg(test)]
 fn convert_messages(
     model: &Model,
     context: &Context,
     compat: &ResolvedOpenAICompletionsCompat,
 ) -> Vec<Value> {
+    let grammar_tool_input_properties =
+        create_grammar_tool_input_properties(&context.tools, compat.supports_openai_grammar_tools)
+            .expect("valid grammar tools");
+    try_convert_messages(model, context, compat, &grammar_tool_input_properties)
+        .expect("valid Chat Completions message history")
+}
+
+fn try_convert_messages(
+    model: &Model,
+    context: &Context,
+    compat: &ResolvedOpenAICompletionsCompat,
+    grammar_tool_input_properties: &HashMap<String, String>,
+) -> Result<Vec<Value>> {
     let mut params = Vec::new();
     let transformed = transform_messages(&context.messages, model, |id, target_model, _source| {
         normalize_chat_tool_call_id(id, target_model)
@@ -957,21 +1123,38 @@ fn convert_messages(
                     assistant_obj.insert("content".to_string(), json!(assistant_text));
                 }
 
-                let tool_calls: Vec<Value> = assistant
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AssistantContent::ToolCall(tool_call) => Some(json!({
+                let mut tool_calls = Vec::new();
+                for block in &assistant.content {
+                    let AssistantContent::ToolCall(tool_call) = block else {
+                        continue;
+                    };
+                    let value = if let Some(input_property) =
+                        grammar_tool_input_properties.get(&tool_call.name)
+                    {
+                        json!({
+                            "id": tool_call.id,
+                            "type": "custom",
+                            "custom": {
+                                "name": tool_call.name,
+                                "input": get_grammar_tool_input(
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    input_property,
+                                )?
+                            }
+                        })
+                    } else {
+                        json!({
                             "id": tool_call.id,
                             "type": "function",
                             "function": {
                                 "name": tool_call.name,
-                                "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_else(|_| "{}".to_string())
+                                "arguments": serde_json::to_string(&tool_call.arguments)?
                             }
-                        })),
-                        _ => None,
-                    })
-                    .collect();
+                        })
+                    };
+                    tool_calls.push(value);
+                }
                 if !tool_calls.is_empty() {
                     assistant_obj.insert("tool_calls".to_string(), Value::Array(tool_calls));
                     let reasoning_details: Vec<Value> = assistant
@@ -1072,22 +1255,41 @@ fn convert_messages(
         index += 1;
     }
 
-    params
+    Ok(params)
 }
 
-fn convert_tools(tools: &[Tool], compat: &ResolvedOpenAICompletionsCompat) -> Vec<Value> {
+fn convert_tools(tools: &[Tool], compat: &ResolvedOpenAICompletionsCompat) -> Result<Vec<Value>> {
     tools
         .iter()
         .map(|tool| {
+            if let Some(grammar) =
+                resolve_grammar_constrained_sampling(tool, compat.supports_openai_grammar_tools)?
+            {
+                return Ok(json!({
+                    "type": "custom",
+                    "custom": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "format": {
+                            "type": "grammar",
+                            "grammar": {
+                                "syntax": grammar.format.as_str(),
+                                "definition": grammar.definition
+                            }
+                        }
+                    }
+                }));
+            }
+            let strict = resolve_json_schema_strict_sampling(tool, compat.supports_strict_mode)?;
             let mut function = json!({
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters
             });
             if compat.supports_strict_mode {
-                function["strict"] = json!(false);
+                function["strict"] = json!(strict.unwrap_or(false));
             }
-            json!({ "type": "function", "function": function })
+            Ok(json!({ "type": "function", "function": function }))
         })
         .collect()
 }
@@ -1169,6 +1371,7 @@ fn detect_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         vercel_gateway_routing: None,
         zai_tool_stream: false,
         supports_strict_mode: true,
+        supports_openai_grammar_tools: false,
         cache_control_format: None,
         send_session_affinity_headers: false,
         session_affinity_format: detect_session_affinity_format(model),
@@ -1221,6 +1424,9 @@ fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
         supports_strict_mode: compat
             .supports_strict_mode
             .unwrap_or(detected.supports_strict_mode),
+        supports_openai_grammar_tools: compat
+            .supports_openai_grammar_tools
+            .unwrap_or(detected.supports_openai_grammar_tools),
         cache_control_format: compat
             .cache_control_format
             .or(detected.cache_control_format),
@@ -1434,6 +1640,7 @@ fn request_base_url(model: &Model) -> Result<String> {
 mod tests {
     use super::*;
     use crate::types::{
+        ConstrainedSampling, ConstrainedSamplingConfig, ConstrainedSamplingStrict, GrammarVariants,
         Message, ModelCompat, ModelCost, OpenAICompletionsCompat, PayloadHook, ResponseHook,
         ToolResultMessage,
     };
@@ -2179,6 +2386,7 @@ mod tests {
                     },
                     "required": ["message"]
                 }),
+                constrained_sampling: None,
             }],
             ..Default::default()
         };
@@ -2468,7 +2676,64 @@ mod tests {
                 },
                 "required": ["value"]
             }),
+            constrained_sampling: None,
         }
+    }
+
+    fn constrained_tool(config: ConstrainedSamplingConfig) -> Tool {
+        Tool {
+            name: "sample_tool".to_string(),
+            description: "Sample tool".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "payload": { "type": "string" } },
+                "required": ["payload"],
+                "additionalProperties": false
+            }),
+            constrained_sampling: Some(ConstrainedSampling::Config(config)),
+        }
+    }
+
+    #[test]
+    fn converts_strict_and_grammar_tools_like_pi() {
+        let mut strict_model = model();
+        strict_model.compat.openai_completions.supports_strict_mode = Some(true);
+        let strict = constrained_tool(ConstrainedSamplingConfig::JsonSchema {
+            strict: ConstrainedSamplingStrict::Prefer,
+        });
+        assert_eq!(
+            convert_tools(&[strict], &get_compat(&strict_model)).unwrap()[0]["function"]["strict"],
+            json!(true)
+        );
+
+        let mut grammar_model = model();
+        grammar_model
+            .compat
+            .openai_completions
+            .supports_openai_grammar_tools = Some(true);
+        let grammar = constrained_tool(ConstrainedSamplingConfig::Grammar {
+            variants: GrammarVariants {
+                openai_lark: Some("start: /[a-z]+/".to_string()),
+                openai_regex: None,
+            },
+        });
+        assert_eq!(
+            convert_tools(&[grammar], &get_compat(&grammar_model)).unwrap(),
+            vec![json!({
+                "type": "custom",
+                "custom": {
+                    "name": "sample_tool",
+                    "description": "Sample tool",
+                    "format": {
+                        "type": "grammar",
+                        "grammar": {
+                            "syntax": "lark",
+                            "definition": "start: /[a-z]+/"
+                        }
+                    }
+                }
+            })]
+        );
     }
 
     fn chat_sse_body(chunks: &[Value]) -> String {
@@ -3842,6 +4107,7 @@ mod tests {
                             "properties": { "path": { "type": "string" } },
                             "required": ["path"]
                         }),
+                        constrained_sampling: None,
                     },
                     Tool {
                         name: "grep".to_string(),
@@ -3854,6 +4120,7 @@ mod tests {
                             },
                             "required": ["pattern", "path"]
                         }),
+                        constrained_sampling: None,
                     },
                     Tool {
                         name: "list".to_string(),
@@ -3863,6 +4130,7 @@ mod tests {
                             "properties": { "path": { "type": "string" } },
                             "required": ["path"]
                         }),
+                        constrained_sampling: None,
                     },
                     Tool {
                         name: "write".to_string(),
@@ -3875,6 +4143,7 @@ mod tests {
                             },
                             "required": ["path", "content"]
                         }),
+                        constrained_sampling: None,
                     },
                 ],
                 ..Default::default()
@@ -5023,6 +5292,7 @@ mod tests {
                     "properties": { "path": { "type": "string" } },
                     "required": ["path"]
                 }),
+                constrained_sampling: None,
             }],
         };
 
@@ -5066,6 +5336,7 @@ mod tests {
                     "properties": { "path": { "type": "string" } },
                     "required": ["path"]
                 }),
+                constrained_sampling: None,
             }],
         };
 
@@ -5110,6 +5381,7 @@ mod tests {
                 name: "read".to_string(),
                 description: "Read a file".to_string(),
                 parameters: json!({ "type": "object" }),
+                constrained_sampling: None,
             }],
         };
 

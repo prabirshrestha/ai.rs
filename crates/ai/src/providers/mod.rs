@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub(crate) mod constrained_sampling;
 pub mod faux;
 pub mod github_copilot;
 pub(crate) mod github_copilot_headers;

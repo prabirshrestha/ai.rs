@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -743,10 +743,91 @@ impl Message {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConstrainedSamplingConfig {
+    JsonSchema { strict: ConstrainedSamplingStrict },
+    Grammar { variants: GrammarVariants },
+}
+
+/// A tool's constrained-sampling setting. Pi permits either an explicit
+/// `false` opt-out or a constrained-sampling configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstrainedSampling {
+    Disabled,
+    Config(ConstrainedSamplingConfig),
+}
+
+impl From<ConstrainedSamplingConfig> for ConstrainedSampling {
+    fn from(config: ConstrainedSamplingConfig) -> Self {
+        Self::Config(config)
+    }
+}
+
+impl Serialize for ConstrainedSampling {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Disabled => serializer.serialize_bool(false),
+            Self::Config(config) => config.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConstrainedSampling {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if value == Value::Bool(false) {
+            return Ok(Self::Disabled);
+        }
+        if value.is_boolean() {
+            return Err(de::Error::custom(
+                "constrainedSampling only accepts false or a configuration",
+            ));
+        }
+        serde_json::from_value(value)
+            .map(Self::Config)
+            .map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConstrainedSamplingStrict {
+    Prefer,
+    Require,
+}
+
+/// OpenAI grammar encodings supported by Pi constrained-sampling configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrammarFormat {
+    OpenaiLark,
+    OpenaiRegex,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    #[serde(
+        rename = "constrainedSampling",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub constrained_sampling: Option<ConstrainedSampling>,
 }
 
 impl Tool {
@@ -755,6 +836,7 @@ impl Tool {
             name: name.into(),
             description: None,
             parameters: None,
+            constrained_sampling: None,
         }
     }
 }
@@ -764,6 +846,7 @@ pub struct ToolBuilder {
     name: String,
     description: Option<String>,
     parameters: Option<Value>,
+    constrained_sampling: Option<ConstrainedSampling>,
 }
 
 impl ToolBuilder {
@@ -774,6 +857,11 @@ impl ToolBuilder {
 
     pub fn parameters(mut self, parameters: Value) -> Self {
         self.parameters = Some(parameters);
+        self
+    }
+
+    pub fn constrained_sampling(mut self, config: impl Into<ConstrainedSampling>) -> Self {
+        self.constrained_sampling = Some(config.into());
         self
     }
 
@@ -806,6 +894,7 @@ impl ToolBuilder {
             name,
             description,
             parameters,
+            constrained_sampling: self.constrained_sampling,
         })
     }
 }
@@ -1160,6 +1249,8 @@ pub struct OpenAICompletionsCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_strict_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_openai_grammar_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control_format: Option<CacheControlFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_session_affinity_headers: Option<bool>,
@@ -1290,6 +1381,10 @@ pub struct OpenAIResponsesCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_openai_grammar_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_explicit_prompt_cache_mode: Option<bool>,
 }
 
@@ -1310,6 +1405,8 @@ pub struct AnthropicMessagesCompat {
     pub force_adaptive_thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_empty_signature: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1462,6 +1559,7 @@ mod tests {
             name: "lookup".to_string(),
             description: "Lookup a value.".to_string(),
             parameters: json!({ "type": "object" }),
+            constrained_sampling: None,
         };
         let context = Context::builder()
             .system_prompt("You are concise.")
@@ -1504,6 +1602,38 @@ mod tests {
             tool.parameters,
             json!({ "type": "object", "properties": {} })
         );
+    }
+
+    #[test]
+    fn constrained_sampling_matches_pi_wire_format() {
+        let disabled: ConstrainedSampling = serde_json::from_value(json!(false)).unwrap();
+        assert_eq!(disabled, ConstrainedSampling::Disabled);
+
+        let tool = Tool::builder("apply_patch")
+            .description("Apply a patch.")
+            .parameters(json!({
+                "type": "object",
+                "properties": { "input": { "type": "string" } },
+                "required": ["input"]
+            }))
+            .constrained_sampling(ConstrainedSamplingConfig::Grammar {
+                variants: GrammarVariants {
+                    openai_lark: Some("start: /.+/s".to_string()),
+                    openai_regex: None,
+                },
+            })
+            .build()
+            .unwrap();
+        let value = serde_json::to_value(&tool).unwrap();
+
+        assert_eq!(
+            value["constrainedSampling"],
+            json!({
+                "type": "grammar",
+                "variants": { "openai_lark": "start: /.+/s" }
+            })
+        );
+        assert_eq!(serde_json::from_value::<Tool>(value).unwrap(), tool);
     }
 
     #[test]

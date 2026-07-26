@@ -912,6 +912,7 @@ mod tests {
                     },
                     "required": ["expression"]
                 }),
+                constrained_sampling: None,
             }
         }
 

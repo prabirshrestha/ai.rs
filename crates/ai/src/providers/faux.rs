@@ -1339,6 +1339,7 @@ mod tests {
                 },
                 "required": ["text"]
             }),
+            constrained_sampling: None,
         };
         let context = Context {
             system_prompt: Some("sys".to_string()),

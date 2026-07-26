@@ -1074,6 +1074,7 @@ mod tests {
                     },
                     "required": ["edits"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1128,6 +1129,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1191,6 +1193,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1256,6 +1259,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 

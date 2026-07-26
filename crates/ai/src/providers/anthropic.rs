@@ -8,6 +8,7 @@ use crate::env_api_keys::{KnownProvider, get_anthropic_auth_token, get_env_api_k
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+use crate::providers::constrained_sampling::resolve_json_schema_strict_sampling;
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
@@ -15,9 +16,10 @@ use crate::providers::simple_options;
 use crate::providers::simple_options::{adjust_max_tokens_for_thinking, clamped_reasoning};
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
-    AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model,
-    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, Tool, ToolCall, ToolResultContent, UserContent, UserMessageContent,
+    AnthropicMessagesCompat, AssistantContent, AssistantMessage, AssistantMessageEvent,
+    CacheRetention, Context, Model, ModelCompat, ModelThinkingLevel, SimpleStreamOptions,
+    StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolResultContent,
+    UserContent, UserMessageContent,
 };
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
@@ -81,6 +83,13 @@ impl Provider for Anthropic {
             .input(vec![crate::ModelInput::Text, crate::ModelInput::Image])
             .context_window(1_000_000)
             .max_tokens(16_384)
+            .compat(ModelCompat {
+                anthropic_messages: AnthropicMessagesCompat {
+                    supports_strict_tools: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
     }
 }
 
@@ -279,6 +288,7 @@ struct ResolvedAnthropicCompat {
     pub send_session_affinity_headers: bool,
     pub supports_cache_control_on_tools: bool,
     pub supports_temperature: bool,
+    pub supports_strict_tools: bool,
 }
 
 pub fn stream_simple_anthropic(
@@ -424,8 +434,16 @@ async fn run_stream(
     let compat = get_anthropic_compat(&model);
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let cache_control = cache_control(&model, cache_retention, compat);
-    let mut payload =
-        build_anthropic_payload(&model, &context, &options, is_oauth, cache_control.clone());
+    let mut payload = match try_build_anthropic_payload(
+        &model,
+        &context,
+        &options,
+        is_oauth,
+        cache_control.clone(),
+    ) {
+        Ok(payload) => payload,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -790,13 +808,13 @@ async fn run_stream(
     Ok(())
 }
 
-fn build_anthropic_payload(
+fn try_build_anthropic_payload(
     model: &Model,
     context: &Context,
     options: &AnthropicOptions,
     is_oauth_token: bool,
     cache_control: Option<Value>,
-) -> Value {
+) -> Result<Value> {
     let mut payload = json!({
         "model": model.id,
         "messages": convert_messages(
@@ -853,12 +871,13 @@ fn build_anthropic_payload(
                 &context.tools,
                 is_oauth_token,
                 compat.supports_eager_tool_input_streaming,
+                compat.supports_strict_tools,
                 if compat.supports_cache_control_on_tools {
                     cache_control.clone()
                 } else {
                     None
                 },
-            )),
+            )?),
         );
     }
     if model.reasoning {
@@ -904,7 +923,18 @@ fn build_anthropic_payload(
             .unwrap_or_else(|| tool_choice.clone());
         object.insert("tool_choice".to_string(), value);
     }
-    payload
+    Ok(payload)
+}
+
+#[cfg(test)]
+fn build_anthropic_payload(
+    model: &Model,
+    context: &Context,
+    options: &AnthropicOptions,
+    is_oauth_token: bool,
+    cache_control: Option<Value>,
+) -> Value {
+    try_build_anthropic_payload(model, context, options, is_oauth_token, cache_control).unwrap()
 }
 
 fn convert_messages(
@@ -1099,21 +1129,43 @@ fn convert_tools(
     tools: &[Tool],
     is_oauth_token: bool,
     supports_eager_tool_input_streaming: bool,
+    supports_strict_tools: bool,
     cache_control: Option<Value>,
-) -> Vec<Value> {
+) -> Result<Vec<Value>> {
     tools
         .iter()
         .enumerate()
         .map(|(index, tool)| {
+            let strict = resolve_json_schema_strict_sampling(tool, supports_strict_tools)?;
+            let legacy_input_schema = json!({
+                "type": "object",
+                "properties": tool.parameters.get("properties").cloned().unwrap_or_else(|| json!({})),
+                "required": tool.parameters.get("required").cloned().unwrap_or_else(|| json!([]))
+            });
+            let input_schema = if strict == Some(true) {
+                let mut input_schema = tool.parameters.clone();
+                let object = input_schema.as_object_mut().expect("tool parameters object");
+                object.insert("type".to_string(), json!("object"));
+                object.insert(
+                    "properties".to_string(),
+                    legacy_input_schema["properties"].clone(),
+                );
+                object.insert(
+                    "required".to_string(),
+                    legacy_input_schema["required"].clone(),
+                );
+                input_schema
+            } else {
+                legacy_input_schema
+            };
             let mut value = json!({
                 "name": if is_oauth_token { to_claude_code_name(&tool.name) } else { tool.name.clone() },
                 "description": tool.description,
-                "input_schema": {
-                    "type": "object",
-                    "properties": tool.parameters.get("properties").cloned().unwrap_or_else(|| json!({})),
-                    "required": tool.parameters.get("required").cloned().unwrap_or_else(|| json!([]))
-                }
+                "input_schema": input_schema
             });
+            if strict == Some(true) {
+                value["strict"] = json!(true);
+            }
             if supports_eager_tool_input_streaming {
                 value["eager_input_streaming"] = json!(true);
             }
@@ -1121,7 +1173,7 @@ fn convert_tools(
                 && let Some(cache_control) = &cache_control {
                     value["cache_control"] = cache_control.clone();
                 }
-            value
+            Ok(value)
         })
         .collect()
 }
@@ -1184,6 +1236,7 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(false),
         supports_cache_control_on_tools: compat.supports_cache_control_on_tools.unwrap_or(true),
         supports_temperature: compat.supports_temperature.unwrap_or(true),
+        supports_strict_tools: compat.supports_strict_tools.unwrap_or(false),
     }
 }
 
@@ -1890,6 +1943,17 @@ mod tests {
     }
 
     #[test]
+    fn provider_models_enable_pi_strict_tools() {
+        let anthropic = builder().api_key("test-token").build().expect("provider");
+        let model = anthropic.model("claude-opus-4-8").build().expect("model");
+
+        assert_eq!(
+            model.compat.anthropic_messages.supports_strict_tools,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn should_handle_empty_content_array() {
         let model = anthropic_model("claude-sonnet-4-5");
         let messages = vec![crate::types::Message::User(crate::types::UserMessage {
@@ -2227,6 +2291,7 @@ mod tests {
                     name: "lookup".to_string(),
                     description: "Look up a value".to_string(),
                     parameters: json!({ "type": "object" }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
@@ -2252,6 +2317,7 @@ mod tests {
                     name: "lookup".to_string(),
                     description: "Look up a value".to_string(),
                     parameters: json!({ "type": "object" }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
@@ -2823,7 +2889,45 @@ mod tests {
                 },
                 "required": ["value"]
             }),
+            constrained_sampling: None,
         }
+    }
+
+    #[test]
+    fn strict_tools_preserve_the_full_schema() {
+        use crate::types::{
+            ConstrainedSampling, ConstrainedSamplingConfig, ConstrainedSamplingStrict,
+        };
+
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.compat.anthropic_messages.supports_strict_tools = Some(true);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("Use the tool")],
+            tools: vec![Tool {
+                name: "lookup".to_string(),
+                description: "Look up a value".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+                constrained_sampling: Some(ConstrainedSampling::Config(
+                    ConstrainedSamplingConfig::JsonSchema {
+                        strict: ConstrainedSamplingStrict::Prefer,
+                    },
+                )),
+            }],
+            ..Default::default()
+        };
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), false, None);
+
+        assert_eq!(payload["tools"][0]["strict"], json!(true));
+        assert_eq!(
+            payload["tools"][0]["input_schema"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -3029,11 +3133,13 @@ mod tests {
                 name: "todowrite".to_string(),
                 description: "Write todos".to_string(),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             },
             Tool {
                 name: "find".to_string(),
                 description: "Find files".to_string(),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             },
         ];
         let context = Context {
@@ -3068,6 +3174,7 @@ mod tests {
                 name: name.to_string(),
                 description: format!("{name} tool"),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             })
             .collect::<Vec<_>>();
         let context = Context {
@@ -3360,6 +3467,7 @@ mod tests {
                         },
                         "required": ["path", "text"]
                     }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
