@@ -2605,6 +2605,33 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_retry_delay_server(
+        attempts: Arc<AtomicUsize>,
+        retry_after: &str,
+        body: &str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let retry_after = retry_after.to_string();
+        let body = body.to_string();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0u8; 4096];
+                let _ = socket.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nretry-after: {retry_after}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn surfaces_routed_chunk_model_as_response_model() {
         let mut routed_model = model();
@@ -2945,6 +2972,50 @@ mod tests {
                 text: "ok".to_string(),
                 text_signature: None,
             })]
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_provider_fails_immediately_for_retry_delay_above_limit() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut chat_model = model();
+        chat_model.reasoning = false;
+        chat_model.base_url =
+            spawn_retry_delay_server(Arc::clone(&attempts), "277403", "rate limited").await;
+
+        let stream = stream_openai_completions(
+            chat_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAICompletionsOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    max_retries: Some(2),
+                    max_retry_delay_ms: Some(1_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert!(
+            message.error_message.as_deref().is_some_and(
+                |error| error.contains("Server requested 277403s retry delay (max: 1s)")
+            )
+        );
+        assert!(
+            message
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("rate limited"))
         );
     }
 

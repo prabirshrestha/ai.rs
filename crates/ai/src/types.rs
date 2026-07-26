@@ -234,7 +234,12 @@ pub struct StreamOptions {
     pub headers: ProviderHeaders,
     pub timeout_ms: Option<u64>,
     pub websocket_connect_timeout_ms: Option<u64>,
+    /// Maximum retry attempts for providers that support client-side retries.
     pub max_retries: Option<u32>,
+    /// Maximum delay in milliseconds to wait when the server requests a long
+    /// retry delay. If the requested delay exceeds this value, the request
+    /// fails immediately. Defaults to 60 seconds; set to zero to disable the
+    /// cap.
     pub max_retry_delay_ms: Option<u64>,
     pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
