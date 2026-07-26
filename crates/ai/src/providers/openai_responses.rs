@@ -773,7 +773,7 @@ async fn run_stream(
                                             })
                                             .collect::<String>()
                                     })
-                                    .unwrap_or_else(|| block.text.clone());
+                                    .unwrap_or_default();
                                 block.text = text;
                                 if let Some(id) = item.get("id").and_then(Value::as_str) {
                                     let phase = match item.get("phase").and_then(Value::as_str) {
@@ -4127,6 +4127,86 @@ mod tests {
             vec![AssistantContent::Text(TextContent {
                 text: "partial".to_string(),
                 text_signature: None,
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_message_with_null_content_normalizes_text_to_empty() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_null",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "partial"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_null",
+                    "role": "assistant",
+                    "content": null
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_null",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut response_model = model();
+        response_model.base_url = base_url;
+
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            response_model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: Some(
+                    serde_json::to_string(&TextSignatureV1 {
+                        v: 1,
+                        id: "msg_null".to_string(),
+                        phase: None,
+                    })
+                    .unwrap()
+                ),
             })]
         );
     }
