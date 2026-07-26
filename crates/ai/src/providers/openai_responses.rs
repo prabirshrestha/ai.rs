@@ -1164,6 +1164,12 @@ fn try_build_responses_payload(
                 json!({ "effort": model.thinking_level_map.get("off").and_then(Clone::clone).unwrap_or_else(|| "none".to_string()) }),
             );
         }
+        if model.provider == "xai" {
+            object.insert(
+                "include".to_string(),
+                json!(["reasoning.encrypted_content"]),
+            );
+        }
     }
     Ok(payload)
 }
@@ -3127,6 +3133,27 @@ mod tests {
 
             assert!(payload.get("reasoning").is_none(), "{model_id}");
         }
+    }
+
+    #[test]
+    fn response_payload_requests_encrypted_reasoning_for_xai_without_explicit_effort() {
+        let mut model = reasoning_model_without_off_support("grok-4.5");
+        model.provider = "xai".to_string();
+        let context = Context {
+            messages: vec![Message::user_text("hello")],
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions::default();
+        let payload = build_responses_payload(
+            &model,
+            &context,
+            &options,
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert!(payload.get("reasoning").is_none());
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[tokio::test]
