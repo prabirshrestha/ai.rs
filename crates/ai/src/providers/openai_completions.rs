@@ -14,9 +14,10 @@ use crate::providers::simple_options::build_base_options;
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheControlFormat, CacheRetention,
-    Context, ImageContent, MaxTokensField, Model, ModelInput, ModelThinkingLevel,
-    OpenAIThinkingFormat, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
+    ChatTemplateKwargValue, ChatTemplateVariable, Context, ImageContent, MaxTokensField, Model,
+    ModelInput, ModelThinkingLevel, OpenAIThinkingFormat, SimpleStreamOptions, StopReason,
+    StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolResultContent, Usage,
+    UserContent, UserMessageContent,
 };
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
@@ -42,6 +43,7 @@ struct ResolvedOpenAICompletionsCompat {
     requires_thinking_as_text: bool,
     requires_reasoning_content_on_assistant_messages: bool,
     thinking_format: OpenAIThinkingFormat,
+    chat_template_kwargs: HashMap<String, ChatTemplateKwargValue>,
     open_router_routing: Option<Value>,
     vercel_gateway_routing: Option<Value>,
     zai_tool_stream: bool,
@@ -689,14 +691,15 @@ fn apply_reasoning_options(
     let effort = options
         .reasoning_effort
         .filter(|effort| *effort != ModelThinkingLevel::Off);
+    let configured_effort = effort.and_then(|effort| {
+        model
+            .thinking_level_map
+            .get(effort.as_str())
+            .cloned()
+            .flatten()
+    });
     let mapped_effort = effort
-        .and_then(|effort| {
-            model
-                .thinking_level_map
-                .get(effort.as_str())
-                .cloned()
-                .flatten()
-        })
+        .and(configured_effort.clone())
         .or_else(|| effort.map(|effort| effort.as_str().to_string()));
 
     match compat.thinking_format {
@@ -711,6 +714,11 @@ fn apply_reasoning_options(
                 "chat_template_kwargs".to_string(),
                 json!({ "enable_thinking": mapped_effort.is_some(), "preserve_thinking": true }),
             );
+        }
+        OpenAIThinkingFormat::ChatTemplate => {
+            if let Some(kwargs) = build_chat_template_kwargs(model, effort, compat) {
+                object.insert("chat_template_kwargs".to_string(), Value::Object(kwargs));
+            }
         }
         OpenAIThinkingFormat::Deepseek => {
             object.insert(
@@ -756,6 +764,11 @@ fn apply_reasoning_options(
                 );
             }
         }
+        OpenAIThinkingFormat::AntLing => {
+            if let Some(effort) = configured_effort {
+                object.insert("reasoning".to_string(), json!({ "effort": effort }));
+            }
+        }
         OpenAIThinkingFormat::Openai => {
             if let Some(effort) = mapped_effort.filter(|_| compat.supports_reasoning_effort) {
                 object.insert("reasoning_effort".to_string(), json!(effort));
@@ -763,6 +776,54 @@ fn apply_reasoning_options(
                 && let Some(Some(off)) = model.thinking_level_map.get("off")
             {
                 object.insert("reasoning_effort".to_string(), json!(off));
+            }
+        }
+    }
+}
+
+fn build_chat_template_kwargs(
+    model: &Model,
+    effort: Option<ModelThinkingLevel>,
+    compat: &ResolvedOpenAICompletionsCompat,
+) -> Option<serde_json::Map<String, Value>> {
+    let kwargs = compat
+        .chat_template_kwargs
+        .iter()
+        .filter_map(|(key, value)| {
+            resolve_chat_template_kwarg_value(model, effort, value)
+                .map(|value| (key.clone(), value))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    (!kwargs.is_empty()).then_some(kwargs)
+}
+
+fn resolve_chat_template_kwarg_value(
+    model: &Model,
+    effort: Option<ModelThinkingLevel>,
+    value: &ChatTemplateKwargValue,
+) -> Option<Value> {
+    match value {
+        ChatTemplateKwargValue::String(value) => Some(json!(value)),
+        ChatTemplateKwargValue::Number(value) => Some(Value::Number(value.clone())),
+        ChatTemplateKwargValue::Boolean(value) => Some(json!(value)),
+        ChatTemplateKwargValue::Null(()) => Some(Value::Null),
+        ChatTemplateKwargValue::Variable(variable) => {
+            if effort.is_none() && variable.omit_when_off {
+                return None;
+            }
+            match variable.variable {
+                ChatTemplateVariable::ThinkingEnabled => Some(json!(effort.is_some())),
+                ChatTemplateVariable::ThinkingEffort => {
+                    let mapped = match effort {
+                        Some(effort) => model.thinking_level_map.get(effort.as_str()),
+                        None => model.thinking_level_map.get("off"),
+                    };
+                    match mapped {
+                        Some(Some(value)) => Some(json!(value)),
+                        Some(None) => None,
+                        None => effort.map(|effort| json!(effort.as_str())),
+                    }
+                }
             }
         }
     }
@@ -1095,6 +1156,7 @@ fn detect_compat(_model: &Model) -> ResolvedOpenAICompletionsCompat {
         requires_thinking_as_text: false,
         requires_reasoning_content_on_assistant_messages: false,
         thinking_format: OpenAIThinkingFormat::Openai,
+        chat_template_kwargs: HashMap::new(),
         open_router_routing: None,
         vercel_gateway_routing: None,
         zai_tool_stream: false,
@@ -1133,6 +1195,11 @@ fn get_compat(model: &Model) -> ResolvedOpenAICompletionsCompat {
             .requires_reasoning_content_on_assistant_messages
             .unwrap_or(detected.requires_reasoning_content_on_assistant_messages),
         thinking_format: compat.thinking_format.unwrap_or(detected.thinking_format),
+        chat_template_kwargs: if compat.chat_template_kwargs.is_empty() {
+            detected.chat_template_kwargs
+        } else {
+            compat.chat_template_kwargs.clone()
+        },
         open_router_routing: compat
             .open_router_routing
             .clone()
@@ -3970,6 +4037,278 @@ mod tests {
         );
 
         assert_eq!(payload["reasoning_effort"], json!("default"));
+    }
+
+    #[test]
+    fn max_reasoning_effort_uses_model_mapping() {
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("maximum".to_string()));
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                messages: vec![Message::user_text("Think as hard as possible.")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::Max),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(payload["reasoning_effort"], json!("maximum"));
+    }
+
+    #[test]
+    fn configurable_chat_template_boolean_thinking_kwargs() {
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::ChatTemplate);
+        model.compat.openai_completions.chat_template_kwargs.insert(
+            "thinking".to_string(),
+            ChatTemplateKwargValue::thinking_enabled(),
+        );
+        let compat = get_compat(&model);
+
+        let enabled = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &compat,
+            CacheRetention::Short,
+        );
+        let disabled = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(enabled["chat_template_kwargs"], json!({ "thinking": true }));
+        assert_eq!(
+            disabled["chat_template_kwargs"],
+            json!({ "thinking": false })
+        );
+        assert!(enabled.get("reasoning_effort").is_none());
+        assert!(enabled.get("thinking").is_none());
+        assert!(disabled.get("reasoning_effort").is_none());
+        assert!(disabled.get("thinking").is_none());
+    }
+
+    #[test]
+    fn qwen_chat_template_thinking_kwargs() {
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model.compat.openai_completions.thinking_format =
+            Some(OpenAIThinkingFormat::QwenChatTemplate);
+        model.compat.openai_completions.supports_reasoning_effort = Some(false);
+        let compat = get_compat(&model);
+
+        for (reasoning_effort, expected) in [(Some(ModelThinkingLevel::High), true), (None, false)]
+        {
+            let payload = build_chat_completions_payload(
+                &model,
+                &Context::default(),
+                &OpenAICompletionsOptions {
+                    reasoning_effort,
+                    ..Default::default()
+                },
+                &compat,
+                CacheRetention::Short,
+            );
+
+            assert_eq!(
+                payload["chat_template_kwargs"],
+                json!({ "enable_thinking": expected, "preserve_thinking": true })
+            );
+            assert!(payload.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn configurable_chat_template_effort_kwargs_and_static_values() {
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model
+            .thinking_level_map
+            .insert("xhigh".to_string(), Some("max".to_string()));
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::ChatTemplate);
+        model.compat.openai_completions.chat_template_kwargs = [
+            ("preserve_thinking".to_string(), true.into()),
+            (
+                "reasoning_effort".to_string(),
+                ChatTemplateKwargValue::thinking_effort(true),
+            ),
+            ("seed".to_string(), 7_u32.into()),
+            ("label".to_string(), "local".into()),
+        ]
+        .into_iter()
+        .collect();
+        let compat = get_compat(&model);
+
+        let enabled = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::Xhigh),
+                ..Default::default()
+            },
+            &compat,
+            CacheRetention::Short,
+        );
+        let disabled = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions::default(),
+            &compat,
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            enabled["chat_template_kwargs"],
+            json!({
+                "preserve_thinking": true,
+                "reasoning_effort": "max",
+                "seed": 7,
+                "label": "local"
+            })
+        );
+        assert_eq!(
+            disabled["chat_template_kwargs"],
+            json!({ "preserve_thinking": true, "seed": 7, "label": "local" })
+        );
+        assert!(enabled.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn chat_template_effort_uses_off_mapping_when_not_omitted() {
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model
+            .thinking_level_map
+            .insert("off".to_string(), Some("none".to_string()));
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::ChatTemplate);
+        model.compat.openai_completions.chat_template_kwargs.insert(
+            "reasoning_effort".to_string(),
+            ChatTemplateKwargValue::thinking_effort(false),
+        );
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(
+            payload["chat_template_kwargs"],
+            json!({ "reasoning_effort": "none" })
+        );
+    }
+
+    #[test]
+    fn ant_ling_compatibility_metadata_shapes_the_full_payload() {
+        let mut model = model();
+        model.provider = "custom-ant-ling-compatible".to_string();
+        model.compat.openai_completions.supports_store = Some(false);
+        model.compat.openai_completions.supports_developer_role = Some(false);
+        model.compat.openai_completions.supports_reasoning_effort = Some(false);
+        model.compat.openai_completions.max_tokens_field = Some(MaxTokensField::MaxTokens);
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::AntLing);
+        model
+            .compat
+            .openai_completions
+            .supports_long_cache_retention = Some(false);
+        model
+            .thinking_level_map
+            .insert("high".to_string(), Some("high".to_string()));
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &Context {
+                system_prompt: Some("Follow instructions.".to_string()),
+                messages: vec![Message::user_text("Hi")],
+                ..Default::default()
+            },
+            &OpenAICompletionsOptions {
+                base: StreamOptions {
+                    max_tokens: Some(123),
+                    session_id: Some("ant-ling-session".to_string()),
+                    ..Default::default()
+                },
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Long,
+        );
+
+        assert_eq!(payload["max_tokens"], json!(123));
+        assert!(payload.get("max_completion_tokens").is_none());
+        assert_eq!(payload["messages"][0]["role"], json!("system"));
+        assert_eq!(payload["reasoning"], json!({ "effort": "high" }));
+        assert!(payload.get("reasoning_effort").is_none());
+        assert!(payload.get("store").is_none());
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn ant_ling_only_sends_explicitly_mapped_efforts() {
+        let mut model = model();
+        model.provider = "custom-ant-ling-compatible".to_string();
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::AntLing);
+        model
+            .thinking_level_map
+            .insert("high".to_string(), Some("high".to_string()));
+        let compat = get_compat(&model);
+
+        let mapped = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &compat,
+            CacheRetention::Short,
+        );
+        let unmapped = build_chat_completions_payload(
+            &model,
+            &Context::default(),
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::Medium),
+                ..Default::default()
+            },
+            &compat,
+            CacheRetention::Short,
+        );
+        let mut non_reasoning = model.clone();
+        non_reasoning.reasoning = false;
+        let disabled = build_chat_completions_payload(
+            &non_reasoning,
+            &Context::default(),
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &get_compat(&non_reasoning),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(mapped["reasoning"], json!({ "effort": "high" }));
+        assert!(mapped.get("reasoning_effort").is_none());
+        assert!(unmapped.get("reasoning").is_none());
+        assert!(disabled.get("reasoning").is_none());
     }
 
     #[test]

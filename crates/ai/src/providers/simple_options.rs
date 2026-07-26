@@ -30,9 +30,9 @@ pub fn adjust_max_tokens_for_thinking(
         Some(ModelThinkingLevel::Minimal) => budgets.and_then(|b| b.minimal).unwrap_or(1_024),
         Some(ModelThinkingLevel::Low) => budgets.and_then(|b| b.low).unwrap_or(2_048),
         Some(ModelThinkingLevel::Medium) => budgets.and_then(|b| b.medium).unwrap_or(8_192),
-        Some(ModelThinkingLevel::High) | Some(ModelThinkingLevel::Xhigh) => {
-            budgets.and_then(|b| b.high).unwrap_or(16_384)
-        }
+        Some(ModelThinkingLevel::High)
+        | Some(ModelThinkingLevel::Xhigh)
+        | Some(ModelThinkingLevel::Max) => budgets.and_then(|b| b.high).unwrap_or(16_384),
         _ => 1_024,
     };
 

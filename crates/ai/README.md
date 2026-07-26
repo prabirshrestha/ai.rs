@@ -507,6 +507,10 @@ requests use `ImagesStopReason::Aborted`.
 
 Many models support thinking or reasoning content. Check `model.reasoning` and
 use `get_supported_thinking_levels` to inspect supported levels.
+`ModelThinkingLevel::Xhigh` and `ModelThinkingLevel::Max` are model-specific,
+opt-in levels: a model exposes them only when its `thinking_level_map` has a
+non-null `"xhigh"` or `"max"` entry. An unsupported request clamps to the
+nearest supported level.
 
 ### Unified Interface (streamSimple/completeSimple)
 
@@ -716,6 +720,61 @@ behavior from provider names or base URLs.
 Set model-builder compat metadata when the target OpenAI-compatible endpoint
 needs payload differences such as non-standard reasoning, cache-control,
 max-token, or tool-result behavior.
+
+For a server that controls thinking through Jinja chat-template arguments, use
+the generic `ChatTemplate` format. Static strings, JSON numbers, booleans, and
+null values pass through unchanged. `thinking_enabled()` resolves to a boolean;
+`thinking_effort(...)` resolves through the model's `thinking_level_map`.
+
+```rust
+use ai::{
+    ChatTemplateKwargValue, ModelCompat, ModelThinkingLevel,
+    OpenAICompletionsCompat, OpenAIThinkingFormat,
+};
+
+let compat = ModelCompat {
+    openai_completions: OpenAICompletionsCompat {
+        supports_reasoning_effort: Some(false),
+        thinking_format: Some(OpenAIThinkingFormat::ChatTemplate),
+        chat_template_kwargs: [
+            (
+                "enable_thinking".to_string(),
+                ChatTemplateKwargValue::thinking_enabled(),
+            ),
+            (
+                "reasoning_effort".to_string(),
+                ChatTemplateKwargValue::thinking_effort(true),
+            ),
+            ("preserve_thinking".to_string(), true.into()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    },
+    ..Default::default()
+};
+let mut model = provider
+    .model("local-reasoning-model")
+    .reasoning(true)
+    .compat(compat)
+    .build()?;
+model
+    .thinking_level_map
+    .insert("max".to_string(), Some("maximum".to_string()));
+let requested = ModelThinkingLevel::Max;
+```
+
+Here `omit_when_off = true` omits `reasoning_effort` when thinking is off. If it
+is false, an explicit `thinking_level_map["off"]` string is used. A mapped
+null value omits the variable.
+
+Ant Ling-compatible endpoints use a nested `reasoning: { effort }` object, but
+only for explicitly mapped levels. Opt in without provider-name or base-URL
+detection: set `thinking_format` to `AntLing`, set
+`supports_reasoning_effort` to false, and add the supported strings to the
+model's `thinking_level_map`. These endpoints commonly also set
+`supports_store` and `supports_developer_role` to false, `max_tokens_field` to
+`MaxTokens`, and `supports_long_cache_retention` to false.
 
 ### Thread Safety
 
