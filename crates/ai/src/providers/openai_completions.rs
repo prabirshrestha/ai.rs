@@ -24,6 +24,7 @@ use crate::types::{
     SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall,
     ToolResultContent, Usage, UserContent, UserMessageContent,
 };
+use crate::utils::hash::short_hash;
 use crate::utils::headers::apply_provider_headers;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
@@ -1454,8 +1455,21 @@ fn has_tool_history(messages: &[crate::types::Message]) -> bool {
 }
 
 fn normalize_chat_tool_call_id(id: &str, model: &Model) -> String {
-    if let Some((call_id, _)) = id.split_once('|') {
-        return sanitize_id(call_id).chars().take(40).collect();
+    if let Some((call_id, item_id)) = id.split_once('|') {
+        let call_id = sanitize_id(call_id);
+        let item_id = sanitize_id(item_id);
+        let combined_id = if item_id.is_empty() {
+            call_id.clone()
+        } else {
+            format!("{call_id}_{item_id}")
+        };
+        if combined_id.len() <= 40 {
+            return combined_id;
+        }
+        let hash = short_hash(id).chars().take(8).collect::<String>();
+        let prefix_len = 40usize.saturating_sub(hash.len() + 1).max(1);
+        let prefix = call_id.chars().take(prefix_len).collect::<String>();
+        return format!("{prefix}_{hash}");
     }
     if model.provider == "openai" && id.len() > 40 {
         id.chars().take(40).collect()
@@ -1523,7 +1537,7 @@ fn apply_anthropic_cache_control(payload: &mut Value, cache_control: Value) {
     for message in messages.iter_mut().rev() {
         if matches!(
             message.get("role").and_then(Value::as_str),
-            Some("user" | "assistant")
+            Some("user" | "assistant" | "tool")
         ) && add_cache_control_to_text_content(message, cache_control.clone())
         {
             break;
@@ -2404,11 +2418,23 @@ mod tests {
             .find(|message| message["role"] == "tool")
             .expect("tool result message");
 
-        assert_eq!(tool_call_id, "call_pAYbIr76hXIjncD9UE4eGfnS");
+        assert_eq!(tool_call_id, "call_pAYbIr76hXIjncD9UE4eGfnS_1q6evuz1");
         assert_eq!(tool_result_message["tool_call_id"], json!(tool_call_id));
         assert!(tool_call_id.len() <= 40);
         assert!(!tool_call_id.contains('|'));
         assert!(assistant_message.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn preserves_item_level_uniqueness_for_shared_responses_call_ids() {
+        let model = model();
+
+        let first = normalize_chat_tool_call_id("call_shared|item_first", &model);
+        let second = normalize_chat_tool_call_id("call_shared|item_second", &model);
+
+        assert_eq!(first, "call_shared_item_first");
+        assert_eq!(second, "call_shared_item_second");
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -5358,6 +5384,70 @@ mod tests {
         );
         assert_eq!(
             payload["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn moves_anthropic_cache_marker_to_tool_result() {
+        let mut model = model();
+        model.provider = "openrouter".to_string();
+        model.compat.openai_completions.cache_control_format = Some(CacheControlFormat::Anthropic);
+        let timestamp = 1;
+        let mut assistant = AssistantMessage::empty_for(&model);
+        assistant.content = vec![AssistantContent::ToolCall(ToolCall {
+            id: "call_1".to_string(),
+            name: "read".to_string(),
+            arguments: json!({ "path": "README.md" }),
+            thought_signature: None,
+        })];
+        assistant.stop_reason = StopReason::ToolUse;
+        assistant.timestamp = timestamp;
+        let context = Context {
+            system_prompt: Some("System prompt".to_string()),
+            messages: vec![
+                Message::user_text("Read the file"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ToolResultContent::text("file contents")],
+                    details: None,
+                    is_error: false,
+                    timestamp,
+                }),
+            ],
+            tools: vec![Tool {
+                name: "read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+                constrained_sampling: None,
+            }],
+        };
+
+        let payload = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        let user_message = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .unwrap();
+        assert_eq!(user_message["content"], "Read the file");
+        let tool_message = payload["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(tool_message["role"], "tool");
+        assert_eq!(
+            tool_message["content"][0]["cache_control"],
             json!({ "type": "ephemeral" })
         );
     }
