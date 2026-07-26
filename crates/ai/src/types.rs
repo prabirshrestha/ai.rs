@@ -14,6 +14,10 @@ use crate::provider::LanguageModelApi;
 pub type Api = String;
 pub type ProviderId = String;
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KnownApi {
@@ -50,6 +54,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +66,7 @@ pub enum ModelThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ModelThinkingLevel {
@@ -72,6 +78,7 @@ impl ModelThinkingLevel {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -83,6 +90,7 @@ impl ModelThinkingLevel {
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -96,6 +104,7 @@ impl From<ThinkingLevel> for ModelThinkingLevel {
             ThinkingLevel::Medium => Self::Medium,
             ThinkingLevel::High => Self::High,
             ThinkingLevel::Xhigh => Self::Xhigh,
+            ThinkingLevel::Max => Self::Max,
         }
     }
 }
@@ -1040,6 +1049,8 @@ pub struct OpenAICompletionsCompat {
     pub requires_reasoning_content_on_assistant_messages: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<OpenAIThinkingFormat>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub chat_template_kwargs: HashMap<String, ChatTemplateKwargValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_router_routing: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1073,7 +1084,88 @@ pub enum OpenAIThinkingFormat {
     Zai,
     Qwen,
     QwenChatTemplate,
+    ChatTemplate,
     StringThinking,
+    AntLing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatTemplateKwargValue {
+    String(String),
+    Number(serde_json::Number),
+    Boolean(bool),
+    Null(()),
+    Variable(ChatTemplateKwargVariable),
+}
+
+impl ChatTemplateKwargValue {
+    pub fn from_f64(value: f64) -> Option<Self> {
+        serde_json::Number::from_f64(value).map(Self::Number)
+    }
+
+    pub fn thinking_enabled() -> Self {
+        Self::Variable(ChatTemplateKwargVariable {
+            variable: ChatTemplateVariable::ThinkingEnabled,
+            omit_when_off: false,
+        })
+    }
+
+    pub fn thinking_effort(omit_when_off: bool) -> Self {
+        Self::Variable(ChatTemplateKwargVariable {
+            variable: ChatTemplateVariable::ThinkingEffort,
+            omit_when_off,
+        })
+    }
+}
+
+impl From<String> for ChatTemplateKwargValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for ChatTemplateKwargValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<bool> for ChatTemplateKwargValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+macro_rules! impl_chat_template_kwarg_number {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl From<$type> for ChatTemplateKwargValue {
+                fn from(value: $type) -> Self {
+                    Self::Number(value.into())
+                }
+            }
+        )+
+    };
+}
+
+impl_chat_template_kwarg_number!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTemplateKwargVariable {
+    #[serde(rename = "$var")]
+    pub variable: ChatTemplateVariable,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub omit_when_off: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatTemplateVariable {
+    #[serde(rename = "thinking.enabled")]
+    ThinkingEnabled,
+    #[serde(rename = "thinking.effort")]
+    ThinkingEffort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1358,5 +1450,76 @@ mod tests {
                 "id": "gpt-5.5"
             })
         );
+    }
+
+    #[test]
+    fn max_thinking_level_round_trips() {
+        assert_eq!(
+            serde_json::to_value(ThinkingLevel::Max).unwrap(),
+            json!("max")
+        );
+        assert_eq!(
+            serde_json::from_value::<ThinkingLevel>(json!("max")).unwrap(),
+            ThinkingLevel::Max
+        );
+        assert_eq!(
+            serde_json::to_value(ModelThinkingLevel::Max).unwrap(),
+            json!("max")
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelThinkingLevel>(json!("max")).unwrap(),
+            ModelThinkingLevel::Max
+        );
+        assert_eq!(
+            ModelThinkingLevel::parse("max"),
+            Some(ModelThinkingLevel::Max)
+        );
+    }
+
+    #[test]
+    fn chat_template_compat_round_trips() {
+        let compat = OpenAICompletionsCompat {
+            thinking_format: Some(OpenAIThinkingFormat::ChatTemplate),
+            chat_template_kwargs: [
+                (
+                    "enabled".to_string(),
+                    ChatTemplateKwargValue::thinking_enabled(),
+                ),
+                (
+                    "effort".to_string(),
+                    ChatTemplateKwargValue::thinking_effort(true),
+                ),
+                ("preserve".to_string(), true.into()),
+                (
+                    "temperature".to_string(),
+                    ChatTemplateKwargValue::from_f64(0.5).unwrap(),
+                ),
+                ("sentinel".to_string(), ChatTemplateKwargValue::Null(())),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&compat).unwrap();
+        let restored: OpenAICompletionsCompat = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(value["thinkingFormat"], json!("chat-template"));
+        assert_eq!(
+            value["chatTemplateKwargs"]["enabled"],
+            json!({ "$var": "thinking.enabled" })
+        );
+        assert_eq!(
+            value["chatTemplateKwargs"]["effort"],
+            json!({ "$var": "thinking.effort", "omitWhenOff": true })
+        );
+        assert_eq!(value["chatTemplateKwargs"]["temperature"], json!(0.5));
+        assert_eq!(value["chatTemplateKwargs"]["sentinel"], Value::Null);
+        assert_eq!(restored, compat);
+    }
+
+    #[test]
+    fn chat_template_float_values_reject_non_finite_numbers() {
+        assert!(ChatTemplateKwargValue::from_f64(f64::NAN).is_none());
+        assert!(ChatTemplateKwargValue::from_f64(f64::INFINITY).is_none());
     }
 }

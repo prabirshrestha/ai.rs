@@ -1,12 +1,13 @@
 use crate::types::{Model, ModelThinkingLevel, Usage, UsageCost};
 
-const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 6] = [
+const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
     ModelThinkingLevel::Off,
     ModelThinkingLevel::Minimal,
     ModelThinkingLevel::Low,
     ModelThinkingLevel::Medium,
     ModelThinkingLevel::High,
     ModelThinkingLevel::Xhigh,
+    ModelThinkingLevel::Max,
 ];
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
     usage.cost.input = (model.cost.input / 1_000_000.0) * usage.input as f64;
@@ -30,7 +31,7 @@ pub fn get_supported_thinking_levels(model: &Model) -> Vec<ModelThinkingLevel> {
             if matches!(mapped, Some(None)) {
                 return false;
             }
-            if *level == ModelThinkingLevel::Xhigh {
+            if matches!(level, ModelThinkingLevel::Xhigh | ModelThinkingLevel::Max) {
                 return mapped.is_some();
             }
             true
@@ -98,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_thinking_levels_match_xhigh_metadata() {
+    fn supported_thinking_levels_match_extended_metadata() {
         let mut gpt55_pro = Model {
             reasoning: true,
             ..Model::default()
@@ -111,6 +112,9 @@ mod tests {
         gpt55_pro
             .thinking_level_map
             .insert("xhigh".to_string(), Some("high".to_string()));
+        gpt55_pro
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
 
         assert_eq!(
             get_supported_thinking_levels(&gpt55_pro),
@@ -118,7 +122,59 @@ mod tests {
                 ModelThinkingLevel::Medium,
                 ModelThinkingLevel::High,
                 ModelThinkingLevel::Xhigh,
+                ModelThinkingLevel::Max,
             ]
+        );
+    }
+
+    #[test]
+    fn max_is_opt_in_for_ordinary_reasoning_models() {
+        let model = Model {
+            reasoning: true,
+            ..Model::default()
+        };
+
+        assert_eq!(
+            get_supported_thinking_levels(&model),
+            vec![
+                ModelThinkingLevel::Off,
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+            ]
+        );
+        assert_eq!(
+            clamp_thinking_level(&model, ModelThinkingLevel::Max),
+            ModelThinkingLevel::High
+        );
+    }
+
+    #[test]
+    fn unsupported_xhigh_clamps_up_to_supported_max() {
+        let mut model = Model {
+            reasoning: true,
+            ..Model::default()
+        };
+        model.thinking_level_map.insert("xhigh".to_string(), None);
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+
+        assert_eq!(
+            get_supported_thinking_levels(&model),
+            vec![
+                ModelThinkingLevel::Off,
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+                ModelThinkingLevel::Max,
+            ]
+        );
+        assert_eq!(
+            clamp_thinking_level(&model, ModelThinkingLevel::Xhigh),
+            ModelThinkingLevel::Max
         );
     }
 

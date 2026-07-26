@@ -1279,6 +1279,7 @@ fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) -> Ant
         ModelThinkingLevel::Minimal | ModelThinkingLevel::Low => AnthropicEffort::Low,
         ModelThinkingLevel::Medium => AnthropicEffort::Medium,
         ModelThinkingLevel::High => AnthropicEffort::High,
+        ModelThinkingLevel::Xhigh | ModelThinkingLevel::Max => AnthropicEffort::High,
         _ => AnthropicEffort::High,
     }
 }
@@ -2004,6 +2005,49 @@ mod tests {
             json!({ "type": "adaptive", "display": "summarized" })
         );
         assert_eq!(payload["output_config"], json!({ "effort": "xhigh" }));
+    }
+
+    #[test]
+    fn maps_max_reasoning_to_effort_max_for_adaptive_models() {
+        let mut model = anthropic_model("vendor--claude-opus-latest");
+        model.provider = "vendor-proxy".to_string();
+        model.compat.anthropic_messages.force_adaptive_thinking = Some(true);
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(true),
+                effort: Some(map_thinking_level_to_effort(
+                    &model,
+                    ModelThinkingLevel::Max,
+                )),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["output_config"], json!({ "effort": "max" }));
+    }
+
+    #[test]
+    fn unmapped_extended_reasoning_levels_fall_back_to_high() {
+        let model = anthropic_model("vendor--claude-opus-latest");
+
+        assert_eq!(
+            map_thinking_level_to_effort(&model, ModelThinkingLevel::Xhigh),
+            AnthropicEffort::High
+        );
+        assert_eq!(
+            map_thinking_level_to_effort(&model, ModelThinkingLevel::Max),
+            AnthropicEffort::High
+        );
     }
 
     #[test]

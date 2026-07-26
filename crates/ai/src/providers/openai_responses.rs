@@ -1259,12 +1259,12 @@ fn openai_error_message(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     use super::*;
-    use crate::types::{Message, ModelCost, ResponseHook, ToolResultMessage};
+    use crate::types::{Message, ModelCost, PayloadHook, ResponseHook, ToolResultMessage};
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1468,6 +1468,69 @@ mod tests {
         assert_eq!(payload["input"][0]["role"], "developer");
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[tokio::test]
+    async fn stream_simple_sends_mapped_max_reasoning_to_responses_api() {
+        let body = sse_body(&[json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_max",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "input_tokens_details": { "cached_tokens": 0 }
+                }
+            }
+        })]);
+        let mut model = model();
+        model.provider = "custom-openai-compatible".to_string();
+        model.base_url = spawn_sse_server(body).await;
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+
+        let captured_payload = Arc::new(Mutex::new(None));
+        let hook_capture = Arc::clone(&captured_payload);
+        let on_payload: PayloadHook = Arc::new(move |payload, _model| {
+            let hook_capture = Arc::clone(&hook_capture);
+            Box::pin(async move {
+                *hook_capture.lock().unwrap() = Some(payload.clone());
+                Ok(Some(payload))
+            })
+        });
+
+        let stream = stream_simple_openai_responses(
+            model,
+            Context {
+                system_prompt: Some("You are a helpful assistant.".to_string()),
+                messages: vec![Message::user_text("Hello")],
+                ..Default::default()
+            },
+            SimpleStreamOptions {
+                stream: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    on_payload: Some(on_payload),
+                    ..Default::default()
+                },
+                reasoning: Some(ModelThinkingLevel::Max),
+                ..Default::default()
+            },
+        )
+        .expect("stream");
+
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .expect("final message");
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        let payload = captured_payload.lock().unwrap().take().expect("payload");
+        assert_eq!(
+            payload["reasoning"],
+            json!({ "effort": "max", "summary": "auto" })
+        );
     }
 
     #[test]
