@@ -1113,11 +1113,23 @@ fn parse_response_usage(raw: &Value, model: &Model) -> Usage {
         .pointer("/input_tokens_details/cached_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
+    let cache_write_tokens = raw
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let reasoning = raw
+        .pointer("/output_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
     let mut usage = Usage {
-        input: input_tokens.saturating_sub(cached_tokens),
+        input: input_tokens
+            .saturating_sub(cached_tokens)
+            .saturating_sub(cache_write_tokens),
         output: output_tokens,
         cache_read: cached_tokens,
-        cache_write: 0,
+        cache_write: cache_write_tokens,
+        cache_write_1h: None,
+        reasoning: Some(reasoning),
         total_tokens: raw.get("total_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
         cost: Default::default(),
     };
@@ -2844,6 +2856,7 @@ mod tests {
             output: 4.0,
             cache_read: 0.0,
             cache_write: 0.0,
+            tiers: Vec::new(),
         };
 
         let stream = stream_openai_responses(
@@ -3151,6 +3164,31 @@ mod tests {
             assert_eq!(usage.cost.cache_write, 3.0 * multiplier);
             assert_eq!(usage.cost.total, 10.0 * multiplier);
         }
+    }
+
+    #[test]
+    fn response_usage_reports_reasoning_and_separate_cache_writes() {
+        let model = model();
+        let usage = parse_response_usage(
+            &json!({
+                "input_tokens": 100,
+                "output_tokens": 33,
+                "total_tokens": 133,
+                "input_tokens_details": {
+                    "cached_tokens": 50,
+                    "cache_write_tokens": 30
+                },
+                "output_tokens_details": { "reasoning_tokens": 21 }
+            }),
+            &model,
+        );
+
+        assert_eq!(usage.input, 20);
+        assert_eq!(usage.cache_read, 50);
+        assert_eq!(usage.cache_write, 30);
+        assert_eq!(usage.output, 33);
+        assert_eq!(usage.reasoning, Some(21));
+        assert_eq!(usage.total_tokens, 133);
     }
 
     #[tokio::test]

@@ -1100,6 +1100,18 @@ fn update_anthropic_usage(output: &mut AssistantMessage, usage: &Value, model: &
     {
         output.usage.cache_write = cache_write as u32;
     }
+    if let Some(cache_write_1h) = usage
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        output.usage.cache_write_1h = Some(cache_write_1h as u32);
+    }
+    if let Some(reasoning) = usage
+        .pointer("/output_tokens_details/thinking_tokens")
+        .and_then(Value::as_u64)
+    {
+        output.usage.reasoning = Some(reasoning as u32);
+    }
     output.usage.total_tokens = output.usage.input
         + output.usage.output
         + output.usage.cache_read
@@ -1380,6 +1392,161 @@ mod tests {
             max_tokens: 1024,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prices_one_hour_cache_writes_and_reports_reasoning_usage() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.cost = ModelCost {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.5,
+            cache_write: 6.25,
+            ..Default::default()
+        };
+        let mut output = AssistantMessage::empty_for(&model);
+
+        update_anthropic_usage(
+            &mut output,
+            &json!({
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 600_000,
+                    "ephemeral_1h_input_tokens": 400_000
+                },
+                "output_tokens_details": { "thinking_tokens": 40 }
+            }),
+            &model,
+        );
+
+        assert_eq!(output.usage.cache_write, 1_000_000);
+        assert_eq!(output.usage.cache_write_1h, Some(400_000));
+        assert_eq!(output.usage.reasoning, Some(40));
+        assert_eq!(output.usage.output, 50);
+        assert_eq!(output.usage.cost.cache_write, 7.75);
+    }
+
+    #[test]
+    fn cache_write_pricing_falls_back_when_anthropic_omits_breakdown() {
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.cost = ModelCost {
+            input: 5.0,
+            cache_write: 6.25,
+            ..Default::default()
+        };
+        let mut output = AssistantMessage::empty_for(&model);
+
+        update_anthropic_usage(
+            &mut output,
+            &json!({ "cache_creation_input_tokens": 1_000_000 }),
+            &model,
+        );
+
+        assert_eq!(output.usage.cache_write_1h, None);
+        assert_eq!(output.usage.cost.cache_write, 6.25);
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_reports_reasoning_and_one_hour_cache_write_usage() {
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_usage",
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 1_000_000,
+                            "cache_creation": {
+                                "ephemeral_5m_input_tokens": 600_000,
+                                "ephemeral_1h_input_tokens": 400_000
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "Hi" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" },
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 1_000_000,
+                        "output_tokens_details": { "thinking_tokens": 40 }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ]);
+        let mut model = anthropic_model("claude-opus-4-8");
+        model.base_url = spawn_sse_server(body).await;
+        model.cost = ModelCost {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.5,
+            cache_write: 6.25,
+            ..Default::default()
+        };
+
+        let result = crate::stream::final_message_from_stream(stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("hi")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.usage.output, 50);
+        assert_eq!(result.usage.reasoning, Some(40));
+        assert_eq!(result.usage.cache_write, 1_000_000);
+        assert_eq!(result.usage.cache_write_1h, Some(400_000));
+        assert_eq!(result.usage.cost.cache_write, 7.75);
     }
 
     #[tokio::test(flavor = "current_thread")]

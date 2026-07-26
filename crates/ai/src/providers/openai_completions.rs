@@ -1111,6 +1111,10 @@ fn parse_chunk_usage(raw: &Value, model: &Model) -> Usage {
         .and_then(|details| details.get("cache_write_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
+    let reasoning = raw
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
     let mut usage = Usage {
         input: prompt_tokens
             .saturating_sub(cache_read)
@@ -1118,6 +1122,8 @@ fn parse_chunk_usage(raw: &Value, model: &Model) -> Usage {
         output: completion_tokens,
         cache_read,
         cache_write,
+        cache_write_1h: None,
+        reasoning: Some(reasoning),
         total_tokens: prompt_tokens + completion_tokens,
         cost: Default::default(),
     };
@@ -3198,6 +3204,7 @@ mod tests {
             .unwrap();
         assert_eq!(message.usage.input, 10);
         assert_eq!(message.usage.output, 33);
+        assert_eq!(message.usage.reasoning, Some(21));
         assert_eq!(message.usage.total_tokens, 43);
     }
 
