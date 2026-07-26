@@ -888,7 +888,13 @@ fn apply_reasoning_options(
         .or_else(|| effort.map(|effort| effort.as_str().to_string()));
 
     match compat.thinking_format {
-        OpenAIThinkingFormat::Zai | OpenAIThinkingFormat::Qwen => {
+        OpenAIThinkingFormat::Zai => {
+            object.insert(
+                "thinking".to_string(),
+                json!({ "type": if mapped_effort.is_some() { "enabled" } else { "disabled" } }),
+            );
+        }
+        OpenAIThinkingFormat::Qwen => {
             object.insert(
                 "enable_thinking".to_string(),
                 json!(mapped_effort.is_some()),
@@ -5133,6 +5139,39 @@ mod tests {
 
         assert_eq!(supported_payload["thinking"], json!({ "type": "enabled" }));
         assert_eq!(supported_payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn zai_thinking_payload_uses_provider_type_object() {
+        let mut model = model();
+        model.compat.openai_completions.thinking_format = Some(OpenAIThinkingFormat::Zai);
+        let context = Context {
+            messages: vec![Message::user_text("hi")],
+            ..Default::default()
+        };
+
+        let enabled = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions {
+                reasoning_effort: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+        let disabled = build_chat_completions_payload(
+            &model,
+            &context,
+            &OpenAICompletionsOptions::default(),
+            &get_compat(&model),
+            CacheRetention::Short,
+        );
+
+        assert_eq!(enabled["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(disabled["thinking"], json!({ "type": "disabled" }));
+        assert!(enabled.get("enable_thinking").is_none());
+        assert!(disabled.get("enable_thinking").is_none());
     }
 
     #[test]
