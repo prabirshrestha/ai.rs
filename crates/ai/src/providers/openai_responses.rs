@@ -25,7 +25,7 @@ use crate::types::{
     ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
 };
 use crate::utils::hash::short_hash;
-use crate::utils::headers::apply_provider_headers;
+use crate::utils::headers::{apply_provider_headers, has_non_empty_header};
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::provider_env::get_provider_env_value;
@@ -60,9 +60,11 @@ pub fn stream_simple_openai_responses(
     context: Context,
     options: SimpleStreamOptions,
 ) -> crate::Result<crate::AssistantEventStream> {
-    let Some(api_key) = options.stream.api_key.clone() else {
-        return Err(crate::Error::MissingApiKey(model.provider));
-    };
+    let api_key = client_api_key(
+        &model.provider,
+        options.stream.api_key.clone(),
+        &options.stream.headers,
+    )?;
     let base = build_base_options(&model, &context, &options, Some(api_key));
     let reasoning_effort = options.reasoning.and_then(|reasoning| {
         let clamped = clamp_thinking_level(&model, reasoning);
@@ -298,12 +300,12 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let Some(api_key) = options.base.api_key.clone() else {
-        return Err(StreamFailure::new(
-            output,
-            format!("No API key for provider: {}", model.provider),
-        ));
-    };
+    let api_key = client_api_key(
+        &model.provider,
+        options.base.api_key.clone(),
+        &options.base.headers,
+    )
+    .map_err(|error| StreamFailure::new(output.clone(), error))?;
     let compat = get_compat(&model);
     let grammar_tool_input_properties = match create_grammar_tool_input_properties(
         &context.tools,
@@ -1731,6 +1733,22 @@ fn headers(
     Ok(headers)
 }
 
+fn client_api_key(
+    provider: &str,
+    api_key: Option<String>,
+    headers: &crate::types::ProviderHeaders,
+) -> Result<String> {
+    if let Some(api_key) = api_key {
+        return Ok(api_key);
+    }
+    if has_non_empty_header(headers, "authorization")
+        || has_non_empty_header(headers, "cf-aig-authorization")
+    {
+        return Ok("unused".to_string());
+    }
+    Err(Error::MissingApiKey(provider.to_string()))
+}
+
 fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
@@ -1956,6 +1974,55 @@ mod tests {
         })));
     }
 
+    #[test]
+    fn rejects_invalid_replayed_grammar_tool_arguments() {
+        let mut replay_model = model();
+        replay_model
+            .compat
+            .openai_responses
+            .supports_openai_grammar_tools = Some(true);
+        for arguments in [json!({}), json!({ "payload": 42 })] {
+            let context = Context {
+                messages: vec![Message::Assistant(AssistantMessage {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_1|ctc_1".to_string(),
+                        name: "sample_tool".to_string(),
+                        arguments,
+                        thought_signature: None,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    ..AssistantMessage::empty_for(&replay_model)
+                })],
+                tools: vec![constrained_tool(ConstrainedSamplingConfig::Grammar {
+                    variants: GrammarVariants {
+                        openai_lark: Some("start: /[a-z]+/".to_string()),
+                        openai_regex: None,
+                    },
+                })],
+                ..Default::default()
+            };
+            let grammar_tool_input_properties =
+                create_grammar_tool_input_properties(&context.tools, true).unwrap();
+
+            assert_eq!(
+                try_convert_responses_messages(
+                    &replay_model,
+                    &context,
+                    &["openai"].into_iter().collect(),
+                    true,
+                    true,
+                    &grammar_tool_input_properties,
+                    &HashMap::new(),
+                    false,
+                    true,
+                )
+                .unwrap_err()
+                .to_string(),
+                "Grammar tool call \"sample_tool\" requires argument \"payload\" to be a string."
+            );
+        }
+    }
+
     fn reasoning_model_with_off_support(id: &str) -> Model {
         let mut model = model();
         model.id = id.to_string();
@@ -2073,6 +2140,22 @@ mod tests {
         };
 
         assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "openai"));
+    }
+
+    #[test]
+    fn stream_simple_accepts_header_only_auth() {
+        for header in ["Authorization", "cf-aig-authorization"] {
+            let mut options = SimpleStreamOptions::default();
+            options
+                .stream
+                .headers
+                .insert(header, Some("Bearer gateway-token".to_string()));
+
+            assert!(
+                stream_simple_openai_responses(model(), Context::default(), options).is_ok(),
+                "{header}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3955,6 +4038,89 @@ mod tests {
 
         assert_eq!(result.stop_reason, StopReason::Stop);
         assert_eq!(result.response_id.as_deref(), Some("resp_completed"));
+    }
+
+    #[tokio::test]
+    async fn stream_ending_before_terminal_event_returns_error() {
+        let body = sse_body(&[
+            json!({
+                "type": "response.created",
+                "response": { "id": "resp_early_eof" }
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": { "type": "reasoning", "id": "rs_early_eof", "summary": [] }
+            }),
+            json!({
+                "type": "response.reasoning_text.delta",
+                "output_index": 0,
+                "delta": "partial reasoning before the stream ends"
+            }),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("OpenAI Responses stream ended before a terminal response event")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_event_returns_provider_error() {
+        let body = sse_body(&[json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_failed",
+                "status": "failed",
+                "error": { "code": "server_error", "message": "boom" }
+            }
+        })]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some("server_error: boom"));
     }
 
     #[tokio::test]

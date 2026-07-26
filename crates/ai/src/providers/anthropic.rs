@@ -25,6 +25,7 @@ use crate::types::{
     StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolResultContent,
     UserContent, UserMessageContent,
 };
+use crate::utils::headers::has_non_empty_header;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
 use crate::utils::provider_env::get_provider_env_value;
@@ -307,7 +308,7 @@ pub fn stream_simple_anthropic(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    if api_key.is_none() && !has_authorization_header(&options.stream.headers) {
+    if api_key.is_none() && !has_request_auth(&options.stream.headers) {
         return Err(crate::Error::MissingApiKey(model.provider));
     }
     let base = build_base_options(&model, &context, &options, api_key);
@@ -438,7 +439,7 @@ async fn run_stream(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    if api_key.is_none() && !has_authorization_header(&options.base.headers) {
+    if api_key.is_none() && !has_request_auth(&options.base.headers) {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
@@ -1541,13 +1542,10 @@ fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
-fn has_authorization_header(headers: &crate::types::ProviderHeaders) -> bool {
-    headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("authorization")
-            && value
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-    })
+fn has_request_auth(headers: &crate::types::ProviderHeaders) -> bool {
+    ["authorization", "x-api-key", "cf-aig-authorization"]
+        .into_iter()
+        .any(|name| has_non_empty_header(headers, name))
 }
 
 fn has_authorization_override(headers: &crate::types::ProviderHeaders) -> bool {
@@ -2190,6 +2188,27 @@ mod tests {
         };
 
         assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "anthropic"));
+    }
+
+    #[test]
+    fn stream_simple_accepts_header_only_auth() {
+        for header in ["Authorization", "x-api-key", "cf-aig-authorization"] {
+            let mut options = SimpleStreamOptions::default();
+            options
+                .stream
+                .headers
+                .insert(header, Some("gateway-token".to_string()));
+
+            assert!(
+                stream_simple_anthropic(
+                    anthropic_model("claude-sonnet-4-5"),
+                    Context::default(),
+                    options,
+                )
+                .is_ok(),
+                "{header}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3768,6 +3787,95 @@ mod tests {
             tool_call.arguments,
             json!({ "path": "A\\H", "text": "col1\tcol2" })
         );
+    }
+
+    #[tokio::test]
+    async fn message_delta_without_usage_preserves_start_usage() {
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_sparse_usage",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "Hello" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let result = crate::stream::final_message_from_stream(stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("Say hello.")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "Hello".to_string(),
+                text_signature: None,
+            })]
+        );
+        assert_eq!(result.usage.input, 12);
+        assert_eq!(result.usage.total_tokens, 12);
     }
 
     #[tokio::test]

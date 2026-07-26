@@ -1,5 +1,7 @@
 use crate::AssistantEventStream;
-use crate::env_api_keys::{KnownProvider, get_anthropic_auth_token, get_env_api_key};
+use crate::env_api_keys::{
+    KnownProvider, get_anthropic_auth_token_with_env, get_env_api_key_with_env,
+};
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions, StreamOptions,
 };
@@ -24,7 +26,7 @@ fn with_env_api_key(model: &Model, mut options: StreamOptions) -> StreamOptions 
     }
     if model.provider == KnownProvider::Anthropic.as_str() {
         if !has_authorization_override(&options)
-            && let Some(auth_token) = get_anthropic_auth_token()
+            && let Some(auth_token) = get_anthropic_auth_token_with_env(&options.env)
         {
             options
                 .headers
@@ -34,7 +36,7 @@ fn with_env_api_key(model: &Model, mut options: StreamOptions) -> StreamOptions 
             return options;
         }
     }
-    if let Some(api_key) = get_env_api_key(&model.provider) {
+    if let Some(api_key) = get_env_api_key_with_env(&model.provider, &options.env) {
         options.api_key = Some(api_key);
     }
     options
@@ -290,6 +292,53 @@ mod tests {
         openai.restore();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_env_api_key_takes_precedence_over_process_env() {
+        let _guard = ENV_LOCK.lock().await;
+        let openai = SavedEnv::capture("OPENAI_API_KEY");
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "process-openai-key");
+        }
+
+        let observed_key = Arc::new(Mutex::new(None));
+        let api = Arc::new(TestLanguageModelApi {
+            api: "stream-scoped-env-key-test",
+            observed_key: Arc::clone(&observed_key),
+        });
+        let options = SimpleStreamOptions {
+            stream: StreamOptions {
+                env: [(
+                    "OPENAI_API_KEY".to_string(),
+                    "scoped-openai-key".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let events = stream_simple(
+            test_model("stream-scoped-env-key-test", Some(api)),
+            Context::default(),
+            Some(options),
+        )
+        .expect("stream_simple should dispatch");
+        let _message = crate::stream::final_message_from_stream(events)
+            .await
+            .expect("stream result");
+
+        assert_eq!(
+            observed_key
+                .lock()
+                .expect("observed key lock poisoned")
+                .as_deref(),
+            Some("scoped-openai-key")
+        );
+
+        openai.restore();
+    }
+
     #[test]
     fn anthropic_auth_token_precedes_oauth_and_api_key_at_dispatch() {
         use crate::env_api_keys::{
@@ -322,6 +371,40 @@ mod tests {
         auth.restore();
         oauth.restore();
         api_key.restore();
+    }
+
+    #[test]
+    fn scoped_anthropic_auth_token_precedes_process_auth_token_at_dispatch() {
+        use crate::env_api_keys::{ANTHROPIC_AUTH_TOKEN_ENV_VAR, ENV_LOCK as ANTHROPIC_ENV_LOCK};
+
+        let _guard = ANTHROPIC_ENV_LOCK.lock().expect("env lock poisoned");
+        let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+        unsafe {
+            std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "process-auth-token");
+        }
+        let model = Model {
+            provider: KnownProvider::Anthropic.as_str().to_string(),
+            ..Model::default()
+        };
+        let options = StreamOptions {
+            env: [(
+                ANTHROPIC_AUTH_TOKEN_ENV_VAR.to_string(),
+                "scoped-auth-token".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let options = with_env_api_key(&model, options);
+
+        assert_eq!(options.api_key, None);
+        assert_eq!(
+            options.headers.get("Authorization"),
+            Some(&Some("Bearer scoped-auth-token".to_string()))
+        );
+
+        auth.restore();
     }
 
     #[test]

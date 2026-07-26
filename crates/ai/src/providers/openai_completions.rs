@@ -25,7 +25,7 @@ use crate::types::{
     ThinkingContent, Tool, ToolCall, ToolResultContent, Usage, UserContent, UserMessageContent,
 };
 use crate::utils::hash::short_hash;
-use crate::utils::headers::apply_provider_headers;
+use crate::utils::headers::{apply_provider_headers, has_non_empty_header};
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::parse_streaming_json;
 use crate::utils::provider_env::get_provider_env_value;
@@ -69,9 +69,11 @@ pub fn stream_simple_openai_completions(
     context: Context,
     options: SimpleStreamOptions,
 ) -> crate::Result<crate::AssistantEventStream> {
-    let Some(api_key) = options.stream.api_key.clone() else {
-        return Err(crate::Error::MissingApiKey(model.provider));
-    };
+    let api_key = client_api_key(
+        &model.provider,
+        options.stream.api_key.clone(),
+        &options.stream.headers,
+    )?;
     let base = build_base_options(&model, &context, &options, Some(api_key));
     let reasoning_effort = options.reasoning.and_then(|reasoning| {
         let clamped = clamp_thinking_level(&model, reasoning);
@@ -160,12 +162,12 @@ async fn run_stream(
         return Err(StreamFailure::cancelled(output));
     }
 
-    let Some(api_key) = options.base.api_key.clone() else {
-        return Err(StreamFailure::new(
-            output,
-            format!("No API key for provider: {}", model.provider),
-        ));
-    };
+    let api_key = client_api_key(
+        &model.provider,
+        options.base.api_key.clone(),
+        &options.base.headers,
+    )
+    .map_err(|error| StreamFailure::new(output.clone(), error))?;
     let compat = get_compat(&model);
     let grammar_tool_input_properties = match create_grammar_tool_input_properties(
         &context.tools,
@@ -1722,6 +1724,22 @@ fn headers(
     Ok(headers)
 }
 
+fn client_api_key(
+    provider: &str,
+    api_key: Option<String>,
+    headers: &crate::types::ProviderHeaders,
+) -> Result<String> {
+    if let Some(api_key) = api_key {
+        return Ok(api_key);
+    }
+    if has_non_empty_header(headers, "authorization")
+        || has_non_empty_header(headers, "cf-aig-authorization")
+    {
+        return Ok("unused".to_string());
+    }
+    Err(Error::MissingApiKey(provider.to_string()))
+}
+
 fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
@@ -1882,6 +1900,22 @@ mod tests {
         };
 
         assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "openai"));
+    }
+
+    #[test]
+    fn stream_simple_accepts_header_only_auth() {
+        for header in ["Authorization", "cf-aig-authorization"] {
+            let mut options = SimpleStreamOptions::default();
+            options
+                .stream
+                .headers
+                .insert(header, Some("Bearer gateway-token".to_string()));
+
+            assert!(
+                stream_simple_openai_completions(model(), Context::default(), options).is_ok(),
+                "{header}"
+            );
+        }
     }
 
     #[test]
