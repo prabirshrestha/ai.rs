@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -12,6 +14,7 @@ use super::*;
 
 const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+const COPILOT_API_VERSION: &str = "2026-06-01";
 
 const COPILOT_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 
@@ -22,6 +25,7 @@ const DEFAULT_COPILOT_BASE_URL: &str = "https://api.individual.githubcopilot.com
 const GITHUB_COPILOT_REFRESH_TOKEN_KEY: &str = "githubRefreshToken";
 
 const GITHUB_COPILOT_ACCESS_EXPIRES_KEY: &str = "githubAccessExpires";
+const GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY: &str = "availableModelIds";
 
 const GITHUB_ACCESS_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 
@@ -204,13 +208,15 @@ pub async fn refresh_github_copilot_token(
     enterprise_domain: Option<&str>,
 ) -> Result<OAuthCredentials> {
     let token = mint_copilot_token(refresh_token, enterprise_domain).await?;
-    Ok(copilot_credentials_from_token(
+    let mut credentials = copilot_credentials_from_token(
         refresh_token,
         None,
         None,
         enterprise_domain.and_then(normalize_domain),
         token,
-    ))
+    );
+    set_available_copilot_model_ids(&mut credentials, enterprise_domain).await?;
+    Ok(credentials)
 }
 
 /// Refreshes GitHub Copilot credentials, renewing the underlying GitHub user
@@ -264,13 +270,15 @@ async fn refresh_github_copilot_credentials(
         }
     };
 
-    Ok(copilot_credentials_from_token(
+    let mut credentials = copilot_credentials_from_token(
         &github_access,
         github_refresh.as_deref(),
         github_expires,
-        enterprise_domain,
+        enterprise_domain.clone(),
         token,
-    ))
+    );
+    set_available_copilot_model_ids(&mut credentials, domain).await?;
+    Ok(credentials)
 }
 
 /// Exchanges a GitHub refresh token (`ghr_`) for a fresh user access token using
@@ -355,13 +363,15 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     let github_expires = github.expires_in.map(github_access_expiry_ms);
     let token = mint_copilot_token(&github.access_token, enterprise_domain.as_deref()).await?;
 
-    Ok(copilot_credentials_from_token(
+    let mut credentials = copilot_credentials_from_token(
         &github.access_token,
         github.refresh_token.as_deref(),
         github_expires,
         enterprise_domain,
         token,
-    ))
+    );
+    set_available_copilot_model_ids(&mut credentials, Some(domain.as_str())).await?;
+    Ok(credentials)
 }
 
 pub fn modify_github_copilot_models(
@@ -370,15 +380,103 @@ pub fn modify_github_copilot_models(
 ) -> Vec<Model> {
     let domain = github_copilot_enterprise_domain(credentials).and_then(normalize_domain);
     let base_url = get_github_copilot_base_url(Some(&credentials.access), domain.as_deref());
+    let available_model_ids = available_copilot_model_ids(credentials);
     models
         .into_iter()
-        .map(|mut model| {
+        .filter_map(|mut model| {
             if model.provider == "github-copilot" {
+                if available_model_ids
+                    .as_ref()
+                    .is_some_and(|ids| !ids.contains(model.id.as_str()))
+                {
+                    return None;
+                }
                 model.base_url = base_url.clone();
             }
-            model
+            Some(model)
         })
         .collect()
+}
+
+fn available_copilot_model_ids(credentials: &OAuthCredentials) -> Option<HashSet<&str>> {
+    let ids = credentials
+        .extra
+        .get(GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY)?
+        .as_array()?;
+    ids.iter().map(Value::as_str).collect()
+}
+
+async fn set_available_copilot_model_ids(
+    credentials: &mut OAuthCredentials,
+    enterprise_domain: Option<&str>,
+) -> Result<()> {
+    let ids = fetch_available_copilot_model_ids(&credentials.access, enterprise_domain).await?;
+    credentials.extra.insert(
+        GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY.to_string(),
+        Value::Array(ids.into_iter().map(Value::String).collect()),
+    );
+    Ok(())
+}
+
+async fn fetch_available_copilot_model_ids(
+    copilot_token: &str,
+    enterprise_domain: Option<&str>,
+) -> Result<Vec<String>> {
+    let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    fetch_available_copilot_model_ids_at(&client, &base_url, copilot_token).await
+}
+
+async fn fetch_available_copilot_model_ids_at(
+    client: &reqwest::Client,
+    base_url: &str,
+    copilot_token: &str,
+) -> Result<Vec<String>> {
+    let response = client
+        .get(format!("{base_url}/models"))
+        .headers(copilot_headers(Some(copilot_token))?)
+        .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
+        .send()
+        .await?;
+    let response = error_for_status(response).await?;
+    parse_available_copilot_model_ids(response.json::<Value>().await?)
+}
+
+fn parse_available_copilot_model_ids(raw: Value) -> Result<Vec<String>> {
+    let Some(data) = raw
+        .as_object()
+        .and_then(|object| object.get("data"))
+        .and_then(Value::as_array)
+    else {
+        return Err(Error::Provider(
+            "Invalid Copilot models response".to_string(),
+        ));
+    };
+
+    Ok(data
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|item| item.get("model_picker_enabled").and_then(Value::as_bool) == Some(true))
+        .filter(|item| {
+            item.get("policy")
+                .and_then(Value::as_object)
+                .and_then(|policy| policy.get("state"))
+                .and_then(Value::as_str)
+                != Some("disabled")
+        })
+        .filter(|item| {
+            item.get("capabilities")
+                .and_then(Value::as_object)
+                .and_then(|capabilities| capabilities.get("supports"))
+                .and_then(Value::as_object)
+                .and_then(|supports| supports.get("tool_calls"))
+                .and_then(Value::as_bool)
+                != Some(false)
+        })
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect())
 }
 
 async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
@@ -722,6 +820,145 @@ mod tests {
 
         assert_eq!(updated[0].base_url, "https://api.enterprise.example.com");
         assert_eq!(updated[1].base_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn provider_filters_copilot_models_to_account_availability() {
+        let credentials = OAuthCredentials {
+            refresh: "refresh".to_string(),
+            access: "tid=test;proxy-ep=proxy.enterprise.example.com;exp=1".to_string(),
+            expires: 1,
+            extra: HashMap::from([(
+                GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY.to_string(),
+                serde_json::json!(["gpt-4.1"]),
+            )]),
+        };
+        let models = vec![
+            Model {
+                id: "gpt-4.1".to_string(),
+                provider: "github-copilot".to_string(),
+                ..Default::default()
+            },
+            Model {
+                id: "claude-opus-4.7".to_string(),
+                provider: "github-copilot".to_string(),
+                ..Default::default()
+            },
+            Model {
+                id: "claude-opus-4.7".to_string(),
+                provider: "anthropic".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let updated = github_copilot_oauth_provider().modify_models(models, &credentials);
+
+        assert_eq!(
+            updated
+                .iter()
+                .map(|model| (model.provider.as_str(), model.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("github-copilot", "gpt-4.1"),
+                ("anthropic", "claude-opus-4.7")
+            ]
+        );
+        assert_eq!(updated[0].base_url, "https://api.enterprise.example.com");
+    }
+
+    #[test]
+    fn parses_only_selectable_copilot_models() {
+        let ids = parse_available_copilot_model_ids(serde_json::json!({
+            "data": [
+                {
+                    "id": "gpt-4.1",
+                    "model_picker_enabled": true,
+                    "capabilities": { "supports": { "tool_calls": true } }
+                },
+                {
+                    "id": "claude-opus-4.7",
+                    "model_picker_enabled": true,
+                    "policy": { "state": "disabled" },
+                    "capabilities": { "supports": { "tool_calls": true } }
+                },
+                {
+                    "id": "gpt-5.4-nano",
+                    "model_picker_enabled": false,
+                    "capabilities": { "supports": { "tool_calls": true } }
+                },
+                {
+                    "id": "text-only",
+                    "model_picker_enabled": true,
+                    "capabilities": { "supports": { "tool_calls": false } }
+                }
+            ]
+        }))
+        .expect("models response");
+
+        assert_eq!(ids, vec!["gpt-4.1"]);
+        assert_eq!(
+            parse_available_copilot_model_ids(serde_json::json!({}))
+                .unwrap_err()
+                .to_string(),
+            "provider error: Invalid Copilot models response"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetches_available_models_with_copilot_headers() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = {
+            let captured_request = Arc::clone(&captured_request);
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                *captured_request.lock().expect("request lock poisoned") = Some(request);
+                let body = serde_json::json!({
+                    "data": [{
+                        "id": "gpt-4.1",
+                        "model_picker_enabled": true,
+                        "capabilities": { "supports": { "tool_calls": true } }
+                    }]
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            })
+        };
+        let client = reqwest::Client::new();
+
+        let ids = fetch_available_copilot_model_ids_at(
+            &client,
+            &format!("http://{addr}"),
+            "copilot-token",
+        )
+        .await
+        .expect("available models");
+        server.await.unwrap();
+
+        assert_eq!(ids, vec!["gpt-4.1"]);
+        let request = captured_request
+            .lock()
+            .expect("request lock poisoned")
+            .clone()
+            .expect("captured request");
+        assert!(request.starts_with("GET /models HTTP/1.1"), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer copilot-token"),
+            "{request}"
+        );
+        assert!(
+            request.contains("x-github-api-version: 2026-06-01"),
+            "{request}"
+        );
     }
 
     #[test]
