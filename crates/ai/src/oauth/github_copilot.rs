@@ -571,16 +571,27 @@ async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
     )
     .await?;
     let device = response.json::<DeviceCodeResponse>().await?;
-    if device.device_code.is_empty()
-        || device.user_code.is_empty()
-        || device.verification_uri.is_empty()
-        || device.expires_in == 0
-    {
+    if device.device_code.is_empty() || device.user_code.is_empty() || device.expires_in == 0 {
         return Err(Error::Provider(
             "Invalid device code response fields".to_string(),
         ));
     }
-    Ok(device)
+    Ok(DeviceCodeResponse {
+        verification_uri: normalize_verification_uri(&device.verification_uri)?,
+        ..device
+    })
+}
+
+fn normalize_verification_uri(raw: &str) -> Result<String> {
+    let verification_uri = reqwest::Url::parse(raw).map_err(|_| {
+        Error::Provider("Untrusted verification_uri in device code response".to_string())
+    })?;
+    if !matches!(verification_uri.scheme(), "http" | "https") {
+        return Err(Error::Provider(
+            "Untrusted verification_uri in device code response".to_string(),
+        ));
+    }
+    Ok(verification_uri.to_string())
 }
 
 async fn poll_for_github_access_token(
@@ -816,6 +827,30 @@ mod tests {
         assert_eq!(
             get_github_copilot_base_url(None, None),
             DEFAULT_COPILOT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn normalizes_and_rejects_untrusted_verification_uris() {
+        assert_eq!(
+            normalize_verification_uri("https://github.com/login/device").unwrap(),
+            "https://github.com/login/device"
+        );
+        assert_eq!(
+            normalize_verification_uri("https://github.com:443/login/device").unwrap(),
+            "https://github.com/login/device"
+        );
+        assert_eq!(
+            normalize_verification_uri("javascript:alert(1)")
+                .unwrap_err()
+                .to_string(),
+            "provider error: Untrusted verification_uri in device code response"
+        );
+        assert_eq!(
+            normalize_verification_uri("not a URL")
+                .unwrap_err()
+                .to_string(),
+            "provider error: Untrusted verification_uri in device code response"
         );
     }
 
