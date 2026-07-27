@@ -17,6 +17,15 @@ pub fn headers_to_record(headers: &reqwest::header::HeaderMap) -> HashMap<String
         .collect()
 }
 
+pub(crate) fn has_non_empty_header(headers: &ProviderHeaders, expected: &str) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case(expected)
+            && value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
 /// Applies per-request provider header overrides after provider defaults.
 ///
 /// A `None` value removes an existing header. `HeaderMap` names are

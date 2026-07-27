@@ -9,7 +9,7 @@ const OVERFLOW_PATTERNS: &[&str] = &[
     r"(?i)request_too_large",
     r"(?i)input is too long for requested model",
     r"(?i)exceeds the context window",
-    r"(?i)exceeds (?:the )?(?:model'?s )?maximum context length of [\d,]+ tokens?",
+    r"(?i)exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))",
     r"(?i)input token count.*exceeds the maximum",
     r"(?i)maximum prompt length is \d+",
     r"(?i)reduce the length of the messages",
@@ -24,6 +24,8 @@ const OVERFLOW_PATTERNS: &[&str] = &[
     r"(?i)too large for model with \d+ maximum context length",
     r"(?i)model_context_window_exceeded",
     r"(?i)prompt too long; exceeded (?:max )?context length",
+    r"(?i)prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?",
+    r"(?i)range of input length should be",
     r"(?i)context[_ ]length[_ ]exceeded",
     r"(?i)too many tokens",
     r"(?i)token limit exceeded",
@@ -165,6 +167,34 @@ mod tests {
             &create_error_message(
                 "Requested token count exceeds the model's maximum context length of 131072 tokens."
             ),
+            Some(131072)
+        ));
+    }
+
+    #[test]
+    fn detects_parenthesized_openai_maximum_context_length_errors() {
+        assert!(is_context_overflow(
+            &create_error_message(
+                "Input length (265330) exceeds model's maximum context length (262144)."
+            ),
+            Some(262144)
+        ));
+    }
+
+    #[test]
+    fn detects_ds4_configured_context_size_errors() {
+        assert!(is_context_overflow(
+            &create_error_message(
+                "Prompt has 131,073 tokens, but the configured context size is 131,072 tokens"
+            ),
+            Some(131072)
+        ));
+    }
+
+    #[test]
+    fn detects_dashscope_input_length_range_errors() {
+        assert!(is_context_overflow(
+            &create_error_message("Range of input length should be [1, 131072]"),
             Some(131072)
         ));
     }

@@ -278,6 +278,66 @@ let weather_tool = Tool::builder("get_weather")
     .build()?;
 ```
 
+### Constrained Sampling for Tools
+
+Tools can opt in to provider-side constrained sampling. JSON-schema constraints
+use strict tool schemas when the active provider supports them. `Prefer` falls
+back to ordinary tool calling when strict schemas are unavailable, while
+`Require` returns a validation error.
+
+```rust
+use ai::{ConstrainedSamplingConfig, ConstrainedSamplingStrict, Tool};
+use serde_json::json;
+
+let edit_file = Tool::builder("edit_file")
+    .description("Edit a file.")
+    .parameters(json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    }))
+    .constrained_sampling(ConstrainedSamplingConfig::JsonSchema {
+        strict: ConstrainedSamplingStrict::Prefer,
+    })
+    .build()?;
+```
+
+OpenAI Responses and Chat Completions can also emit native Lark or regex
+grammar tools when the model's compatibility metadata enables
+`supports_openai_grammar_tools`. Native grammar tools must use an object schema
+with exactly one required string property. When grammar tools are unsupported,
+the definition falls back to an ordinary function tool.
+
+```rust
+use ai::{ConstrainedSamplingConfig, GrammarVariants, Tool};
+use serde_json::json;
+
+let apply_patch = Tool::builder("apply_patch")
+    .description("Apply a patch.")
+    .parameters(json!({
+        "type": "object",
+        "properties": { "input": { "type": "string" } },
+        "required": ["input"],
+        "additionalProperties": false
+    }))
+    .constrained_sampling(ConstrainedSamplingConfig::Grammar {
+        variants: GrammarVariants {
+            openai_lark: Some("start: /.+/s".to_string()),
+            openai_regex: None,
+        },
+    })
+    .build()?;
+```
+
+OpenAI Responses history uses `custom_tool_call` and
+`custom_tool_call_output` for native grammar tools. Internally, streamed raw
+input is exposed through the tool's single string argument, so consumers use
+the same `ToolCall.arguments` shape for native and fallback execution.
+
 ### Handling Tool Calls
 
 Tool results use content blocks and can include both text and images.

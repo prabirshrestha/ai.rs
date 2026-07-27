@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +13,9 @@ use crate::provider::LanguageModelApi;
 
 pub type Api = String;
 pub type ProviderId = String;
+/// Provider-scoped environment overrides. Values take precedence over the
+/// process environment.
+pub type ProviderEnv = HashMap<String, String>;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderHeaders(HashMap<String, Option<String>>);
 
@@ -243,6 +246,9 @@ pub struct StreamOptions {
     pub max_retry_delay_ms: Option<u64>,
     pub http_client: Option<reqwest::Client>,
     pub metadata: Option<Value>,
+    /// Provider-scoped environment values. These take precedence over process
+    /// environment variables for provider configuration.
+    pub env: ProviderEnv,
     pub provider_options: HashMap<String, Value>,
 }
 
@@ -362,6 +368,12 @@ pub enum UserMessageContent {
     Parts(Vec<UserContent>),
 }
 
+impl Default for UserMessageContent {
+    fn default() -> Self {
+        Self::Parts(Vec::new())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCost {
     pub input: f64,
@@ -476,6 +488,10 @@ pub struct ToolResultMessage {
     pub tool_name: String,
     pub content: Vec<ToolResultContent>,
     pub details: Option<Value>,
+    /// Usage from the tool execution itself, if available. Not part of main LLM context accounting.
+    pub usage: Option<Usage>,
+    /// Names from `Context::tools` that became available after this result.
+    pub added_tool_names: Vec<String>,
     pub is_error: bool,
     pub timestamp: u64,
 }
@@ -510,6 +526,7 @@ impl<'de> Deserialize<'de> for UserMessage {
         #[derive(Deserialize)]
         struct Helper {
             role: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: UserMessageContent,
             timestamp: u64,
         }
@@ -576,6 +593,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
         #[serde(rename_all = "camelCase")]
         struct Helper {
             role: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: Vec<AssistantContent>,
             api: Api,
             provider: ProviderId,
@@ -617,6 +635,12 @@ impl Serialize for ToolResultMessage {
         if self.details.is_some() {
             field_count += 1;
         }
+        if self.usage.is_some() {
+            field_count += 1;
+        }
+        if !self.added_tool_names.is_empty() {
+            field_count += 1;
+        }
         let mut state = serializer.serialize_struct("ToolResultMessage", field_count)?;
         state.serialize_field("role", "toolResult")?;
         state.serialize_field("toolCallId", &self.tool_call_id)?;
@@ -624,6 +648,12 @@ impl Serialize for ToolResultMessage {
         state.serialize_field("content", &self.content)?;
         if let Some(details) = &self.details {
             state.serialize_field("details", details)?;
+        }
+        if let Some(usage) = &self.usage {
+            state.serialize_field("usage", usage)?;
+        }
+        if !self.added_tool_names.is_empty() {
+            state.serialize_field("addedToolNames", &self.added_tool_names)?;
         }
         state.serialize_field("isError", &self.is_error)?;
         state.serialize_field("timestamp", &self.timestamp)?;
@@ -642,8 +672,12 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             role: Option<String>,
             tool_call_id: String,
             tool_name: String,
+            #[serde(default, deserialize_with = "deserialize_null_default")]
             content: Vec<ToolResultContent>,
             details: Option<Value>,
+            usage: Option<Usage>,
+            #[serde(default)]
+            added_tool_names: Vec<String>,
             is_error: bool,
             timestamp: u64,
         }
@@ -655,10 +689,20 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
             tool_name: helper.tool_name,
             content: helper.content,
             details: helper.details,
+            usage: helper.usage,
+            added_tool_names: helper.added_tool_names,
             is_error: helper.is_error,
             timestamp: helper.timestamp,
         })
     }
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -743,10 +787,91 @@ impl Message {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConstrainedSamplingConfig {
+    JsonSchema { strict: ConstrainedSamplingStrict },
+    Grammar { variants: GrammarVariants },
+}
+
+/// A tool's constrained-sampling setting. Pi permits either an explicit
+/// `false` opt-out or a constrained-sampling configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstrainedSampling {
+    Disabled,
+    Config(ConstrainedSamplingConfig),
+}
+
+impl From<ConstrainedSamplingConfig> for ConstrainedSampling {
+    fn from(config: ConstrainedSamplingConfig) -> Self {
+        Self::Config(config)
+    }
+}
+
+impl Serialize for ConstrainedSampling {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Disabled => serializer.serialize_bool(false),
+            Self::Config(config) => config.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConstrainedSampling {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if value == Value::Bool(false) {
+            return Ok(Self::Disabled);
+        }
+        if value.is_boolean() {
+            return Err(de::Error::custom(
+                "constrainedSampling only accepts false or a configuration",
+            ));
+        }
+        serde_json::from_value(value)
+            .map(Self::Config)
+            .map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConstrainedSamplingStrict {
+    Prefer,
+    Require,
+}
+
+/// OpenAI grammar encodings supported by Pi constrained-sampling configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrammarFormat {
+    OpenaiLark,
+    OpenaiRegex,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    #[serde(
+        rename = "constrainedSampling",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub constrained_sampling: Option<ConstrainedSampling>,
 }
 
 impl Tool {
@@ -755,6 +880,7 @@ impl Tool {
             name: name.into(),
             description: None,
             parameters: None,
+            constrained_sampling: None,
         }
     }
 }
@@ -764,6 +890,7 @@ pub struct ToolBuilder {
     name: String,
     description: Option<String>,
     parameters: Option<Value>,
+    constrained_sampling: Option<ConstrainedSampling>,
 }
 
 impl ToolBuilder {
@@ -774,6 +901,11 @@ impl ToolBuilder {
 
     pub fn parameters(mut self, parameters: Value) -> Self {
         self.parameters = Some(parameters);
+        self
+    }
+
+    pub fn constrained_sampling(mut self, config: impl Into<ConstrainedSampling>) -> Self {
+        self.constrained_sampling = Some(config.into());
         self
     }
 
@@ -806,6 +938,7 @@ impl ToolBuilder {
             name,
             description,
             parameters,
+            constrained_sampling: self.constrained_sampling,
         })
     }
 }
@@ -1160,6 +1293,8 @@ pub struct OpenAICompletionsCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_strict_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_openai_grammar_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control_format: Option<CacheControlFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_session_affinity_headers: Option<bool>,
@@ -1167,6 +1302,14 @@ pub struct OpenAICompletionsCompat {
     pub session_affinity_format: Option<SessionAffinityFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferred_tools_mode: Option<DeferredToolsMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeferredToolsMode {
+    Kimi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1290,7 +1433,13 @@ pub struct OpenAIResponsesCompat {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_openai_grammar_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_explicit_prompt_cache_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tool_search: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1310,6 +1459,10 @@ pub struct AnthropicMessagesCompat {
     pub force_adaptive_thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_empty_signature: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tool_references: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1435,6 +1588,8 @@ mod tests {
                 tool_name: "read".to_string(),
                 content: vec![ToolResultContent::text("done")],
                 details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
                 is_error: false,
                 timestamp: 2,
             })
@@ -1462,6 +1617,7 @@ mod tests {
             name: "lookup".to_string(),
             description: "Lookup a value.".to_string(),
             parameters: json!({ "type": "object" }),
+            constrained_sampling: None,
         };
         let context = Context::builder()
             .system_prompt("You are concise.")
@@ -1507,6 +1663,38 @@ mod tests {
     }
 
     #[test]
+    fn constrained_sampling_matches_pi_wire_format() {
+        let disabled: ConstrainedSampling = serde_json::from_value(json!(false)).unwrap();
+        assert_eq!(disabled, ConstrainedSampling::Disabled);
+
+        let tool = Tool::builder("apply_patch")
+            .description("Apply a patch.")
+            .parameters(json!({
+                "type": "object",
+                "properties": { "input": { "type": "string" } },
+                "required": ["input"]
+            }))
+            .constrained_sampling(ConstrainedSamplingConfig::Grammar {
+                variants: GrammarVariants {
+                    openai_lark: Some("start: /.+/s".to_string()),
+                    openai_regex: None,
+                },
+            })
+            .build()
+            .unwrap();
+        let value = serde_json::to_value(&tool).unwrap();
+
+        assert_eq!(
+            value["constrainedSampling"],
+            json!({
+                "type": "grammar",
+                "variants": { "openai_lark": "start: /.+/s" }
+            })
+        );
+        assert_eq!(serde_json::from_value::<Tool>(value).unwrap(), tool);
+    }
+
+    #[test]
     fn tool_builder_validates_required_fields() {
         assert!(Tool::builder("").description("desc").build().is_err());
         assert!(Tool::builder("lookup").build().is_err());
@@ -1530,6 +1718,8 @@ mod tests {
                     tool_name: "read".to_string(),
                     content: vec![ToolResultContent::text("done")],
                     details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 2,
                 }),
@@ -1561,6 +1751,81 @@ mod tests {
                 "apiId": "openai-responses",
                 "id": "gpt-5.5"
             })
+        );
+    }
+
+    #[test]
+    fn deserializes_null_or_missing_message_content_as_empty() {
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {
+                "role": "user",
+                "content": null,
+                "timestamp": 1
+            },
+            {
+                "role": "assistant",
+                "content": null,
+                "api": "openai-completions",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "usage": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 0,
+                    "cost": {
+                        "input": 0.0,
+                        "output": 0.0,
+                        "cacheRead": 0.0,
+                        "cacheWrite": 0.0,
+                        "total": 0.0
+                    }
+                },
+                "stopReason": "stop",
+                "timestamp": 2
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "web_search",
+                "isError": false,
+                "timestamp": 3
+            }
+        ]))
+        .expect("lax messages deserialize");
+
+        assert_eq!(
+            messages,
+            vec![
+                Message::User(UserMessage {
+                    content: UserMessageContent::Parts(Vec::new()),
+                    timestamp: 1,
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: Vec::new(),
+                    api: "openai-completions".to_string(),
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: Vec::new(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 2,
+                }),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "web_search".to_string(),
+                    content: Vec::new(),
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: false,
+                    timestamp: 3,
+                }),
+            ]
         );
     }
 
@@ -1742,6 +2007,87 @@ mod tests {
 
         assert_eq!(value["supportsTemperature"], json!(false));
         assert_eq!(restored, compat);
+    }
+
+    #[test]
+    fn deferred_tool_metadata_round_trips() {
+        let message = ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "base_tool".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            usage: None,
+            added_tool_names: vec!["late_tool".to_string()],
+            is_error: false,
+            timestamp: 3,
+        };
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["addedToolNames"], json!(["late_tool"]));
+        assert_eq!(
+            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
+            message
+        );
+
+        let compat = ModelCompat {
+            openai_completions: OpenAICompletionsCompat {
+                deferred_tools_mode: Some(DeferredToolsMode::Kimi),
+                ..Default::default()
+            },
+            openai_responses: OpenAIResponsesCompat {
+                supports_tool_search: Some(true),
+                ..Default::default()
+            },
+            anthropic_messages: AnthropicMessagesCompat {
+                supports_tool_references: Some(true),
+                ..Default::default()
+            },
+        };
+        let value = serde_json::to_value(&compat).unwrap();
+        assert_eq!(value["deferredToolsMode"], json!("kimi"));
+        assert_eq!(value["supportsToolSearch"], json!(true));
+        assert_eq!(value["supportsToolReferences"], json!(true));
+        assert_eq!(
+            serde_json::from_value::<ModelCompat>(value).unwrap(),
+            compat
+        );
+    }
+
+    #[test]
+    fn tool_result_usage_round_trips() {
+        let message = ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "llm_tool".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            usage: Some(Usage {
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                total_tokens: 10,
+                cost: UsageCost {
+                    input: 0.1,
+                    output: 0.2,
+                    cache_read: 0.3,
+                    cache_write: 0.4,
+                    total: 1.0,
+                },
+                ..Default::default()
+            }),
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: 3,
+        };
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(
+            value["usage"],
+            serde_json::to_value(&message.usage).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
+            message
+        );
     }
 
     #[test]

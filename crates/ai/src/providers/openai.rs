@@ -9,8 +9,8 @@ use crate::provider::{
 };
 use crate::providers::{openai_completions, openai_images, openai_responses, simple_options};
 use crate::types::{
-    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelInput,
-    ModelOutput, SimpleStreamOptions, StreamOptions,
+    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
+    ModelInput, ModelOutput, OpenAIResponsesCompat, SimpleStreamOptions, StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -99,12 +99,44 @@ impl Provider for OpenAi {
             allow_missing_api_key: self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL,
             http_client: self.http_client.clone(),
         });
+        let mut compat = ModelCompat::default();
+        if self.api == OpenAiApi::Responses {
+            compat.openai_responses = OpenAIResponsesCompat {
+                supports_strict_mode: Some(true),
+                supports_openai_grammar_tools: is_gpt_5_or_newer(id).then_some(true),
+                supports_tool_search: (self.provider_id == DEFAULT_PROVIDER_ID.as_ref()
+                    && supports_tool_search(id))
+                .then_some(true),
+                ..Default::default()
+            };
+        }
         ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(self.base_url.clone())
             .input(vec![ModelInput::Text, ModelInput::Image])
             .context_window(1_000_000)
             .max_tokens(16_384)
+            .compat(compat)
     }
+}
+
+fn is_gpt_5_or_newer(id: &str) -> bool {
+    id.strip_prefix("gpt-")
+        .and_then(|suffix| suffix.split(['.', '-']).next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 5)
+}
+
+fn supports_tool_search(id: &str) -> bool {
+    matches!(
+        id,
+        "gpt-5.4"
+            | "gpt-5.4-mini"
+            | "gpt-5.4-pro"
+            | "gpt-5.5"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
+    )
 }
 
 #[derive(Default)]
@@ -317,6 +349,29 @@ mod tests {
     use crate::types::Context;
 
     use super::*;
+
+    #[test]
+    fn responses_models_apply_pi_constrained_sampling_metadata() {
+        let openai = builder()
+            .api_key(Some("test-token"))
+            .build()
+            .expect("provider");
+        let gpt_5 = openai.model("gpt-5.4").build().expect("model");
+        let gpt_4 = openai.model("gpt-4.1").build().expect("model");
+
+        assert_eq!(
+            gpt_5.compat.openai_responses.supports_strict_mode,
+            Some(true)
+        );
+        assert_eq!(
+            gpt_5.compat.openai_responses.supports_openai_grammar_tools,
+            Some(true)
+        );
+        assert_eq!(
+            gpt_4.compat.openai_responses.supports_openai_grammar_tools,
+            None
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn model_carries_runtime_dispatch() {

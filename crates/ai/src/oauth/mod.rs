@@ -342,7 +342,7 @@ pub async fn get_oauth_api_key(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OAuthDeviceCodePollResult<T> {
     Pending,
-    SlowDown,
+    SlowDown { interval_seconds: Option<u64> },
     Failed(String),
     Complete(T),
 }
@@ -350,6 +350,27 @@ pub enum OAuthDeviceCodePollResult<T> {
 pub async fn poll_oauth_device_code_flow<T, F, Fut>(
     interval_seconds: Option<u64>,
     expires_in_seconds: Option<u64>,
+    cancellation_token: Option<CancellationToken>,
+    poll: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<OAuthDeviceCodePollResult<T>>>,
+{
+    poll_oauth_device_code_flow_inner(
+        interval_seconds,
+        expires_in_seconds,
+        false,
+        cancellation_token,
+        poll,
+    )
+    .await
+}
+
+async fn poll_oauth_device_code_flow_inner<T, F, Fut>(
+    interval_seconds: Option<u64>,
+    expires_in_seconds: Option<u64>,
+    wait_before_first_poll: bool,
     cancellation_token: Option<CancellationToken>,
     mut poll: F,
 ) -> Result<T>
@@ -364,6 +385,18 @@ where
         .saturating_mul(1000)
         .max(MINIMUM_INTERVAL_MS);
     let mut slow_down_responses = 0;
+    if wait_before_first_poll {
+        let remaining_ms = deadline
+            .map(|deadline| deadline.saturating_sub(crate::utils::time::now_millis()))
+            .unwrap_or(interval_ms);
+        if remaining_ms > 0 {
+            abortable_sleep(
+                Duration::from_millis(interval_ms.min(remaining_ms)),
+                cancellation_token.as_ref(),
+            )
+            .await?;
+        }
+    }
 
     loop {
         if cancellation_token
@@ -380,11 +413,16 @@ where
             OAuthDeviceCodePollResult::Complete(value) => return Ok(value),
             OAuthDeviceCodePollResult::Failed(message) => return Err(Error::Provider(message)),
             OAuthDeviceCodePollResult::Pending => {}
-            OAuthDeviceCodePollResult::SlowDown => {
+            OAuthDeviceCodePollResult::SlowDown { interval_seconds } => {
                 slow_down_responses += 1;
-                interval_ms = interval_ms
-                    .saturating_add(SLOW_DOWN_INTERVAL_INCREMENT_MS)
-                    .max(MINIMUM_INTERVAL_MS);
+                interval_ms = interval_seconds
+                    .filter(|seconds| *seconds > 0)
+                    .map(|seconds| seconds.saturating_mul(1000).max(MINIMUM_INTERVAL_MS))
+                    .unwrap_or_else(|| {
+                        interval_ms
+                            .saturating_add(SLOW_DOWN_INTERVAL_INCREMENT_MS)
+                            .max(MINIMUM_INTERVAL_MS)
+                    });
             }
         }
 
@@ -690,7 +728,9 @@ mod tests {
                         poll_times.push(tokio::time::Instant::now().duration_since(start));
                         Ok(match poll_times.len() {
                             1 => OAuthDeviceCodePollResult::Pending,
-                            2 => OAuthDeviceCodePollResult::SlowDown,
+                            2 => OAuthDeviceCodePollResult::SlowDown {
+                                interval_seconds: None,
+                            },
                             3 => OAuthDeviceCodePollResult::Complete("token"),
                             _ => OAuthDeviceCodePollResult::Failed(
                                 "unexpected extra access token poll".to_string(),
@@ -743,6 +783,97 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn device_code_poll_can_wait_before_the_first_poll() {
+        let poll_times = Arc::new(Mutex::new(Vec::new()));
+        let start = tokio::time::Instant::now();
+        let poll = {
+            let poll_times = Arc::clone(&poll_times);
+            tokio::spawn(async move {
+                poll_oauth_device_code_flow_inner(Some(2), Some(30), true, None, move || {
+                    let poll_times = Arc::clone(&poll_times);
+                    async move {
+                        poll_times
+                            .lock()
+                            .expect("poll times lock poisoned")
+                            .push(tokio::time::Instant::now().duration_since(start));
+                        Ok(OAuthDeviceCodePollResult::Complete("token"))
+                    }
+                })
+                .await
+            })
+        };
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(1999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            poll_times
+                .lock()
+                .expect("poll times lock poisoned")
+                .is_empty()
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let value = poll.await.expect("poll task joins").expect("poll succeeds");
+
+        assert_eq!(value, "token");
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![Duration::from_millis(2000)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn device_code_poll_honors_a_server_provided_slow_down_interval() {
+        let poll_times = Arc::new(Mutex::new(Vec::new()));
+        let start = tokio::time::Instant::now();
+        let poll = {
+            let poll_times = Arc::clone(&poll_times);
+            tokio::spawn(async move {
+                poll_oauth_device_code_flow(Some(2), Some(900), None, move || {
+                    let poll_times = Arc::clone(&poll_times);
+                    async move {
+                        let mut poll_times = poll_times.lock().expect("poll times lock poisoned");
+                        poll_times.push(tokio::time::Instant::now().duration_since(start));
+                        Ok(match poll_times.len() {
+                            1 => OAuthDeviceCodePollResult::SlowDown {
+                                interval_seconds: Some(30),
+                            },
+                            2 => OAuthDeviceCodePollResult::Complete("token"),
+                            _ => OAuthDeviceCodePollResult::Failed(
+                                "unexpected extra access token poll".to_string(),
+                            ),
+                        })
+                    }
+                })
+                .await
+            })
+        };
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![Duration::from_millis(0)]
+        );
+
+        tokio::time::advance(Duration::from_millis(29_999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            poll_times.lock().expect("poll times lock poisoned").len(),
+            1
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let value = poll.await.expect("poll task joins").expect("poll succeeds");
+
+        assert_eq!(value, "token");
+        assert_eq!(
+            *poll_times.lock().expect("poll times lock poisoned"),
+            vec![Duration::from_millis(0), Duration::from_millis(30_000)]
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn device_code_poll_returns_failed_message() {
         let error = poll_oauth_device_code_flow::<(), _, _>(None, Some(1), None, || async {
@@ -763,7 +894,9 @@ mod tests {
                 let attempts = Arc::clone(&attempts);
                 async move {
                     *attempts.lock().expect("attempt lock poisoned") += 1;
-                    Ok(OAuthDeviceCodePollResult::SlowDown)
+                    Ok(OAuthDeviceCodePollResult::SlowDown {
+                        interval_seconds: None,
+                    })
                 }
             }
         })

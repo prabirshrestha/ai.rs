@@ -6,7 +6,10 @@ use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::github_copilot_headers::copilot_static_headers;
 use crate::providers::{anthropic, openai_completions, openai_responses, simple_options};
-use crate::types::{Context, Model, ModelInput, SimpleStreamOptions, StreamOptions};
+use crate::types::{
+    Context, Model, ModelCompat, ModelInput, OpenAIResponsesCompat, SimpleStreamOptions,
+    StreamOptions,
+};
 use crate::{Error, Result};
 
 const DEFAULT_PROVIDER_ID: KnownProvider = KnownProvider::GitHubCopilot;
@@ -79,13 +82,28 @@ impl Provider for GitHubCopilot {
             .base_url
             .clone()
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let mut compat = ModelCompat::default();
+        if api == GitHubCopilotApi::OpenAiResponses {
+            compat.openai_responses = OpenAIResponsesCompat {
+                supports_openai_grammar_tools: is_gpt_5_or_newer(id).then_some(true),
+                ..Default::default()
+            };
+        }
         ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(base_url)
             .headers(copilot_static_headers())
             .input(vec![ModelInput::Text, ModelInput::Image])
             .context_window(1_000_000)
             .max_tokens(16_384)
+            .compat(compat)
     }
+}
+
+fn is_gpt_5_or_newer(id: &str) -> bool {
+    id.strip_prefix("gpt-")
+        .and_then(|suffix| suffix.split(['.', '-']).next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 5)
 }
 
 #[derive(Default)]
@@ -272,6 +290,22 @@ pub async fn get_oauth_api_key(credentials: &OAuthCredentials) -> Result<OAuthAp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_gpt_5_models_enable_pi_grammar_tools() {
+        let provider = builder().api_key("test-token").build().expect("provider");
+        let gpt_5 = provider.model("gpt-5.4").build().expect("model");
+        let gpt_4 = provider.model("gpt-4.1").build().expect("model");
+
+        assert_eq!(
+            gpt_5.compat.openai_responses.supports_openai_grammar_tools,
+            Some(true)
+        );
+        assert_eq!(
+            gpt_4.compat.openai_responses.supports_openai_grammar_tools,
+            None
+        );
+    }
 
     #[test]
     fn default_model_uses_responses_api_without_catalog_metadata() {

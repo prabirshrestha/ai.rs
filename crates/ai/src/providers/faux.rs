@@ -1339,6 +1339,7 @@ mod tests {
                 },
                 "required": ["text"]
             }),
+            constrained_sampling: None,
         };
         let context = Context {
             system_prompt: Some("sys".to_string()),
@@ -1362,6 +1363,8 @@ mod tests {
                     tool_name: "echo".to_string(),
                     content: vec![ToolResultContent::text("tool out")],
                     details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 2,
                 }),

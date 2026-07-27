@@ -8,19 +8,27 @@ use crate::env_api_keys::{KnownProvider, get_anthropic_auth_token, get_env_api_k
 use crate::event_stream::AssistantMessageEventStreamSender;
 use crate::models::calculate_cost;
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+use crate::providers::constrained_sampling::resolve_json_schema_strict_sampling;
+use crate::providers::deferred_tools::split_deferred_tools;
 use crate::providers::github_copilot_headers::{
     build_copilot_dynamic_headers, has_copilot_vision_input,
 };
 use crate::providers::simple_options;
-use crate::providers::simple_options::{adjust_max_tokens_for_thinking, clamped_reasoning};
+use crate::providers::simple_options::{
+    adjust_max_tokens_for_thinking, build_base_options, clamp_max_tokens_to_context,
+    clamped_reasoning,
+};
 use crate::providers::transform_messages::transform_messages;
 use crate::types::{
-    AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model,
-    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, Tool, ToolCall, ToolResultContent, UserContent, UserMessageContent,
+    AnthropicMessagesCompat, AssistantContent, AssistantMessage, AssistantMessageEvent,
+    CacheRetention, Context, Model, ModelCompat, ModelThinkingLevel, SimpleStreamOptions,
+    StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, ToolResultContent,
+    UserContent, UserMessageContent,
 };
+use crate::utils::headers::has_non_empty_header;
 use crate::utils::http::{request_timeout, send_with_retries};
 use crate::utils::json::{parse_json_with_repair, parse_streaming_json};
+use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sse;
 use crate::{Error, Result};
 
@@ -81,6 +89,13 @@ impl Provider for Anthropic {
             .input(vec![crate::ModelInput::Text, crate::ModelInput::Image])
             .context_window(1_000_000)
             .max_tokens(16_384)
+            .compat(ModelCompat {
+                anthropic_messages: AnthropicMessagesCompat {
+                    supports_strict_tools: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
     }
 }
 
@@ -279,6 +294,8 @@ struct ResolvedAnthropicCompat {
     pub send_session_affinity_headers: bool,
     pub supports_cache_control_on_tools: bool,
     pub supports_temperature: bool,
+    pub supports_strict_tools: bool,
+    pub supports_tool_references: bool,
 }
 
 pub fn stream_simple_anthropic(
@@ -291,11 +308,10 @@ pub fn stream_simple_anthropic(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    if api_key.is_none() && !has_authorization_header(&options.stream.headers) {
+    if api_key.is_none() && !has_request_auth(&options.stream.headers) {
         return Err(crate::Error::MissingApiKey(model.provider));
     }
-    let mut base = options.stream.clone();
-    base.api_key = api_key;
+    let base = build_base_options(&model, &context, &options, api_key);
 
     let Some(reasoning) = clamped_reasoning(&model, &options) else {
         return Ok(stream_anthropic(
@@ -328,15 +344,24 @@ pub fn stream_simple_anthropic(
         Some(reasoning),
         options.thinking_budgets.as_ref(),
     );
+    let max_tokens = clamp_max_tokens_to_context(
+        &model,
+        &context,
+        adjusted.max_tokens.unwrap_or(model.max_tokens),
+    );
     let mut adjusted_base = base;
-    adjusted_base.max_tokens = adjusted.max_tokens;
+    adjusted_base.max_tokens = Some(max_tokens);
     Ok(stream_anthropic(
         model,
         context,
         AnthropicOptions {
             base: adjusted_base,
             thinking_enabled: Some(true),
-            thinking_budget_tokens: Some(adjusted.thinking_budget),
+            thinking_budget_tokens: Some(
+                adjusted
+                    .thinking_budget
+                    .min(max_tokens.saturating_sub(1_024)),
+            ),
             ..Default::default()
         },
     ))
@@ -414,7 +439,7 @@ async fn run_stream(
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty());
-    if api_key.is_none() && !has_authorization_header(&options.base.headers) {
+    if api_key.is_none() && !has_request_auth(&options.base.headers) {
         return Err(StreamFailure::new(
             output,
             format!("No API key for provider: {}", model.provider),
@@ -422,10 +447,18 @@ async fn run_stream(
     }
     let is_oauth = api_key.as_deref().is_some_and(is_oauth_token);
     let compat = get_anthropic_compat(&model);
-    let cache_retention = resolve_cache_retention(options.base.cache_retention);
+    let cache_retention = resolve_cache_retention(options.base.cache_retention, &options.base.env);
     let cache_control = cache_control(&model, cache_retention, compat);
-    let mut payload =
-        build_anthropic_payload(&model, &context, &options, is_oauth, cache_control.clone());
+    let mut payload = match try_build_anthropic_payload(
+        &model,
+        &context,
+        &options,
+        is_oauth,
+        cache_control.clone(),
+    ) {
+        Ok(payload) => payload,
+        Err(error) => return Err(StreamFailure::new(output, error)),
+    };
     if let Some(on_payload) = &options.base.on_payload {
         match on_payload(payload.clone(), &model).await {
             Ok(Some(next)) => payload = next,
@@ -790,21 +823,53 @@ async fn run_stream(
     Ok(())
 }
 
-fn build_anthropic_payload(
+fn try_build_anthropic_payload(
     model: &Model,
     context: &Context,
     options: &AnthropicOptions,
     is_oauth_token: bool,
     cache_control: Option<Value>,
-) -> Value {
+) -> Result<Value> {
+    let compat = get_anthropic_compat(model);
+    let transformed = transform_messages(&context.messages, model, |id, _model, _source| {
+        normalize_tool_call_id(id)
+    });
+    let normalize_name = |name: &str| {
+        if is_oauth_token {
+            to_claude_code_name(name)
+        } else {
+            name.to_string()
+        }
+    };
+    let mut transformed_context = context.clone();
+    transformed_context.messages = transformed;
+    let mut placement = split_deferred_tools(
+        &transformed_context,
+        compat.supports_tool_references,
+        normalize_name,
+    );
+    if placement.immediate.is_empty() && !placement.deferred.is_empty() {
+        placement.immediate = placement
+            .deferred
+            .into_iter()
+            .map(|(_, tool)| tool)
+            .collect();
+        placement.deferred = Vec::new();
+    }
+    let deferred_names = placement
+        .deferred
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::HashSet<_>>();
     let mut payload = json!({
         "model": model.id,
-        "messages": convert_messages(
-            &context.messages,
-            model,
+        "messages": convert_transformed_messages(
+            &transformed_context.messages,
             is_oauth_token,
             cache_control.clone(),
             model.compat.anthropic_messages.allow_empty_signature.unwrap_or(false),
+            &deferred_names,
+            normalize_name,
         ),
         "max_tokens": options.base.max_tokens.unwrap_or(model.max_tokens),
         "stream": true
@@ -841,25 +906,36 @@ fn build_anthropic_payload(
 
     if let Some(temperature) = options.base.temperature
         && options.thinking_enabled != Some(true)
-        && get_anthropic_compat(model).supports_temperature
+        && compat.supports_temperature
     {
         object.insert("temperature".to_string(), json!(temperature));
     }
-    if !context.tools.is_empty() {
-        let compat = get_anthropic_compat(model);
-        object.insert(
-            "tools".to_string(),
-            Value::Array(convert_tools(
-                &context.tools,
-                is_oauth_token,
-                compat.supports_eager_tool_input_streaming,
-                if compat.supports_cache_control_on_tools {
-                    cache_control.clone()
-                } else {
-                    None
-                },
-            )),
-        );
+    if !placement.immediate.is_empty() || !placement.deferred.is_empty() {
+        let mut tools = convert_tools(
+            &placement.immediate,
+            is_oauth_token,
+            compat.supports_eager_tool_input_streaming,
+            compat.supports_strict_tools,
+            if compat.supports_cache_control_on_tools {
+                cache_control.clone()
+            } else {
+                None
+            },
+            false,
+        )?;
+        tools.extend(convert_tools(
+            &placement
+                .deferred
+                .into_iter()
+                .map(|(_, tool)| tool)
+                .collect::<Vec<_>>(),
+            is_oauth_token,
+            compat.supports_eager_tool_input_streaming,
+            compat.supports_strict_tools,
+            None,
+            true,
+        )?);
+        object.insert("tools".to_string(), Value::Array(tools));
     }
     if model.reasoning {
         if options.thinking_enabled == Some(true) {
@@ -888,7 +964,9 @@ fn build_anthropic_payload(
                     }),
                 );
             }
-        } else if options.thinking_enabled == Some(false) {
+        } else if options.thinking_enabled == Some(false)
+            && model.thinking_level_map.get("off") != Some(&None)
+        {
             object.insert("thinking".to_string(), json!({ "type": "disabled" }));
         }
     }
@@ -904,9 +982,21 @@ fn build_anthropic_payload(
             .unwrap_or_else(|| tool_choice.clone());
         object.insert("tool_choice".to_string(), value);
     }
-    payload
+    Ok(payload)
 }
 
+#[cfg(test)]
+fn build_anthropic_payload(
+    model: &Model,
+    context: &Context,
+    options: &AnthropicOptions,
+    is_oauth_token: bool,
+    cache_control: Option<Value>,
+) -> Value {
+    try_build_anthropic_payload(model, context, options, is_oauth_token, cache_control).unwrap()
+}
+
+#[cfg(test)]
 fn convert_messages(
     messages: &[crate::types::Message],
     model: &Model,
@@ -917,7 +1007,32 @@ fn convert_messages(
     let transformed = transform_messages(messages, model, |id, _model, _source| {
         normalize_tool_call_id(id)
     });
+    convert_transformed_messages(
+        &transformed,
+        is_oauth_token,
+        cache_control,
+        allow_empty_signature,
+        &std::collections::HashSet::new(),
+        |name| {
+            if is_oauth_token {
+                to_claude_code_name(name)
+            } else {
+                name.to_string()
+            }
+        },
+    )
+}
+
+fn convert_transformed_messages(
+    transformed: &[crate::types::Message],
+    is_oauth_token: bool,
+    cache_control: Option<Value>,
+    allow_empty_signature: bool,
+    deferred_tool_names: &std::collections::HashSet<String>,
+    normalize_tool_name: impl Fn(&str) -> String,
+) -> Vec<Value> {
     let mut params = Vec::new();
+    let mut loaded_tool_names = std::collections::HashSet::new();
     let mut index = 0usize;
     while index < transformed.len() {
         match &transformed[index] {
@@ -999,26 +1114,67 @@ fn convert_messages(
                 }
             }
             crate::types::Message::ToolResult(tool_result) => {
-                let mut tool_results = vec![json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_result.tool_call_id,
-                    "content": convert_content_blocks(&tool_result.content),
-                    "is_error": tool_result.is_error
-                })];
+                let mut tool_results = Vec::new();
+                let mut sibling_content = Vec::new();
+                let convert_result =
+                    |result: &crate::types::ToolResultMessage,
+                     loaded: &mut std::collections::HashSet<String>,
+                     siblings: &mut Vec<Value>| {
+                        let references = result
+                            .added_tool_names
+                            .iter()
+                            .filter_map(|name| {
+                                let normalized_name = normalize_tool_name(name);
+                                (deferred_tool_names.contains(&normalized_name)
+                                    && loaded.insert(normalized_name.clone()))
+                                .then(|| {
+                                    json!({
+                                        "type": "tool_reference",
+                                        "tool_name": if is_oauth_token {
+                                            to_claude_code_name(name)
+                                        } else {
+                                            name.clone()
+                                        }
+                                    })
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let content = convert_content_blocks(&result.content);
+                        if !references.is_empty() {
+                            match &content {
+                                Value::Array(blocks) => siblings.extend(blocks.iter().cloned()),
+                                Value::String(text) => {
+                                    siblings.push(json!({ "type": "text", "text": text }))
+                                }
+                                _ => {}
+                            }
+                        }
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": if references.is_empty() { content } else { Value::Array(references) },
+                            "is_error": result.is_error
+                        })
+                    };
+                tool_results.push(convert_result(
+                    tool_result,
+                    &mut loaded_tool_names,
+                    &mut sibling_content,
+                ));
                 let mut cursor = index + 1;
                 while cursor < transformed.len() {
                     let crate::types::Message::ToolResult(next) = &transformed[cursor] else {
                         break;
                     };
-                    tool_results.push(json!({
-                        "type": "tool_result",
-                        "tool_use_id": next.tool_call_id,
-                        "content": convert_content_blocks(&next.content),
-                        "is_error": next.is_error
-                    }));
+                    tool_results.push(convert_result(
+                        next,
+                        &mut loaded_tool_names,
+                        &mut sibling_content,
+                    ));
                     cursor += 1;
                 }
                 index = cursor - 1;
+                tool_results.extend(sibling_content);
                 params.push(json!({ "role": "user", "content": tool_results }));
             }
             crate::types::Message::Custom(_) => {}
@@ -1099,29 +1255,55 @@ fn convert_tools(
     tools: &[Tool],
     is_oauth_token: bool,
     supports_eager_tool_input_streaming: bool,
+    supports_strict_tools: bool,
     cache_control: Option<Value>,
-) -> Vec<Value> {
+    defer_loading: bool,
+) -> Result<Vec<Value>> {
     tools
         .iter()
         .enumerate()
         .map(|(index, tool)| {
+            let strict = resolve_json_schema_strict_sampling(tool, supports_strict_tools)?;
+            let legacy_input_schema = json!({
+                "type": "object",
+                "properties": tool.parameters.get("properties").cloned().unwrap_or_else(|| json!({})),
+                "required": tool.parameters.get("required").cloned().unwrap_or_else(|| json!([]))
+            });
+            let input_schema = if strict == Some(true) {
+                let mut input_schema = tool.parameters.clone();
+                let object = input_schema.as_object_mut().expect("tool parameters object");
+                object.insert("type".to_string(), json!("object"));
+                object.insert(
+                    "properties".to_string(),
+                    legacy_input_schema["properties"].clone(),
+                );
+                object.insert(
+                    "required".to_string(),
+                    legacy_input_schema["required"].clone(),
+                );
+                input_schema
+            } else {
+                legacy_input_schema
+            };
             let mut value = json!({
                 "name": if is_oauth_token { to_claude_code_name(&tool.name) } else { tool.name.clone() },
                 "description": tool.description,
-                "input_schema": {
-                    "type": "object",
-                    "properties": tool.parameters.get("properties").cloned().unwrap_or_else(|| json!({})),
-                    "required": tool.parameters.get("required").cloned().unwrap_or_else(|| json!([]))
-                }
+                "input_schema": input_schema
             });
+            if strict == Some(true) {
+                value["strict"] = json!(true);
+            }
             if supports_eager_tool_input_streaming {
                 value["eager_input_streaming"] = json!(true);
+            }
+            if defer_loading {
+                value["defer_loading"] = json!(true);
             }
             if index == tools.len() - 1
                 && let Some(cache_control) = &cache_control {
                     value["cache_control"] = cache_control.clone();
                 }
-            value
+            Ok(value)
         })
         .collect()
 }
@@ -1184,7 +1366,37 @@ fn get_anthropic_compat(model: &Model) -> ResolvedAnthropicCompat {
         send_session_affinity_headers: compat.send_session_affinity_headers.unwrap_or(false),
         supports_cache_control_on_tools: compat.supports_cache_control_on_tools.unwrap_or(true),
         supports_temperature: compat.supports_temperature.unwrap_or(true),
+        supports_strict_tools: compat.supports_strict_tools.unwrap_or(false),
+        supports_tool_references: compat
+            .supports_tool_references
+            .unwrap_or_else(|| default_supports_tool_references(model)),
     }
+}
+
+fn default_supports_tool_references(model: &Model) -> bool {
+    if model.provider != "anthropic" || model.id.contains("haiku") {
+        return false;
+    }
+    let Some((family, version)) = model
+        .id
+        .strip_prefix("claude-")
+        .and_then(|id| id.split_once('-'))
+    else {
+        return false;
+    };
+    if !matches!(family, "opus" | "sonnet" | "fable") {
+        return false;
+    }
+    let mut parts = version.split('-');
+    let Some(major) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let minor = parts
+        .next()
+        .filter(|part| part.len() < 8)
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    major > 4 || (major == 4 && minor >= 5)
 }
 
 fn cache_control(
@@ -1202,11 +1414,17 @@ fn cache_control(
     Some(value)
 }
 
-fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
-    // Intentionally do not port pi's PI_CACHE_RETENTION environment fallback.
-    // ai.rs is a library: applications that want environment-driven policy can
-    // translate it into StreamOptions::cache_retention at their boundary.
-    cache_retention.unwrap_or(CacheRetention::Short)
+fn resolve_cache_retention(
+    cache_retention: Option<CacheRetention>,
+    env: &HashMap<String, String>,
+) -> CacheRetention {
+    cache_retention.unwrap_or_else(|| {
+        if get_provider_env_value("PI_CACHE_RETENTION", env).as_deref() == Some("long") {
+            CacheRetention::Long
+        } else {
+            CacheRetention::Short
+        }
+    })
 }
 
 fn should_use_fine_grained_tool_streaming_beta(model: &Model, context: &Context) -> bool {
@@ -1324,13 +1542,10 @@ fn response_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
-fn has_authorization_header(headers: &crate::types::ProviderHeaders) -> bool {
-    headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("authorization")
-            && value
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-    })
+fn has_request_auth(headers: &crate::types::ProviderHeaders) -> bool {
+    ["authorization", "x-api-key", "cf-aig-authorization"]
+        .into_iter()
+        .any(|name| has_non_empty_header(headers, name))
 }
 
 fn has_authorization_override(headers: &crate::types::ProviderHeaders) -> bool {
@@ -1460,7 +1675,7 @@ mod tests {
 
     use super::*;
     use crate::types::{
-        AssistantContent, CacheRetention, ModelCost, ModelInput, ResponseHook, Usage,
+        AssistantContent, CacheRetention, ModelCost, ModelInput, PayloadHook, ResponseHook, Usage,
     };
 
     fn anthropic_model(id: &str) -> Model {
@@ -1890,6 +2105,17 @@ mod tests {
     }
 
     #[test]
+    fn provider_models_enable_pi_strict_tools() {
+        let anthropic = builder().api_key("test-token").build().expect("provider");
+        let model = anthropic.model("claude-opus-4-8").build().expect("model");
+
+        assert_eq!(
+            model.compat.anthropic_messages.supports_strict_tools,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn should_handle_empty_content_array() {
         let model = anthropic_model("claude-sonnet-4-5");
         let messages = vec![crate::types::Message::User(crate::types::UserMessage {
@@ -1962,6 +2188,81 @@ mod tests {
         };
 
         assert!(matches!(error, crate::Error::MissingApiKey(provider) if provider == "anthropic"));
+    }
+
+    #[test]
+    fn stream_simple_accepts_header_only_auth() {
+        for header in ["Authorization", "x-api-key", "cf-aig-authorization"] {
+            let mut options = SimpleStreamOptions::default();
+            options
+                .stream
+                .headers
+                .insert(header, Some("gateway-token".to_string()));
+
+            assert!(
+                stream_simple_anthropic(
+                    anthropic_model("claude-sonnet-4-5"),
+                    Context::default(),
+                    options,
+                )
+                .is_ok(),
+                "{header}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_simple_clamps_max_tokens_and_thinking_budget_to_remaining_context() {
+        let mut model = anthropic_model("claude-test");
+        model.context_window = 10_000;
+        model.max_tokens = 8_000;
+        model.base_url = spawn_sse_server(successful_anthropic_sse_body()).await;
+
+        let captured_payload = Arc::new(std::sync::Mutex::new(None));
+        let hook_capture = Arc::clone(&captured_payload);
+        let on_payload: PayloadHook = Arc::new(move |payload, _model| {
+            let hook_capture = Arc::clone(&hook_capture);
+            Box::pin(async move {
+                *hook_capture.lock().unwrap() = Some(payload.clone());
+                Ok(Some(payload))
+            })
+        });
+
+        let stream = stream_simple_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("x".repeat(8_000))],
+                ..Default::default()
+            },
+            SimpleStreamOptions {
+                stream: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    max_tokens: Some(7_000),
+                    cache_retention: Some(CacheRetention::None),
+                    on_payload: Some(on_payload),
+                    ..Default::default()
+                },
+                reasoning: Some(ModelThinkingLevel::High),
+                ..Default::default()
+            },
+        )
+        .expect("stream");
+
+        let message = crate::stream::final_message_from_stream(stream)
+            .await
+            .expect("final message");
+        let payload = captured_payload.lock().unwrap().take().expect("payload");
+
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(payload["max_tokens"], json!(3_904));
+        assert_eq!(
+            payload["thinking"],
+            json!({
+                "type": "enabled",
+                "budget_tokens": 2_880,
+                "display": "summarized"
+            })
+        );
     }
 
     fn assistant_with_thinking(signature: &str) -> crate::types::Message {
@@ -2114,6 +2415,8 @@ mod tests {
                         ToolResultContent::text("second"),
                     ],
                     details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
                     is_error: false,
                     timestamp: 1,
                 },
@@ -2217,6 +2520,28 @@ mod tests {
     }
 
     #[test]
+    fn omits_disabled_thinking_when_the_model_marks_off_as_unsupported() {
+        let mut model = anthropic_model("claude-fable-5");
+        model.thinking_level_map.insert("off".to_string(), None);
+        let payload = build_anthropic_payload(
+            &model,
+            &Context {
+                messages: vec![crate::types::Message::user_text("hello")],
+                ..Default::default()
+            },
+            &AnthropicOptions {
+                thinking_enabled: Some(false),
+                ..Default::default()
+            },
+            false,
+            None,
+        );
+
+        assert!(payload.get("thinking").is_none());
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
     fn string_tool_choice_is_wrapped_for_anthropic_payload() {
         let model = anthropic_model("claude-sonnet-4-5");
         let payload = build_anthropic_payload(
@@ -2227,6 +2552,7 @@ mod tests {
                     name: "lookup".to_string(),
                     description: "Look up a value".to_string(),
                     parameters: json!({ "type": "object" }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
@@ -2252,6 +2578,7 @@ mod tests {
                     name: "lookup".to_string(),
                     description: "Look up a value".to_string(),
                     parameters: json!({ "type": "object" }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
@@ -2613,6 +2940,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_env_controls_default_cache_retention() {
+        let long = [("PI_CACHE_RETENTION".to_string(), "long".to_string())]
+            .into_iter()
+            .collect();
+        let short = [("PI_CACHE_RETENTION".to_string(), "short".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(resolve_cache_retention(None, &long), CacheRetention::Long);
+        assert_eq!(resolve_cache_retention(None, &short), CacheRetention::Short);
+        assert_eq!(
+            resolve_cache_retention(Some(CacheRetention::None), &long),
+            CacheRetention::None
+        );
+    }
+
+    #[test]
+    fn provider_env_values_take_precedence_over_process_values() {
+        let env = [("PI_CACHE_RETENTION".to_string(), "short".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            get_provider_env_value("PI_CACHE_RETENTION", &env).as_deref(),
+            Some("short")
+        );
+    }
+
+    #[test]
     fn payload_applies_cache_control_to_system_and_last_user_text() {
         let model = anthropic_model("claude-haiku-4-5");
         let payload = build_anthropic_payload(
@@ -2823,7 +3179,45 @@ mod tests {
                 },
                 "required": ["value"]
             }),
+            constrained_sampling: None,
         }
+    }
+
+    #[test]
+    fn strict_tools_preserve_the_full_schema() {
+        use crate::types::{
+            ConstrainedSampling, ConstrainedSamplingConfig, ConstrainedSamplingStrict,
+        };
+
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.compat.anthropic_messages.supports_strict_tools = Some(true);
+        let context = Context {
+            messages: vec![crate::types::Message::user_text("Use the tool")],
+            tools: vec![Tool {
+                name: "lookup".to_string(),
+                description: "Look up a value".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+                constrained_sampling: Some(ConstrainedSampling::Config(
+                    ConstrainedSamplingConfig::JsonSchema {
+                        strict: ConstrainedSamplingStrict::Prefer,
+                    },
+                )),
+            }],
+            ..Default::default()
+        };
+        let payload =
+            build_anthropic_payload(&model, &context, &AnthropicOptions::default(), false, None);
+
+        assert_eq!(payload["tools"][0]["strict"], json!(true));
+        assert_eq!(
+            payload["tools"][0]["input_schema"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -3029,11 +3423,13 @@ mod tests {
                 name: "todowrite".to_string(),
                 description: "Write todos".to_string(),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             },
             Tool {
                 name: "find".to_string(),
                 description: "Find files".to_string(),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             },
         ];
         let context = Context {
@@ -3068,6 +3464,7 @@ mod tests {
                 name: name.to_string(),
                 description: format!("{name} tool"),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+                constrained_sampling: None,
             })
             .collect::<Vec<_>>();
         let context = Context {
@@ -3360,6 +3757,7 @@ mod tests {
                         },
                         "required": ["path", "text"]
                     }),
+                    constrained_sampling: None,
                 }],
                 ..Default::default()
             },
@@ -3389,6 +3787,95 @@ mod tests {
             tool_call.arguments,
             json!({ "path": "A\\H", "text": "col1\tcol2" })
         );
+    }
+
+    #[tokio::test]
+    async fn message_delta_without_usage_preserves_start_usage() {
+        let body = sse_body(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_sparse_usage",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": "Hello" }
+                })
+                .to_string(),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" }
+                })
+                .to_string(),
+            ),
+            (
+                "message_stop",
+                json!({ "type": "message_stop" }).to_string(),
+            ),
+        ]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = anthropic_model("claude-haiku-4-5");
+        model.base_url = base_url;
+        model.reasoning = false;
+
+        let result = crate::stream::final_message_from_stream(stream_anthropic(
+            model,
+            Context {
+                messages: vec![crate::types::Message::user_text("Say hello.")],
+                ..Default::default()
+            },
+            AnthropicOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent {
+                text: "Hello".to_string(),
+                text_signature: None,
+            })]
+        );
+        assert_eq!(result.usage.input, 12);
+        assert_eq!(result.usage.total_tokens, 12);
     }
 
     #[tokio::test]

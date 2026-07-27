@@ -515,6 +515,7 @@ mod tests {
                 },
                 "required": ["value"]
             }),
+            constrained_sampling: None,
         };
         let tool_call = ToolCall {
             id: "tool-1".to_string(),
@@ -537,6 +538,7 @@ mod tests {
                 },
                 "required": ["count"]
             }),
+            constrained_sampling: None,
         };
         let tool_call = ToolCall {
             id: "tool-1".to_string(),
@@ -623,6 +625,7 @@ mod tests {
                 "required": ["mode", "count", "tag", "items", "fixed"],
                 "additionalProperties": { "type": "number" }
             }),
+            constrained_sampling: None,
         };
         let valid = ToolCall {
             id: "tool-1".to_string(),

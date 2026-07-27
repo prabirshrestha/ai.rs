@@ -39,28 +39,40 @@ impl From<KnownProvider> for String {
     }
 }
 
-fn env_value(env_var: &str) -> Option<String> {
-    std::env::var(env_var)
-        .ok()
-        .filter(|value| !value.is_empty())
+pub(crate) fn get_anthropic_auth_token() -> Option<String> {
+    get_anthropic_auth_token_with_env(&Default::default())
 }
 
-pub(crate) fn get_anthropic_auth_token() -> Option<String> {
-    env_value(ANTHROPIC_AUTH_TOKEN_ENV_VAR)
+pub(crate) fn get_anthropic_auth_token_with_env(env: &crate::types::ProviderEnv) -> Option<String> {
+    crate::utils::provider_env::get_provider_env_value(ANTHROPIC_AUTH_TOKEN_ENV_VAR, env)
 }
 
 pub fn get_env_api_key(provider: impl AsRef<str>) -> Option<String> {
+    get_env_api_key_with_env(provider, &Default::default())
+}
+
+pub(crate) fn get_env_api_key_with_env(
+    provider: impl AsRef<str>,
+    env: &crate::types::ProviderEnv,
+) -> Option<String> {
     match provider.as_ref() {
         provider if provider == KnownProvider::GitHubCopilot.as_str() => {
-            env_value(GITHUB_COPILOT_TOKEN_ENV_VAR)
+            crate::utils::provider_env::get_provider_env_value(GITHUB_COPILOT_TOKEN_ENV_VAR, env)
         }
         provider if provider == KnownProvider::Anthropic.as_str() => {
-            env_value(ANTHROPIC_OAUTH_TOKEN_ENV_VAR)
-                .or_else(|| env_value(ANTHROPIC_API_KEY_ENV_VAR))
+            crate::utils::provider_env::get_provider_env_value(ANTHROPIC_OAUTH_TOKEN_ENV_VAR, env)
+                .or_else(|| {
+                    crate::utils::provider_env::get_provider_env_value(
+                        ANTHROPIC_API_KEY_ENV_VAR,
+                        env,
+                    )
+                })
         }
-        provider if provider == KnownProvider::OpenAi.as_str() => env_value(OPENAI_API_KEY_ENV_VAR),
+        provider if provider == KnownProvider::OpenAi.as_str() => {
+            crate::utils::provider_env::get_provider_env_value(OPENAI_API_KEY_ENV_VAR, env)
+        }
         provider if provider == KnownProvider::OpenRouter.as_str() => {
-            env_value(OPENROUTER_API_KEY_ENV_VAR)
+            crate::utils::provider_env::get_provider_env_value(OPENROUTER_API_KEY_ENV_VAR, env)
         }
         _ => None,
     }
@@ -139,6 +151,28 @@ mod tests {
     }
 
     #[test]
+    fn scoped_anthropic_auth_token_takes_precedence_over_process_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let auth = SavedEnv::capture(ANTHROPIC_AUTH_TOKEN_ENV_VAR);
+        unsafe {
+            std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV_VAR, "process-auth-token");
+        }
+        let env = [(
+            ANTHROPIC_AUTH_TOKEN_ENV_VAR.to_string(),
+            "scoped-auth-token".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            get_anthropic_auth_token_with_env(&env).as_deref(),
+            Some("scoped-auth-token")
+        );
+
+        auth.restore();
+    }
+
+    #[test]
     fn empty_env_values_are_ignored() {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         let openai = SavedEnv::capture(OPENAI_API_KEY_ENV_VAR);
@@ -198,5 +232,24 @@ mod tests {
     #[test]
     fn accepts_custom_provider_strings() {
         assert_eq!(get_env_api_key("custom-provider"), None);
+    }
+
+    #[test]
+    fn scoped_env_takes_precedence_over_process_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let openai = SavedEnv::capture(OPENAI_API_KEY_ENV_VAR);
+        unsafe {
+            std::env::set_var(OPENAI_API_KEY_ENV_VAR, "process-key");
+        }
+        let env = [(OPENAI_API_KEY_ENV_VAR.to_string(), "scoped-key".to_string())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            get_env_api_key_with_env(KnownProvider::OpenAi, &env).as_deref(),
+            Some("scoped-key")
+        );
+
+        openai.restore();
     }
 }

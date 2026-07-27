@@ -249,14 +249,18 @@ async fn run_loop(
             let mut tool_results = Vec::new();
             has_more_tool_calls = false;
             if !tool_calls.is_empty() {
-                let executed = execute_tool_calls(
-                    context,
-                    &assistant,
-                    &config,
-                    emit.clone(),
-                    cancellation_token.clone(),
-                )
-                .await?;
+                let executed = if assistant.stop_reason == StopReason::Length {
+                    fail_tool_calls_from_truncated_message(tool_calls, &emit).await?
+                } else {
+                    execute_tool_calls(
+                        context,
+                        &assistant,
+                        &config,
+                        emit.clone(),
+                        cancellation_token.clone(),
+                    )
+                    .await?
+                };
                 has_more_tool_calls = !executed.terminate;
                 tool_results.extend(executed.messages);
                 for result in &tool_results {
@@ -443,6 +447,36 @@ async fn stream_assistant_response(
 struct ExecutedToolBatch {
     messages: Vec<ToolResultMessage>,
     terminate: bool,
+}
+
+async fn fail_tool_calls_from_truncated_message(
+    tool_calls: Vec<crate::ToolCall>,
+    emit: &AgentEventSink,
+) -> AgentResult<ExecutedToolBatch> {
+    let mut messages = Vec::new();
+    for tool_call in tool_calls {
+        emit(AgentEvent::ToolExecutionStart {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            args: tool_call.arguments.clone(),
+        })
+        .await?;
+        let tool_name = tool_call.name.clone();
+        let finalized = finalized_error(
+            tool_call,
+            format!(
+                "Tool call \"{tool_name}\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments."
+            ),
+        );
+        emit_tool_execution_end(&finalized, emit).await?;
+        let message = create_tool_result_message(finalized);
+        emit_tool_result_message(&message, emit).await?;
+        messages.push(message);
+    }
+    Ok(ExecutedToolBatch {
+        messages,
+        terminate: false,
+    })
 }
 
 async fn execute_tool_calls(
@@ -790,7 +824,12 @@ async fn execute_prepared_tool_call(
     let update_tool_call = tool_call.clone();
     let update_tasks = Arc::new(StdMutex::new(Vec::new()));
     let update_tasks_for_callback = update_tasks.clone();
+    let accepting_updates = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let accepting_updates_for_callback = Arc::clone(&accepting_updates);
     let on_update = Arc::new(move |partial_result: AgentToolResult| {
+        if !accepting_updates_for_callback.load(std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(async {}) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+        }
         let emit = emit_for_update.clone();
         let tool_call = update_tool_call.clone();
         let (done_sender, done_receiver) = oneshot::channel();
@@ -825,6 +864,7 @@ async fn execute_prepared_tool_call(
         Ok(result) => (false, result),
         Err(error) => (true, error_tool_result(error.to_string())),
     };
+    accepting_updates.store(false, std::sync::atomic::Ordering::SeqCst);
 
     await_tool_update_tasks(&update_tasks).await?;
 
@@ -848,6 +888,9 @@ async fn execute_prepared_tool_call(
                 }
                 if let Some(details) = after_result.details.filter(|details| !details.is_null()) {
                     result.details = Some(details);
+                }
+                if let Some(usage) = after_result.usage {
+                    result.usage = Some(usage);
                 }
                 if let Some(terminate) = after_result.terminate {
                     result.terminate = terminate;
@@ -931,9 +974,34 @@ fn create_tool_result_message(
         tool_name: tool_call.name,
         content: result.content,
         details: result.details,
+        usage: result.usage,
+        added_tool_names: result.added_tool_names,
         is_error,
         timestamp: crate::utils::time::now_millis(),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn tool_result_messages_preserve_added_tool_names() {
+    let message = create_tool_result_message((
+        crate::ToolCall {
+            id: "call_1".to_string(),
+            name: "base_tool".to_string(),
+            arguments: json!({}),
+            thought_signature: None,
+        },
+        false,
+        AgentToolResult {
+            content: vec![crate::ToolResultContent::text("done")],
+            details: None,
+            usage: None,
+            added_tool_names: vec!["late_tool".to_string()],
+            terminate: false,
+        },
+    ));
+
+    assert_eq!(message.added_tool_names, ["late_tool"]);
 }
 
 async fn emit_tool_result_message(
@@ -973,7 +1041,8 @@ mod tests {
     };
     use crate::{
         AssistantContent, AssistantMessage, AssistantMessageEvent, Message, Model, StopReason,
-        TextContent, Tool, ToolResultContent, ToolResultMessage, UserMessageContent,
+        TextContent, Tool, ToolResultContent, ToolResultMessage, Usage, UsageCost,
+        UserMessageContent,
     };
 
     fn collect_events() -> (Arc<StdMutex<Vec<AgentEvent>>>, AgentEventSink) {
@@ -1074,6 +1143,7 @@ mod tests {
                     },
                     "required": ["edits"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1128,6 +1198,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1170,6 +1241,101 @@ mod tests {
         }
     }
 
+    struct UsageTool {
+        usage: Usage,
+    }
+
+    #[async_trait]
+    impl AgentTool for UsageTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: "llm_tool".to_string(),
+                description: "Runs an LLM-backed tool.".to_string(),
+                parameters: json!({ "type": "object" }),
+                constrained_sampling: None,
+            }
+        }
+
+        fn label(&self) -> &str {
+            "LLM tool"
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            Ok(AgentToolResult {
+                content: vec![ToolResultContent::text("done")],
+                details: None,
+                usage: Some(self.usage.clone()),
+                added_tool_names: Vec::new(),
+                terminate: false,
+            })
+        }
+    }
+
+    struct DelayedUpdateTool {
+        name: &'static str,
+        update: Arc<StdMutex<Option<AgentToolUpdateCallback>>>,
+        started: Option<Arc<tokio::sync::Notify>>,
+        release: Option<Arc<tokio::sync::Notify>>,
+        emit_initial_update: bool,
+    }
+
+    #[async_trait]
+    impl AgentTool for DelayedUpdateTool {
+        fn definition(&self) -> Tool {
+            Tool {
+                name: self.name.to_string(),
+                description: "Captures progress callbacks.".to_string(),
+                parameters: json!({ "type": "object" }),
+                constrained_sampling: None,
+            }
+        }
+
+        fn label(&self) -> &str {
+            self.name
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _args: Value,
+            _cancellation_token: Option<CancellationToken>,
+            on_update: Option<AgentToolUpdateCallback>,
+        ) -> crate::AgentResult<AgentToolResult> {
+            *self.update.lock().unwrap() = on_update.clone();
+            if self.emit_initial_update
+                && let Some(on_update) = on_update
+            {
+                on_update(AgentToolResult {
+                    content: vec![ToolResultContent::text("running")],
+                    details: Some(json!({ "status": "running" })),
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                })
+                .await;
+            }
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            Ok(AgentToolResult {
+                content: vec![ToolResultContent::text("done")],
+                details: Some(json!({ "status": "done" })),
+                usage: None,
+                added_tool_names: Vec::new(),
+                terminate: true,
+            })
+        }
+    }
+
     struct NamedProbeTool {
         name: &'static str,
         starts: Arc<StdMutex<Vec<String>>>,
@@ -1191,6 +1357,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1256,6 +1423,7 @@ mod tests {
                     },
                     "required": ["value"]
                 }),
+                constrained_sampling: None,
             }
         }
 
@@ -1561,6 +1729,232 @@ mod tests {
                 ..
             }
         )));
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn should_not_execute_tool_calls_from_a_length_truncated_assistant_message() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "echo",
+                    json!({ "value": "hel" }),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::Length),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: vec![Arc::new(echo_tool(Arc::clone(&executed)))],
+        };
+        let (events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("echo something")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert!(executed.lock().unwrap().is_empty());
+        let events = events.lock().unwrap();
+        let tool_end = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionEnd {
+                    result, is_error, ..
+                } => Some((result, is_error)),
+                _ => None,
+            })
+            .expect("tool execution end");
+        assert!(*tool_end.1);
+        assert!(
+            tool_end
+                .0
+                .content
+                .iter()
+                .any(|content| matches!(content, ToolResultContent::Text(text) if text.text.contains("output token limit")))
+        );
+        assert!(matches!(messages.last(), Some(Message::Assistant(_))));
+        assert_eq!(registration.state.call_count(), 2);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn should_ignore_tool_updates_after_the_tool_execution_settles() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message(
+            vec![faux_tool_call(
+                "delayed_tool",
+                json!({}),
+                Some("call-1".to_string()),
+            )],
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            }),
+        )]);
+        let delayed_update = Arc::new(StdMutex::new(None));
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: vec![Arc::new(DelayedUpdateTool {
+                name: "delayed_tool",
+                update: Arc::clone(&delayed_update),
+                started: None,
+                release: None,
+                emit_initial_update: true,
+            })],
+        };
+        let (events, emit) = collect_events();
+
+        run_agent_loop(
+            vec![user_text("run tool")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+        let event_count_after_prompt = events.lock().unwrap().len();
+
+        let delayed_update = delayed_update
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured update callback");
+        delayed_update(AgentToolResult {
+            content: vec![ToolResultContent::text("late")],
+            details: Some(json!({ "status": "late" })),
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+        })
+        .await;
+        tokio::task::yield_now().await;
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolExecutionUpdate { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(events.len(), event_count_after_prompt);
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn should_ignore_a_settled_parallel_tool_update_while_another_tool_is_running() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([faux_assistant_message(
+            vec![
+                faux_tool_call("settled_tool", json!({}), Some("call-1".to_string())),
+                faux_tool_call("slow_tool", json!({}), Some("call-2".to_string())),
+            ],
+            Some(FauxAssistantMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            }),
+        )]);
+        let settled_update = Arc::new(StdMutex::new(None));
+        let slow_started = Arc::new(tokio::sync::Notify::new());
+        let release_slow = Arc::new(tokio::sync::Notify::new());
+        let settled_ended = Arc::new(tokio::sync::Notify::new());
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let emit = Arc::new({
+            let events = Arc::clone(&events);
+            let settled_ended = Arc::clone(&settled_ended);
+            move |event: AgentEvent| {
+                let events = Arc::clone(&events);
+                let settled_ended = Arc::clone(&settled_ended);
+                Box::pin(async move {
+                    if matches!(
+                        &event,
+                        AgentEvent::ToolExecutionEnd { tool_call_id, .. } if tool_call_id == "call-1"
+                    ) {
+                        settled_ended.notify_one();
+                    }
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                })
+                    as Pin<Box<dyn std::future::Future<Output = crate::AgentResult<()>> + Send>>
+            }
+        });
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: vec![
+                Arc::new(DelayedUpdateTool {
+                    name: "settled_tool",
+                    update: Arc::clone(&settled_update),
+                    started: None,
+                    release: None,
+                    emit_initial_update: false,
+                }),
+                Arc::new(DelayedUpdateTool {
+                    name: "slow_tool",
+                    update: Arc::new(StdMutex::new(None)),
+                    started: Some(Arc::clone(&slow_started)),
+                    release: Some(Arc::clone(&release_slow)),
+                    emit_initial_update: false,
+                }),
+            ],
+        };
+        let run = tokio::spawn(run_agent_loop(
+            vec![user_text("run tools")],
+            context,
+            AgentLoopConfig::new(registration.get_model()),
+            emit,
+            None,
+            None,
+        ));
+        slow_started.notified().await;
+        settled_ended.notified().await;
+        let event_count_before_late_update = events.lock().unwrap().len();
+
+        let settled_update = settled_update
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured update callback");
+        settled_update(AgentToolResult {
+            content: vec![ToolResultContent::text("late")],
+            details: Some(json!({ "status": "late" })),
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+        })
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(events.lock().unwrap().len(), event_count_before_late_update);
+
+        release_slow.notify_one();
+        run.await.unwrap().expect("loop succeeds");
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolExecutionUpdate { .. }))
+                .count(),
+            0
+        );
         registration.unregister();
     }
 
@@ -2370,6 +2764,100 @@ mod tests {
                 .filter(|message| matches!(message, Message::Assistant(_)))
                 .count(),
             2
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn after_tool_call_observes_and_patches_tool_usage() {
+        let registration = register_faux_provider(None);
+        registration.set_responses([
+            faux_assistant_message(
+                vec![faux_tool_call(
+                    "llm_tool",
+                    json!({}),
+                    Some("tool-1".to_string()),
+                )],
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                }),
+            ),
+            faux_assistant_message("done", None),
+        ]);
+        let tool_usage = Usage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            total_tokens: 10,
+            cost: UsageCost {
+                input: 0.1,
+                output: 0.2,
+                cache_read: 0.3,
+                cache_write: 0.4,
+                total: 1.0,
+            },
+            ..Default::default()
+        };
+        let patched_tool_usage = Usage {
+            input: 5,
+            output: 6,
+            cache_read: 7,
+            cache_write: 8,
+            total_tokens: 26,
+            cost: UsageCost {
+                input: 0.5,
+                output: 0.6,
+                cache_read: 0.7,
+                cache_write: 0.8,
+                total: 2.6,
+            },
+            ..Default::default()
+        };
+        let observed_tool_usage = Arc::new(StdMutex::new(None));
+        let mut config = AgentLoopConfig::new(registration.get_model());
+        config.after_tool_call = Some(Arc::new({
+            let observed_tool_usage = Arc::clone(&observed_tool_usage);
+            let patched_tool_usage = patched_tool_usage.clone();
+            move |context: AfterToolCallContext, _token| {
+                *observed_tool_usage.lock().unwrap() = context.result.usage;
+                let patched_tool_usage = patched_tool_usage.clone();
+                Box::pin(async move {
+                    Ok(Some(AfterToolCallResult {
+                        usage: Some(patched_tool_usage),
+                        ..AfterToolCallResult::default()
+                    }))
+                })
+            }
+        }));
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: vec![Arc::new(UsageTool {
+                usage: tool_usage.clone(),
+            })],
+        };
+        let (_events, emit) = collect_events();
+
+        let messages = run_agent_loop(
+            vec![user_text("run the tool")],
+            context,
+            config,
+            emit,
+            None,
+            None,
+        )
+        .await
+        .expect("loop succeeds");
+
+        assert_eq!(*observed_tool_usage.lock().unwrap(), Some(tool_usage));
+        assert_eq!(
+            messages.iter().find_map(|message| match message {
+                Message::ToolResult(result) => result.usage.as_ref(),
+                _ => None,
+            }),
+            Some(&patched_tool_usage)
         );
         registration.unregister();
     }
