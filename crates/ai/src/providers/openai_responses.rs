@@ -32,7 +32,7 @@ use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sse;
 use crate::{Error, Result};
 
-const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai"];
+const OPENAI_TOOL_CALL_PROVIDERS: &[&str] = &["openai", "openai-codex", "opencode"];
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS: u32 = 16;
 
 #[derive(Clone, Default)]
@@ -976,26 +976,32 @@ async fn run_stream(
                 ));
             }
             "response.failed" => {
-                let response = parsed.get("response").unwrap_or(&parsed);
-                let message = response
-                    .get("error")
+                let response = parsed.get("response");
+                let error = response
+                    .and_then(|response| response.get("error"))
+                    .filter(|error| !error.is_null());
+                let details = response.and_then(|response| response.get("incomplete_details"));
+                let message = error
                     .map(|error| {
                         format!(
                             "{}: {}",
                             error
                                 .get("code")
                                 .and_then(Value::as_str)
+                                .filter(|code| !code.is_empty())
                                 .unwrap_or("unknown"),
                             error
                                 .get("message")
                                 .and_then(Value::as_str)
+                                .filter(|message| !message.is_empty())
                                 .unwrap_or("no message")
                         )
                     })
                     .or_else(|| {
-                        response
-                            .pointer("/incomplete_details/reason")
+                        details
+                            .and_then(|details| details.get("reason"))
                             .and_then(Value::as_str)
+                            .filter(|reason| !reason.is_empty())
                             .map(|reason| format!("incomplete: {reason}"))
                     })
                     .unwrap_or_else(|| "Unknown error (no error details in response)".to_string());
@@ -4121,6 +4127,108 @@ mod tests {
 
         assert_eq!(result.stop_reason, StopReason::Error);
         assert_eq!(result.error_message.as_deref(), Some("server_error: boom"));
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_event_with_null_error_returns_incomplete_reason() {
+        let body = sse_body(&[json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_failed",
+                "status": "failed",
+                "error": null,
+                "incomplete_details": { "reason": "content_filter" }
+            }
+        })]);
+        let base_url = spawn_sse_server(body).await;
+        let mut model = model();
+        model.base_url = base_url;
+
+        let result = crate::stream::final_message_from_stream(stream_openai_responses(
+            model,
+            Context {
+                messages: vec![Message::user_text("hello")],
+                ..Default::default()
+            },
+            OpenAIResponsesOptions {
+                base: StreamOptions {
+                    api_key: Some("test-key".to_string()),
+                    cache_retention: Some(CacheRetention::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("incomplete: content_filter")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_event_fallbacks_match_pi() {
+        for (event, expected) in [
+            (
+                json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed",
+                        "status": "failed",
+                        "error": { "code": "", "message": "" }
+                    }
+                }),
+                "unknown: no message",
+            ),
+            (
+                json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed",
+                        "status": "failed",
+                        "error": null,
+                        "incomplete_details": null
+                    }
+                }),
+                "Unknown error (no error details in response)",
+            ),
+            (
+                json!({
+                    "type": "response.failed",
+                    "error": { "code": "top_level", "message": "ignored" }
+                }),
+                "Unknown error (no error details in response)",
+            ),
+        ] {
+            let body = sse_body(&[event]);
+            let base_url = spawn_sse_server(body).await;
+            let mut model = model();
+            model.base_url = base_url;
+
+            let result = crate::stream::final_message_from_stream(stream_openai_responses(
+                model,
+                Context {
+                    messages: vec![Message::user_text("hello")],
+                    ..Default::default()
+                },
+                OpenAIResponsesOptions {
+                    base: StreamOptions {
+                        api_key: Some("test-key".to_string()),
+                        cache_retention: Some(CacheRetention::None),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+
+            assert_eq!(result.stop_reason, StopReason::Error);
+            assert_eq!(result.error_message.as_deref(), Some(expected));
+        }
     }
 
     #[tokio::test]
