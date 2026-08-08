@@ -32,6 +32,9 @@ pub enum Error {
     #[error("provider error: {0}")]
     Provider(String),
 
+    #[error("invalid provider response: {0}")]
+    InvalidProviderResponse(String),
+
     #[error("{0}")]
     Validation(String),
 

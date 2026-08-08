@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::Result;
-use crate::provider::LanguageModelApi;
+use crate::provider::{EmbeddingModelApi, LanguageModelApi};
 
 pub type Api = String;
 pub type ProviderId = String;
@@ -78,6 +78,7 @@ fn is_false(value: &bool) -> bool {
 #[serde(rename_all = "kebab-case")]
 pub enum KnownApi {
     OpenaiCompletions,
+    OpenaiEmbeddings,
     OpenaiResponses,
     OpenaiImages,
     AnthropicMessages,
@@ -88,6 +89,7 @@ impl KnownApi {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenaiCompletions => "openai-completions",
+            Self::OpenaiEmbeddings => "openai-embeddings",
             Self::OpenaiResponses => "openai-responses",
             Self::OpenaiImages => "openai-images",
             Self::AnthropicMessages => "anthropic-messages",
@@ -253,8 +255,78 @@ pub struct StreamOptions {
 }
 
 #[derive(Clone, Default)]
+pub struct RequestOptions {
+    pub cancellation_token: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    pub on_payload: Option<PayloadHook>,
+    pub on_response: Option<ResponseHook>,
+    pub headers: ProviderHeaders,
+    pub timeout_ms: Option<u64>,
+    /// Maximum retry attempts for providers that support client-side retries.
+    pub max_retries: Option<u32>,
+    /// Maximum delay in milliseconds to wait when the server requests a long
+    /// retry delay. If the requested delay exceeds this value, the request
+    /// fails immediately. Defaults to 60 seconds; set to zero to disable the
+    /// cap.
+    pub max_retry_delay_ms: Option<u64>,
+    pub http_client: Option<reqwest::Client>,
+}
+
+#[derive(Clone, Default)]
 pub struct ImageGenerationOptions {
     pub base: StreamOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingEncodingFormat {
+    #[default]
+    Float,
+    Base64,
+}
+
+impl EmbeddingEncodingFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Float => "float",
+            Self::Base64 => "base64",
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct EmbeddingOptions {
+    pub base: RequestOptions,
+    pub dimensions: Option<u32>,
+    pub encoding_format: Option<EmbeddingEncodingFormat>,
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingVector {
+    Float(Vec<f32>),
+    Base64(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Embedding {
+    pub embedding: EmbeddingVector,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingBatch {
+    pub embeddings: Vec<EmbeddingVector>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
 }
 
 #[derive(Clone, Default)]
@@ -1160,6 +1232,8 @@ pub struct Model {
     pub(crate) language_api: Option<Arc<dyn LanguageModelApi>>,
     #[serde(skip)]
     pub(crate) image_api: Option<Arc<dyn crate::provider::ImageModelApi>>,
+    #[serde(skip)]
+    pub(crate) embedding_api: Option<Arc<dyn EmbeddingModelApi>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,6 +1310,10 @@ impl Model {
 
     pub fn image_api(&self) -> Option<Arc<dyn crate::provider::ImageModelApi>> {
         self.image_api.clone()
+    }
+
+    pub fn embedding_api(&self) -> Option<Arc<dyn EmbeddingModelApi>> {
+        self.embedding_api.clone()
     }
 }
 

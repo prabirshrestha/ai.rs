@@ -53,6 +53,7 @@ impl Provider for OpenRouter {
         ProviderCapabilities {
             language_models: false,
             image_models: true,
+            embedding_models: false,
         }
     }
 

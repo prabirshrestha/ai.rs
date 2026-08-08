@@ -75,6 +75,7 @@ impl Provider for Anthropic {
         ProviderCapabilities {
             language_models: true,
             image_models: false,
+            embedding_models: false,
         }
     }
 

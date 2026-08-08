@@ -7,7 +7,9 @@ use crate::event_stream::AssistantEventStream;
 use crate::provider::{
     ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
 };
-use crate::providers::{openai_completions, openai_images, openai_responses, simple_options};
+use crate::providers::{
+    openai_completions, openai_embeddings, openai_images, openai_responses, simple_options,
+};
 use crate::types::{
     AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
     ModelInput, ModelOutput, OpenAIResponsesCompat, SimpleStreamOptions, StreamOptions,
@@ -31,6 +33,7 @@ pub enum OpenAiApi {
     #[default]
     Responses,
     ChatCompletions,
+    Embeddings,
     Images,
 }
 
@@ -39,6 +42,7 @@ impl OpenAiApi {
         match self {
             Self::Responses => "openai-responses",
             Self::ChatCompletions => "openai-completions",
+            Self::Embeddings => "openai-embeddings",
             Self::Images => "openai-images",
         }
     }
@@ -63,6 +67,21 @@ impl OpenAi {
         self.image_model_builder(id)
     }
 
+    pub fn embedding_model(&self, id: &str) -> ModelBuilder {
+        self.embedding_model_builder(id)
+    }
+
+    fn embedding_model_builder(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(openai_embeddings::OpenAiEmbeddingModelApi::new(
+            self.api_key.clone(),
+            self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL,
+            self.http_client.clone(),
+        ));
+        ModelBuilder::new_embedding(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![ModelInput::Text])
+    }
+
     fn image_model_builder(&self, id: &str) -> ModelBuilder {
         let runtime = Arc::new(OpenAiImageModelApi {
             api_key: self.api_key.clone(),
@@ -83,14 +102,18 @@ impl Provider for OpenAi {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            language_models: self.api != OpenAiApi::Images,
+            language_models: !matches!(self.api, OpenAiApi::Embeddings | OpenAiApi::Images),
             image_models: true,
+            embedding_models: true,
         }
     }
 
     fn model(&self, id: &str) -> ModelBuilder {
         if self.api == OpenAiApi::Images {
             return self.image_model_builder(id);
+        }
+        if self.api == OpenAiApi::Embeddings {
+            return self.embedding_model_builder(id);
         }
 
         let runtime = Arc::new(OpenAiLanguageModelApi {
@@ -184,6 +207,11 @@ impl OpenAiBuilder {
 
     pub fn images(mut self) -> Self {
         self.api = OpenAiApi::Images;
+        self
+    }
+
+    pub fn embeddings(mut self) -> Self {
+        self.api = OpenAiApi::Embeddings;
         self
     }
 
@@ -307,7 +335,7 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
                 context,
                 simple_options::openai_responses_options_from_stream_options(options),
             )),
-            OpenAiApi::Images => Err(Error::unsupported_capability(
+            OpenAiApi::Embeddings | OpenAiApi::Images => Err(Error::unsupported_capability(
                 model.provider,
                 "language models",
             )),
@@ -328,7 +356,7 @@ impl LanguageModelApi for OpenAiLanguageModelApi {
             OpenAiApi::Responses => {
                 openai_responses::stream_simple_openai_responses(model, context, options)
             }
-            OpenAiApi::Images => Err(Error::unsupported_capability(
+            OpenAiApi::Embeddings | OpenAiApi::Images => Err(Error::unsupported_capability(
                 model.provider,
                 "language models",
             )),
