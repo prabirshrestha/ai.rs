@@ -1,7 +1,8 @@
 # ai.rs
 
-Simple to use LLM library for Rust with streaming, tool calling, OAuth helpers,
-and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-works/pi).
+Simple to use AI library for Rust with LLM streaming, embeddings, tool calling,
+OAuth helpers, and a lightweight agent loop, inspired by
+[`pi`](https://github.com/earendil-works/pi).
 
 ## Using the Library
 
@@ -74,6 +75,28 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+```
+
+### Embeddings
+
+Use `embed` for one string and `embed_many` for multiple strings.
+
+```rust
+use ai::{embed, embed_many, providers::openai, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai
+        .embedding_model("text-embedding-3-small")
+        .build_embedding()?;
+
+    let one = embed(model.clone(), "hello", None).await?;
+    let batch = embed_many(model, ["first", "second"], None).await?;
+
+    println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
     Ok(())
 }
 ```
