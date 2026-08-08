@@ -18,6 +18,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 - [Image Generation](#image-generation)
   - [Basic Image Generation](#basic-image-generation)
   - [Notes and Limitations](#notes-and-limitations)
+- [Embeddings](#embeddings)
 - [Thinking/Reasoning](#thinkingreasoning)
   - [Unified Interface](#unified-interface-streamsimplecompletesimple)
   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
@@ -75,7 +76,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
 
 ## Supported Providers
 
-- **OpenAI** via Chat Completions, Responses, and Images
+- **OpenAI** via Chat Completions, Responses, Images, and Embeddings
 - **Anthropic** via Messages
 - **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
 - **OpenRouter** for image generation
@@ -92,6 +93,9 @@ The active built-in image generation APIs are:
 
 - `openai-images`
 - `openrouter-images`
+
+The active built-in embedding API is `openai-embeddings`, available through
+OpenAI-compatible and GitHub Copilot provider handles.
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
 `github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
@@ -562,6 +566,31 @@ implemented yet. OpenRouter image input and text output are opt-in model
 capabilities configured by the caller. Provider errors are returned as
 `AssistantImages` with `stop_reason: ImagesStopReason::Error`; cancelled
 requests use `ImagesStopReason::Aborted`.
+
+## Embeddings
+
+Use `embed` for one string and `embed_many` for multiple strings. Both call
+the OpenAI-compatible `/embeddings` endpoint. A single input is sent upstream
+as a one-item array for compatibility with providers that reject scalar input.
+Both functions are asynchronous and return a complete result rather than a
+stream.
+
+```rust
+use ai::{embed, embed_many, providers::openai, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai
+        .embedding_model("text-embedding-3-small")
+        .build_embedding()?;
+
+    let one = embed(model.clone(), "hello", None).await?;
+    let batch = embed_many(model, ["first", "second"], None).await?;
+    println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
+    Ok(())
+}
+```
 
 ## Thinking/Reasoning
 

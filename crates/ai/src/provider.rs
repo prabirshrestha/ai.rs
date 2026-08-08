@@ -5,8 +5,9 @@ use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::event_stream::AssistantEventStream;
 use crate::types::{
-    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat, ModelCost,
-    ModelInput, ModelOutput, SimpleStreamOptions, StreamOptions,
+    AssistantImages, Context, EmbeddingBatch, EmbeddingOptions, ImageGenerationOptions,
+    ImagesContext, Model, ModelCompat, ModelCost, ModelInput, ModelOutput, SimpleStreamOptions,
+    StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -14,6 +15,7 @@ use crate::{Error, Result};
 pub struct ProviderCapabilities {
     pub language_models: bool,
     pub image_models: bool,
+    pub embedding_models: bool,
 }
 
 pub trait Provider: dyn_clone::DynClone + Send + Sync + 'static {
@@ -62,6 +64,20 @@ pub trait ImageModelApi: dyn_clone::DynClone + Send + Sync + 'static {
 
 dyn_clone::clone_trait_object!(ImageModelApi);
 
+#[async_trait]
+pub trait EmbeddingModelApi: dyn_clone::DynClone + Send + Sync + 'static {
+    fn id(&self) -> &str;
+
+    async fn embed_many(
+        &self,
+        model: Model,
+        inputs: Vec<String>,
+        options: EmbeddingOptions,
+    ) -> Result<EmbeddingBatch>;
+}
+
+dyn_clone::clone_trait_object!(EmbeddingModelApi);
+
 #[derive(Clone)]
 pub struct ModelBuilder {
     model: Model,
@@ -99,6 +115,19 @@ impl ModelBuilder {
                 api: api.id().to_string(),
                 provider: provider_id.to_string(),
                 image_api: Some(api),
+                ..Model::default()
+            },
+        }
+    }
+
+    pub fn new_embedding(provider_id: &str, id: &str, api: Arc<dyn EmbeddingModelApi>) -> Self {
+        Self {
+            model: Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: api.id().to_string(),
+                provider: provider_id.to_string(),
+                embedding_api: Some(api),
                 ..Model::default()
             },
         }
@@ -167,10 +196,13 @@ impl ModelBuilder {
     }
 
     pub fn build(self) -> Result<Model> {
-        if self.model.language_api.is_none() && self.model.image_api.is_none() {
+        if self.model.language_api.is_none()
+            && self.model.image_api.is_none()
+            && self.model.embedding_api.is_none()
+        {
             return Err(Error::unsupported_capability(
                 self.model.provider,
-                "language or image models",
+                "language, image, or embedding models",
             ));
         }
         Ok(self.model)
@@ -191,6 +223,16 @@ impl ModelBuilder {
             return Err(Error::unsupported_capability(
                 self.model.provider,
                 "image models",
+            ));
+        }
+        Ok(self.model)
+    }
+
+    pub fn build_embedding(self) -> Result<Model> {
+        if self.model.embedding_api.is_none() {
+            return Err(Error::unsupported_capability(
+                self.model.provider,
+                "embedding models",
             ));
         }
         Ok(self.model)

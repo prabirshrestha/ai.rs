@@ -5,7 +5,9 @@ use crate::event_stream::AssistantEventStream;
 use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
 use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
 use crate::providers::github_copilot_headers::copilot_static_headers;
-use crate::providers::{anthropic, openai_completions, openai_responses, simple_options};
+use crate::providers::{
+    anthropic, openai_completions, openai_embeddings, openai_responses, simple_options,
+};
 use crate::types::{
     Context, Model, ModelCompat, ModelInput, OpenAIResponsesCompat, SimpleStreamOptions,
     StreamOptions,
@@ -57,6 +59,22 @@ impl GitHubCopilot {
     pub fn model(&self, id: &str) -> ModelBuilder {
         <Self as Provider>::model(self, id)
     }
+
+    pub fn embedding_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(openai_embeddings::OpenAiEmbeddingModelApi::new(
+            self.api_key.clone(),
+            false,
+            self.http_client.clone(),
+        ));
+        ModelBuilder::new_embedding(&self.provider_id, id, runtime)
+            .base_url(
+                self.base_url
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            )
+            .headers(copilot_static_headers())
+            .input(vec![ModelInput::Text])
+    }
 }
 
 impl Provider for GitHubCopilot {
@@ -68,6 +86,7 @@ impl Provider for GitHubCopilot {
         ProviderCapabilities {
             language_models: true,
             image_models: false,
+            embedding_models: true,
         }
     }
 
@@ -341,5 +360,22 @@ mod tests {
         assert_eq!(model.id(), "future-model");
         assert_eq!(model.api_id(), "openai-completions");
         assert_eq!(model.base_url, "https://copilot.example");
+    }
+
+    #[test]
+    fn embedding_model_uses_openai_embeddings_api() {
+        let provider = builder()
+            .api_key("test-token")
+            .base_url("https://copilot.example")
+            .build()
+            .expect("provider");
+        let model = provider
+            .embedding_model("text-embedding-3-small")
+            .build_embedding()
+            .expect("model");
+
+        assert_eq!(model.api_id(), "openai-embeddings");
+        assert_eq!(model.base_url, "https://copilot.example");
+        assert_eq!(model.input, vec![ModelInput::Text]);
     }
 }

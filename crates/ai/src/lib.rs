@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_error;
 pub mod agent_loop;
 pub mod agent_types;
+pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
@@ -24,6 +25,7 @@ pub use agent_loop::{
     AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
 };
 pub use agent_types::*;
+pub use embeddings::{embed, embed_many};
 pub use env_api_keys::{
     ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
     GITHUB_COPILOT_TOKEN_ENV_VAR, KnownProvider, OPENAI_API_KEY_ENV_VAR,
@@ -49,7 +51,10 @@ pub use oauth::{
     refresh_anthropic_token, refresh_github_copilot_token, refresh_oauth_token,
     register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
 };
-pub use provider::{ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+pub use provider::{
+    EmbeddingModelApi, ImageModelApi, LanguageModelApi, ModelBuilder, Provider,
+    ProviderCapabilities,
+};
 pub use providers::anthropic::{
     Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, stream_anthropic,
     stream_simple_anthropic,

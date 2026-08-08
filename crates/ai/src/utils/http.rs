@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::{RequestBuilder, Response, StatusCode, header::HeaderMap};
 use ring::rand::{SecureRandom, SystemRandom};
 
-use crate::types::StreamOptions;
+use crate::types::{RequestOptions, StreamOptions};
 use crate::{Error, Result};
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 600_000;
@@ -17,20 +17,50 @@ pub async fn send_with_retries<F>(options: &StreamOptions, mut build: F) -> Resu
 where
     F: FnMut() -> RequestBuilder,
 {
-    let max_retries = options.max_retries.unwrap_or(0);
+    send_with_retry_config(
+        options.cancellation_token.as_ref(),
+        options.max_retries,
+        options.max_retry_delay_ms,
+        &mut build,
+    )
+    .await
+}
+
+pub async fn send_request_with_retries<F>(
+    options: &RequestOptions,
+    mut build: F,
+) -> Result<Response>
+where
+    F: FnMut() -> RequestBuilder,
+{
+    send_with_retry_config(
+        options.cancellation_token.as_ref(),
+        options.max_retries,
+        options.max_retry_delay_ms,
+        &mut build,
+    )
+    .await
+}
+
+async fn send_with_retry_config<F>(
+    cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+    max_retries: Option<u32>,
+    max_retry_delay_ms: Option<u64>,
+    build: &mut F,
+) -> Result<Response>
+where
+    F: FnMut() -> RequestBuilder,
+{
+    let max_retries = max_retries.unwrap_or(0);
     let mut attempt = 0;
 
     loop {
-        if options
-            .cancellation_token
-            .as_ref()
-            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-        {
+        if cancellation_token.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
 
         let send = build().send();
-        let result = if let Some(cancellation_token) = options.cancellation_token.as_ref() {
+        let result = if let Some(cancellation_token) = cancellation_token {
             tokio::select! {
                 _ = cancellation_token.cancelled() => Err(Error::Cancelled),
                 response = send => response.map_err(Error::from),
@@ -41,18 +71,13 @@ where
 
         match result {
             Ok(response) if attempt < max_retries && is_retryable_response(&response) => {
-                let delay_ms = match retry_delay_ms(
-                    response.headers(),
-                    attempt,
-                    options.max_retry_delay_ms,
-                ) {
+                let delay_ms = match retry_delay_ms(response.headers(), attempt, max_retry_delay_ms)
+                {
                     Ok(delay_ms) => delay_ms,
                     Err(Error::Provider(message)) => {
                         let status = response.status();
                         let read_body = response.text();
-                        let body = if let Some(cancellation_token) =
-                            options.cancellation_token.as_ref()
-                        {
+                        let body = if let Some(cancellation_token) = cancellation_token {
                             tokio::select! {
                                 _ = cancellation_token.cancelled() => return Err(Error::Cancelled),
                                 body = read_body => body.unwrap_or_default(),
@@ -67,20 +92,42 @@ where
                     }
                     Err(error) => return Err(error),
                 };
-                sleep_before_retry(options, delay_ms).await?;
+                sleep_before_retry_token(cancellation_token, delay_ms).await?;
                 attempt += 1;
             }
             Ok(response) => return Ok(response),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(error) if attempt < max_retries => {
-                let delay_ms =
-                    retry_delay_ms(&HeaderMap::new(), attempt, options.max_retry_delay_ms)?;
-                sleep_before_retry(options, delay_ms).await?;
+            Err(_) if attempt < max_retries => {
+                let delay_ms = retry_delay_ms(&HeaderMap::new(), attempt, max_retry_delay_ms)?;
+                sleep_before_retry_token(cancellation_token, delay_ms).await?;
                 attempt += 1;
-                let _ = error;
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+async fn sleep_before_retry_token(
+    cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+    delay_ms: f64,
+) -> Result<()> {
+    if delay_ms.is_nan() || delay_ms <= 0.0 {
+        return Ok(());
+    }
+    let delay = if delay_ms.is_finite() {
+        Duration::from_secs_f64(delay_ms / 1000.0)
+    } else {
+        Duration::MAX
+    };
+
+    if let Some(cancellation_token) = cancellation_token {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => Err(Error::Cancelled),
+            _ = tokio::time::sleep(delay) => Ok(()),
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+        Ok(())
     }
 }
 
@@ -106,27 +153,6 @@ fn is_retryable_status(status: StatusCode) -> bool {
         status,
         StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
     ) || status.is_server_error()
-}
-
-async fn sleep_before_retry(options: &StreamOptions, delay_ms: f64) -> Result<()> {
-    if delay_ms.is_nan() || delay_ms <= 0.0 {
-        return Ok(());
-    }
-    let delay = if delay_ms.is_finite() {
-        Duration::from_secs_f64(delay_ms / 1000.0)
-    } else {
-        Duration::MAX
-    };
-
-    if let Some(cancellation_token) = options.cancellation_token.as_ref() {
-        tokio::select! {
-            _ = cancellation_token.cancelled() => Err(Error::Cancelled),
-            _ = tokio::time::sleep(delay) => Ok(()),
-        }
-    } else {
-        tokio::time::sleep(delay).await;
-        Ok(())
-    }
 }
 
 fn retry_delay_ms(
