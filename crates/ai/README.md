@@ -572,8 +572,6 @@ requests use `ImagesStopReason::Aborted`.
 Use `embed` for one string and `embed_many` for multiple strings. Both call
 the OpenAI-compatible `/embeddings` endpoint. A single input is sent upstream
 as a one-item array for compatibility with providers that reject scalar input.
-Both functions are asynchronous and return a complete result rather than a
-stream.
 
 ```rust
 use ai::{embed, embed_many, providers::openai, Result};
