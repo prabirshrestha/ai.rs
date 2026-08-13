@@ -4881,7 +4881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_function_call_done_replaces_delta_arguments() {
+    async fn response_function_call_done_uses_final_arguments_after_placeholder_start() {
         let body = sse_body(&[
             json!({
                 "type": "response.output_item.added",
@@ -4891,7 +4891,7 @@ mod tests {
                     "id": "fc_test",
                     "call_id": "call_test",
                     "name": "edit",
-                    "arguments": ""
+                    "arguments": "{}"
                 }
             }),
             json!({
@@ -4903,11 +4903,6 @@ mod tests {
                 "type": "response.function_call_arguments.delta",
                 "output_index": 0,
                 "delta": ",\"content\":\"updated\"}"
-            }),
-            json!({
-                "type": "response.function_call_arguments.done",
-                "output_index": 0,
-                "arguments": "{\"path\":\"README.md\",\"content\":\"updated\"}"
             }),
             json!({
                 "type": "response.output_item.done",
