@@ -9,8 +9,8 @@ use crate::providers::{
     anthropic, openai_completions, openai_embeddings, openai_responses, simple_options,
 };
 use crate::types::{
-    Context, Model, ModelCompat, ModelInput, OpenAIResponsesCompat, SimpleStreamOptions,
-    StreamOptions,
+    Context, Model, ModelCompat, ModelInput, OpenAICompletionsCompat, OpenAIResponsesCompat,
+    SimpleStreamOptions, StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -91,7 +91,7 @@ impl Provider for GitHubCopilot {
     }
 
     fn model(&self, id: &str) -> ModelBuilder {
-        let api = self.api.unwrap_or_default();
+        let api = self.api.unwrap_or_else(|| default_api_for_model(id));
         let runtime = Arc::new(GitHubCopilotLanguageModelApi {
             api,
             api_key: self.api_key.clone(),
@@ -101,12 +101,28 @@ impl Provider for GitHubCopilot {
             .base_url
             .clone()
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let base_url = if api == GitHubCopilotApi::AnthropicMessages {
+            anthropic_messages_base_url(&base_url)
+        } else {
+            base_url
+        };
         let mut compat = ModelCompat::default();
-        if api == GitHubCopilotApi::OpenAiResponses {
-            compat.openai_responses = OpenAIResponsesCompat {
-                supports_openai_grammar_tools: is_gpt_5_or_newer(id).then_some(true),
-                ..Default::default()
-            };
+        match api {
+            GitHubCopilotApi::OpenAiResponses => {
+                compat.openai_responses = OpenAIResponsesCompat {
+                    supports_openai_grammar_tools: is_gpt_5_or_newer(id).then_some(true),
+                    ..Default::default()
+                };
+            }
+            GitHubCopilotApi::OpenAiChatCompletions => {
+                compat.openai_completions = OpenAICompletionsCompat {
+                    supports_store: Some(false),
+                    supports_developer_role: Some(false),
+                    supports_reasoning_effort: Some(false),
+                    ..Default::default()
+                };
+            }
+            GitHubCopilotApi::AnthropicMessages => {}
         }
         ModelBuilder::new(&self.provider_id, id, runtime)
             .base_url(base_url)
@@ -123,6 +139,56 @@ fn is_gpt_5_or_newer(id: &str) -> bool {
         .and_then(|suffix| suffix.split(['.', '-']).next())
         .and_then(|major| major.parse::<u32>().ok())
         .is_some_and(|major| major >= 5)
+}
+
+/// Copilot serves Claude 4.x and 5.x through the Anthropic Messages API, and
+/// Grok, GPT-5, `oswe`, and MAI models only through `/responses`. Everything
+/// else goes through Chat Completions. Mirrors the per-model `api` assignment
+/// pi bakes into its generated Copilot catalog.
+fn default_api_for_model(id: &str) -> GitHubCopilotApi {
+    if is_copilot_claude(id) {
+        GitHubCopilotApi::AnthropicMessages
+    } else if needs_responses_api(id) {
+        GitHubCopilotApi::OpenAiResponses
+    } else {
+        GitHubCopilotApi::OpenAiChatCompletions
+    }
+}
+
+/// Matches pi's `/^claude-(haiku|sonnet|opus)-[45]([.\-]|$)/`.
+fn is_copilot_claude(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("claude-") else {
+        return false;
+    };
+    let rest = ["haiku-", "sonnet-", "opus-"]
+        .iter()
+        .find_map(|family| rest.strip_prefix(family));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    if !matches!(chars.next(), Some('4' | '5')) {
+        return false;
+    }
+    matches!(chars.next(), None | Some('.') | Some('-'))
+}
+
+fn needs_responses_api(id: &str) -> bool {
+    id.starts_with("grok-")
+        || id.starts_with("gpt-5")
+        || id.starts_with("oswe")
+        || id.starts_with("mai-")
+}
+
+/// Copilot exposes the Anthropic Messages API under `/v1/messages`, while
+/// [`anthropic`] appends `/messages` to the configured base URL. Add the
+/// version segment so Copilot Claude requests do not 404.
+fn anthropic_messages_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/v1")
 }
 
 #[derive(Default)]
@@ -311,6 +377,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selects_the_api_pi_assigns_to_each_copilot_model() {
+        for id in [
+            "claude-sonnet-5",
+            "claude-opus-4.8",
+            "claude-haiku-4.5",
+            "claude-sonnet-4",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::AnthropicMessages,
+                "{id} should use the Anthropic Messages API"
+            );
+        }
+        for id in [
+            "gpt-5.6-sol",
+            "grok-4.5",
+            "oswe-preview",
+            "mai-code-1-flash",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::OpenAiResponses,
+                "{id} should use the Responses API"
+            );
+        }
+        for id in [
+            "gpt-4.1",
+            "gemini-3.7-flash",
+            "claude-sonnet-3.7",
+            "o3-mini",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::OpenAiChatCompletions,
+                "{id} should use Chat Completions"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_models_target_the_copilot_anthropic_version_path() {
+        let provider = builder()
+            .api_key("test-token")
+            .base_url("https://api.enterprise.githubcopilot.com")
+            .build()
+            .expect("provider");
+        let claude = provider.model("claude-sonnet-5").build().expect("model");
+        let gpt = provider.model("gpt-5.6-sol").build().expect("model");
+
+        assert_eq!(claude.api_id(), "anthropic-messages");
+        assert_eq!(
+            claude.base_url, "https://api.enterprise.githubcopilot.com/v1",
+            "Copilot serves Anthropic Messages under /v1/messages"
+        );
+        assert_eq!(gpt.api_id(), "openai-responses");
+        assert_eq!(gpt.base_url, "https://api.enterprise.githubcopilot.com");
+    }
+
+    #[test]
+    fn explicit_api_selection_still_wins() {
+        let provider = builder()
+            .api_key("test-token")
+            .base_url("https://api.enterprise.githubcopilot.com")
+            .chat_completions()
+            .build()
+            .expect("provider");
+        let claude = provider.model("claude-sonnet-5").build().expect("model");
+
+        assert_eq!(claude.api_id(), "openai-completions");
+        assert_eq!(claude.compat.openai_completions.supports_store, Some(false));
+        assert_eq!(
+            claude.compat.openai_completions.supports_developer_role,
+            Some(false)
+        );
+        assert_eq!(
+            claude.compat.openai_completions.supports_reasoning_effort,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn anthropic_base_url_is_not_double_versioned() {
+        assert_eq!(
+            anthropic_messages_base_url("https://api.example.com/v1"),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            anthropic_messages_base_url("https://api.example.com/"),
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
     fn responses_gpt_5_models_enable_pi_grammar_tools() {
         let provider = builder().api_key("test-token").build().expect("provider");
         let gpt_5 = provider.model("gpt-5.4").build().expect("model");
@@ -327,13 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn default_model_uses_responses_api_without_catalog_metadata() {
+    fn default_model_routing_applies_without_catalog_metadata() {
         let provider = builder().api_key("test-token").build().expect("provider");
         let model = provider.model("claude-opus-4.5").build().expect("model");
 
         assert_eq!(model.provider_id(), "github-copilot");
-        assert_eq!(model.api_id(), "openai-responses");
-        assert_eq!(model.base_url, DEFAULT_BASE_URL);
+        assert_eq!(model.api_id(), "anthropic-messages");
+        assert_eq!(model.base_url, format!("{DEFAULT_BASE_URL}/v1"));
         assert_eq!(
             model.headers.get("Editor-Version").map(String::as_str),
             Some("vscode/1.107.0")
