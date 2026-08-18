@@ -367,8 +367,13 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     let token = mint_copilot_token(&github.access_token, enterprise_domain.as_deref()).await?;
 
     // Claude, Grok, and similar models stay hidden until their policy is
-    // accepted, so enable them once here the way pi does at login.
-    enable_all_github_copilot_models(&token.token, enterprise_domain.as_deref()).await;
+    // accepted, so enable them once here before listing what is available.
+    enable_all_github_copilot_models(
+        &token.token,
+        enterprise_domain.as_deref(),
+        callbacks.cancellation_token.clone(),
+    )
+    .await;
 
     let mut credentials = copilot_credentials_from_token(
         &github.access_token,
@@ -478,14 +483,17 @@ async fn send_copilot_models_request(
         .await?)
 }
 
-/// Enables the Copilot models that require explicit policy acceptance, such as
-/// Claude and Grok. Mirrors pi's `enableAllGitHubCopilotModels`, which runs once
-/// at login so the account's picker exposes every entitled model.
+/// Accepts the policy on every Copilot model that still requires it, such as
+/// Claude and Grok, so the account's picker exposes each entitled model.
 ///
-/// pi walks its generated Copilot catalog; ai.rs has no such catalog, so the
-/// pending ids come from the `/models` response instead. Every step is
-/// best-effort: a login must not fail because a policy update was rejected.
-async fn enable_all_github_copilot_models(copilot_token: &str, enterprise_domain: Option<&str>) {
+/// Runs once at login. The pending ids come from the `/models` response, and
+/// every step is best-effort: a login must not fail because a policy update was
+/// rejected or the account is not entitled to a model.
+async fn enable_all_github_copilot_models(
+    copilot_token: &str,
+    enterprise_domain: Option<&str>,
+    cancellation_token: Option<CancellationToken>,
+) {
     let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -500,6 +508,12 @@ async fn enable_all_github_copilot_models(copilot_token: &str, enterprise_domain
         return;
     };
     for id in policy_pending_copilot_model_ids(&raw) {
+        if cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return;
+        }
         enable_github_copilot_model(&client, &base_url, copilot_token, &id).await;
     }
 }
@@ -526,14 +540,15 @@ fn policy_pending_copilot_model_ids(raw: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Accepts the policy for a single model, reporting whether Copilot agreed.
 async fn enable_github_copilot_model(
     client: &reqwest::Client,
     base_url: &str,
     copilot_token: &str,
     model_id: &str,
-) {
+) -> bool {
     let Ok(mut headers) = copilot_headers(Some(copilot_token)) else {
-        return;
+        return false;
     };
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -547,12 +562,13 @@ async fn enable_github_copilot_model(
         "x-interaction-type",
         reqwest::header::HeaderValue::from_static("chat-policy"),
     );
-    let _ = client
+    client
         .post(format!("{base_url}/models/{model_id}/policy"))
         .headers(headers)
         .json(&serde_json::json!({ "state": "enabled" }))
         .send()
-        .await;
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 fn parse_available_copilot_model_ids(
@@ -1428,6 +1444,48 @@ mod tests {
         assert!(
             body.contains(&format!("client_id={GITHUB_COPILOT_CLIENT_ID}")),
             "body: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_a_model_policy_reports_whether_copilot_accepted_it() {
+        // The policy update is best-effort, but callers still need to know
+        // whether it landed, so a rejection must not look like success.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let seen = captured.clone();
+        tokio::spawn(async move {
+            for status in ["200 OK", "403 Forbidden"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                seen.lock().expect("lock poisoned").push(request);
+                let response = format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\n\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        assert!(
+            enable_github_copilot_model(&client, &base_url, "tid=token", "claude-sonnet-5").await
+        );
+        assert!(
+            !enable_github_copilot_model(&client, &base_url, "tid=token", "claude-opus-4.8").await
+        );
+
+        let requests = captured.lock().expect("lock poisoned").clone();
+        assert!(
+            requests[0].starts_with("POST /models/claude-sonnet-5/policy"),
+            "request: {}",
+            requests[0]
+        );
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("openai-intent: chat-policy"),
+            "request: {}",
+            requests[0]
         );
     }
 

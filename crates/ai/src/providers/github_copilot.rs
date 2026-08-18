@@ -143,8 +143,8 @@ fn is_gpt_5_or_newer(id: &str) -> bool {
 
 /// Copilot serves Claude 4.x and 5.x through the Anthropic Messages API, and
 /// Grok, GPT-5, `oswe`, and MAI models only through `/responses`. Everything
-/// else goes through Chat Completions. Mirrors the per-model `api` assignment
-/// pi bakes into its generated Copilot catalog.
+/// else goes through Chat Completions. Used when the catalog carries no
+/// explicit `api` for a model.
 fn default_api_for_model(id: &str) -> GitHubCopilotApi {
     if is_copilot_claude(id) {
         GitHubCopilotApi::AnthropicMessages
@@ -155,7 +155,8 @@ fn default_api_for_model(id: &str) -> GitHubCopilotApi {
     }
 }
 
-/// Matches pi's `/^claude-(haiku|sonnet|opus)-[45]([.\-]|$)/`.
+/// Matches `claude-{haiku,sonnet,opus}-{4,5}` and its dotted or dashed
+/// revisions, the families Copilot serves over the Anthropic Messages API.
 fn is_copilot_claude(id: &str) -> bool {
     let Some(rest) = id.strip_prefix("claude-") else {
         return false;
