@@ -218,7 +218,7 @@ pub async fn refresh_github_copilot_token(
         enterprise_domain.and_then(normalize_domain),
         token,
     );
-    set_available_copilot_model_ids(&mut credentials, enterprise_domain).await?;
+    set_available_copilot_model_ids(&mut credentials, enterprise_domain, None).await?;
     Ok(credentials)
 }
 
@@ -280,7 +280,7 @@ async fn refresh_github_copilot_credentials(
         enterprise_domain.clone(),
         token,
     );
-    set_available_copilot_model_ids(&mut credentials, domain).await?;
+    set_available_copilot_model_ids(&mut credentials, domain, None).await?;
     Ok(credentials)
 }
 
@@ -382,7 +382,23 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
         enterprise_domain,
         token,
     );
-    set_available_copilot_model_ids(&mut credentials, Some(domain.as_str())).await?;
+    // The policy updates above can drain the Copilot rate limit, so listing the
+    // available ids can still fail after its one retry. A completed device
+    // authorization must survive that: the ids only narrow the picker, and
+    // their absence leaves every model visible. Cancellation still aborts.
+    let listed = set_available_copilot_model_ids(
+        &mut credentials,
+        Some(domain.as_str()),
+        callbacks.cancellation_token.as_ref(),
+    )
+    .await;
+    if callbacks
+        .cancellation_token
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        listed?;
+    }
     Ok(credentials)
 }
 
@@ -421,8 +437,14 @@ fn available_copilot_model_ids(credentials: &OAuthCredentials) -> Option<HashSet
 async fn set_available_copilot_model_ids(
     credentials: &mut OAuthCredentials,
     enterprise_domain: Option<&str>,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    let ids = fetch_available_copilot_model_ids(&credentials.access, enterprise_domain).await?;
+    let ids = fetch_available_copilot_model_ids(
+        &credentials.access,
+        enterprise_domain,
+        cancellation_token,
+    )
+    .await?;
     credentials.extra.insert(
         GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY.to_string(),
         Value::Array(ids.into_iter().map(Value::String).collect()),
@@ -433,33 +455,33 @@ async fn set_available_copilot_model_ids(
 async fn fetch_available_copilot_model_ids(
     copilot_token: &str,
     enterprise_domain: Option<&str>,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<Vec<String>> {
     let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
-    fetch_available_copilot_model_ids_at(&client, &base_url, copilot_token).await
+    fetch_available_copilot_model_ids_at(&client, &base_url, copilot_token, cancellation_token)
+        .await
 }
 
 async fn fetch_available_copilot_model_ids_at(
     client: &reqwest::Client,
     base_url: &str,
     copilot_token: &str,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Result<Vec<String>> {
     // Login-time policy updates can drain the Copilot rate-limit bucket, so a
     // 429 here is expected. Honor Retry-After once instead of failing login.
     let mut response = send_copilot_models_request(client, base_url, copilot_token).await?;
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let wait = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|seconds| *seconds > 0)
-            .map_or(COPILOT_DEFAULT_RETRY_AFTER_MS, |seconds| {
-                (seconds * 1000).min(COPILOT_MAX_RETRY_AFTER_MS)
-            });
-        abortable_sleep(Duration::from_millis(wait), None).await?;
+        let wait = copilot_retry_after_ms(
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+        );
+        abortable_sleep(Duration::from_millis(wait), cancellation_token).await?;
         response = send_copilot_models_request(client, base_url, copilot_token).await?;
     }
     let response = error_for_status(response).await?;
@@ -468,6 +490,20 @@ async fn fetch_available_copilot_model_ids_at(
     // account types keep strict picker semantics.
     let allow_policy_fallback = base_url == DEFAULT_COPILOT_BASE_URL;
     parse_available_copilot_model_ids(response.json::<Value>().await?, allow_policy_fallback)
+}
+
+/// Milliseconds to wait before retrying a rate-limited `/models` request.
+///
+/// A `Retry-After` large enough to overflow the millisecond conversion must
+/// still clamp to [`COPILOT_MAX_RETRY_AFTER_MS`] rather than wrap into a short
+/// or panicking wait, so the multiplication saturates.
+fn copilot_retry_after_ms(retry_after: Option<&str>) -> u64 {
+    retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map_or(COPILOT_DEFAULT_RETRY_AFTER_MS, |seconds| {
+            seconds.saturating_mul(1000).min(COPILOT_MAX_RETRY_AFTER_MS)
+        })
 }
 
 async fn send_copilot_models_request(
@@ -876,6 +912,28 @@ mod tests {
     use crate::oauth::test_support::read_http_request;
     use crate::types::ModelCost;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn retry_after_saturates_instead_of_overflowing() {
+        assert_eq!(
+            copilot_retry_after_ms(Some(&u64::MAX.to_string())),
+            COPILOT_MAX_RETRY_AFTER_MS
+        );
+        assert_eq!(
+            copilot_retry_after_ms(Some("3")),
+            3_000.min(COPILOT_MAX_RETRY_AFTER_MS)
+        );
+        assert_eq!(
+            copilot_retry_after_ms(Some("600")),
+            COPILOT_MAX_RETRY_AFTER_MS
+        );
+        for missing in [None, Some("0"), Some("later")] {
+            assert_eq!(
+                copilot_retry_after_ms(missing),
+                COPILOT_DEFAULT_RETRY_AFTER_MS
+            );
+        }
+    }
     use tokio::net::TcpListener;
 
     #[test]
@@ -1169,6 +1227,7 @@ mod tests {
             &client,
             &format!("http://{addr}"),
             "copilot-token",
+            None,
         )
         .await
         .expect("available models");
