@@ -29,6 +29,9 @@ const GITHUB_COPILOT_AVAILABLE_MODEL_IDS_KEY: &str = "availableModelIds";
 
 const GITHUB_ACCESS_TOKEN_EXPIRY_SKEW_MS: u64 = 5 * 60 * 1000;
 
+const COPILOT_MAX_RETRY_AFTER_MS: u64 = 10_000;
+const COPILOT_DEFAULT_RETRY_AFTER_MS: u64 = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitHubCopilotOAuthProvider;
 
@@ -363,6 +366,15 @@ pub async fn login_github_copilot(callbacks: OAuthLoginCallbacks) -> Result<OAut
     let github_expires = github.expires_in.map(github_access_expiry_ms);
     let token = mint_copilot_token(&github.access_token, enterprise_domain.as_deref()).await?;
 
+    // Claude, Grok, and similar models stay hidden until their policy is
+    // accepted, so enable them once here before listing what is available.
+    enable_all_github_copilot_models(
+        &token.token,
+        enterprise_domain.as_deref(),
+        callbacks.cancellation_token.clone(),
+    )
+    .await;
+
     let mut credentials = copilot_credentials_from_token(
         &github.access_token,
         github.refresh_token.as_deref(),
@@ -434,17 +446,135 @@ async fn fetch_available_copilot_model_ids_at(
     base_url: &str,
     copilot_token: &str,
 ) -> Result<Vec<String>> {
-    let response = client
+    // Login-time policy updates can drain the Copilot rate-limit bucket, so a
+    // 429 here is expected. Honor Retry-After once instead of failing login.
+    let mut response = send_copilot_models_request(client, base_url, copilot_token).await?;
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let wait = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map_or(COPILOT_DEFAULT_RETRY_AFTER_MS, |seconds| {
+                (seconds * 1000).min(COPILOT_MAX_RETRY_AFTER_MS)
+            });
+        abortable_sleep(Duration::from_millis(wait), None).await?;
+        response = send_copilot_models_request(client, base_url, copilot_token).await?;
+    }
+    let response = error_for_status(response).await?;
+    // Some Individual accounts return false for every picker flag despite
+    // explicit enabled policies. Limit the fallback to that endpoint so other
+    // account types keep strict picker semantics.
+    let allow_policy_fallback = base_url == DEFAULT_COPILOT_BASE_URL;
+    parse_available_copilot_model_ids(response.json::<Value>().await?, allow_policy_fallback)
+}
+
+async fn send_copilot_models_request(
+    client: &reqwest::Client,
+    base_url: &str,
+    copilot_token: &str,
+) -> Result<reqwest::Response> {
+    Ok(client
         .get(format!("{base_url}/models"))
         .headers(copilot_headers(Some(copilot_token))?)
         .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
         .send()
-        .await?;
-    let response = error_for_status(response).await?;
-    parse_available_copilot_model_ids(response.json::<Value>().await?)
+        .await?)
 }
 
-fn parse_available_copilot_model_ids(raw: Value) -> Result<Vec<String>> {
+/// Accepts the policy on every Copilot model that still requires it, such as
+/// Claude and Grok, so the account's picker exposes each entitled model.
+///
+/// Runs once at login. The pending ids come from the `/models` response, and
+/// every step is best-effort: a login must not fail because a policy update was
+/// rejected or the account is not entitled to a model.
+async fn enable_all_github_copilot_models(
+    copilot_token: &str,
+    enterprise_domain: Option<&str>,
+    cancellation_token: Option<CancellationToken>,
+) {
+    let base_url = get_github_copilot_base_url(Some(copilot_token), enterprise_domain);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+    let Ok(response) = send_copilot_models_request(&client, &base_url, copilot_token).await else {
+        return;
+    };
+    let Ok(raw) = response.json::<Value>().await else {
+        return;
+    };
+    for id in policy_pending_copilot_model_ids(&raw) {
+        if cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return;
+        }
+        enable_github_copilot_model(&client, &base_url, copilot_token, &id).await;
+    }
+}
+
+/// Model ids that declare a policy that is not yet enabled.
+fn policy_pending_copilot_model_ids(raw: &Value) -> Vec<String> {
+    let Some(data) = raw
+        .as_object()
+        .and_then(|object| object.get("data"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(Value::as_object)
+        .filter(|item| {
+            item.get("policy")
+                .and_then(Value::as_object)
+                .and_then(|policy| policy.get("state"))
+                .and_then(Value::as_str)
+                .is_some_and(|state| state != "enabled")
+        })
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// Accepts the policy for a single model, reporting whether Copilot agreed.
+async fn enable_github_copilot_model(
+    client: &reqwest::Client,
+    base_url: &str,
+    copilot_token: &str,
+    model_id: &str,
+) -> bool {
+    let Ok(mut headers) = copilot_headers(Some(copilot_token)) else {
+        return false;
+    };
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        "openai-intent",
+        reqwest::header::HeaderValue::from_static("chat-policy"),
+    );
+    headers.insert(
+        "x-interaction-type",
+        reqwest::header::HeaderValue::from_static("chat-policy"),
+    );
+    client
+        .post(format!("{base_url}/models/{model_id}/policy"))
+        .headers(headers)
+        .json(&serde_json::json!({ "state": "enabled" }))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
+}
+
+fn parse_available_copilot_model_ids(
+    raw: Value,
+    allow_policy_fallback: bool,
+) -> Result<Vec<String>> {
     let Some(data) = raw
         .as_object()
         .and_then(|object| object.get("data"))
@@ -455,28 +585,44 @@ fn parse_available_copilot_model_ids(raw: Value) -> Result<Vec<String>> {
         ));
     };
 
-    Ok(data
-        .iter()
-        .filter_map(Value::as_object)
-        .filter(|item| item.get("model_picker_enabled").and_then(Value::as_bool) == Some(true))
-        .filter(|item| {
-            item.get("policy")
-                .and_then(Value::as_object)
-                .and_then(|policy| policy.get("state"))
-                .and_then(Value::as_str)
-                != Some("disabled")
-        })
-        .filter(|item| {
-            item.get("capabilities")
-                .and_then(Value::as_object)
-                .and_then(|capabilities| capabilities.get("supports"))
-                .and_then(Value::as_object)
-                .and_then(|supports| supports.get("tool_calls"))
-                .and_then(Value::as_bool)
-                != Some(false)
-        })
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .collect())
+    let mut picker_ids = Vec::new();
+    let mut policy_enabled_ids = Vec::new();
+    for item in data.iter().filter_map(Value::as_object) {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let supports_tool_calls = item
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .and_then(|capabilities| capabilities.get("supports"))
+            .and_then(Value::as_object)
+            .and_then(|supports| supports.get("tool_calls"))
+            .and_then(Value::as_bool)
+            != Some(false);
+        if !supports_tool_calls {
+            continue;
+        }
+        let policy_state = item
+            .get("policy")
+            .and_then(Value::as_object)
+            .and_then(|policy| policy.get("state"))
+            .and_then(Value::as_str);
+        if item.get("model_picker_enabled").and_then(Value::as_bool) == Some(true)
+            && policy_state != Some("disabled")
+        {
+            picker_ids.push(id.to_string());
+        }
+        if policy_state == Some("enabled") {
+            policy_enabled_ids.push(id.to_string());
+        }
+    }
+
+    // Some Individual accounts report false for every picker flag even though
+    // policies are explicitly enabled, which would otherwise hide every model.
+    if picker_ids.is_empty() && allow_policy_fallback {
+        return Ok(policy_enabled_ids);
+    }
+    Ok(picker_ids)
 }
 
 async fn start_github_device_flow(domain: &str) -> Result<DeviceCodeResponse> {
@@ -903,39 +1049,90 @@ mod tests {
 
     #[test]
     fn parses_only_selectable_copilot_models() {
-        let ids = parse_available_copilot_model_ids(serde_json::json!({
-            "data": [
-                {
-                    "id": "gpt-4.1",
-                    "model_picker_enabled": true,
-                    "capabilities": { "supports": { "tool_calls": true } }
-                },
-                {
-                    "id": "claude-opus-4.7",
-                    "model_picker_enabled": true,
-                    "policy": { "state": "disabled" },
-                    "capabilities": { "supports": { "tool_calls": true } }
-                },
-                {
-                    "id": "gpt-5.4-nano",
-                    "model_picker_enabled": false,
-                    "capabilities": { "supports": { "tool_calls": true } }
-                },
-                {
-                    "id": "text-only",
-                    "model_picker_enabled": true,
-                    "capabilities": { "supports": { "tool_calls": false } }
-                }
-            ]
-        }))
+        let ids = parse_available_copilot_model_ids(
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "gpt-4.1",
+                        "model_picker_enabled": true,
+                        "capabilities": { "supports": { "tool_calls": true } }
+                    },
+                    {
+                        "id": "claude-opus-4.7",
+                        "model_picker_enabled": true,
+                        "policy": { "state": "disabled" },
+                        "capabilities": { "supports": { "tool_calls": true } }
+                    },
+                    {
+                        "id": "gpt-5.4-nano",
+                        "model_picker_enabled": false,
+                        "capabilities": { "supports": { "tool_calls": true } }
+                    },
+                    {
+                        "id": "text-only",
+                        "model_picker_enabled": true,
+                        "capabilities": { "supports": { "tool_calls": false } }
+                    }
+                ]
+            }),
+            false,
+        )
         .expect("models response");
 
         assert_eq!(ids, vec!["gpt-4.1"]);
         assert_eq!(
-            parse_available_copilot_model_ids(serde_json::json!({}))
+            parse_available_copilot_model_ids(serde_json::json!({}), false)
                 .unwrap_err()
                 .to_string(),
             "provider error: Invalid Copilot models response"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_policy_enabled_models_when_picker_is_empty() {
+        let raw = serde_json::json!({
+            "data": [
+                {
+                    "id": "claude-sonnet-5",
+                    "model_picker_enabled": false,
+                    "policy": { "state": "enabled" },
+                    "capabilities": { "supports": { "tool_calls": true } }
+                },
+                {
+                    "id": "unconfigured",
+                    "model_picker_enabled": false,
+                    "policy": { "state": "unconfigured" },
+                    "capabilities": { "supports": { "tool_calls": true } }
+                }
+            ]
+        });
+
+        assert_eq!(
+            parse_available_copilot_model_ids(raw.clone(), true).expect("models"),
+            vec!["claude-sonnet-5"]
+        );
+        assert!(
+            parse_available_copilot_model_ids(raw, false)
+                .expect("models")
+                .is_empty(),
+            "strict picker semantics apply when the fallback is not allowed"
+        );
+    }
+
+    #[test]
+    fn policy_pending_ids_skip_already_enabled_models() {
+        let raw = serde_json::json!({
+            "data": [
+                { "id": "enabled-model", "policy": { "state": "enabled" } },
+                { "id": "unconfigured-model", "policy": { "state": "unconfigured" } },
+                { "id": "disabled-model", "policy": { "state": "disabled" } },
+                { "id": "no-policy-model" }
+            ]
+        });
+
+        assert_eq!(
+            policy_pending_copilot_model_ids(&raw),
+            vec!["unconfigured-model", "disabled-model"]
         );
     }
 
@@ -1247,6 +1444,48 @@ mod tests {
         assert!(
             body.contains(&format!("client_id={GITHUB_COPILOT_CLIENT_ID}")),
             "body: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_a_model_policy_reports_whether_copilot_accepted_it() {
+        // The policy update is best-effort, but callers still need to know
+        // whether it landed, so a rejection must not look like success.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let seen = captured.clone();
+        tokio::spawn(async move {
+            for status in ["200 OK", "403 Forbidden"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                seen.lock().expect("lock poisoned").push(request);
+                let response = format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\n\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        assert!(
+            enable_github_copilot_model(&client, &base_url, "tid=token", "claude-sonnet-5").await
+        );
+        assert!(
+            !enable_github_copilot_model(&client, &base_url, "tid=token", "claude-opus-4.8").await
+        );
+
+        let requests = captured.lock().expect("lock poisoned").clone();
+        assert!(
+            requests[0].starts_with("POST /models/claude-sonnet-5/policy"),
+            "request: {}",
+            requests[0]
+        );
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("openai-intent: chat-policy"),
+            "request: {}",
+            requests[0]
         );
     }
 
