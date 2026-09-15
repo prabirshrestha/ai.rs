@@ -30,6 +30,11 @@ OpenRouter image generation. Use `providers::openai::builder()` for
 OpenAI-compatible endpoints such as llama.cpp, MLX, Ollama, vLLM, and Azure
 Foundry.
 
+### zs
+
+See [crates/zs](crates/zs/README.md) for `zs`, a small Codex/Grok-style CLI
+harness. After it is published: `cargo install zs`.
+
 ### Simple Coding Agent
 
 See [examples/simple-coding-agent](examples/simple-coding-agent/README.md) for a tiny interactive coding-agent example with one `bash` tool.

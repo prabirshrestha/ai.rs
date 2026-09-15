@@ -13,9 +13,10 @@ authors = ["Prabir Shrestha <mail@prabir.me>"]
 repository = "https://github.com/prabirshrestha/ai.rs"
 
 [workspace.dependencies]
-ai = { path = "crates/ai" }
+ai = { path = "crates/ai", version = "0.7.2" }
 async-stream = "0.3.6"
 async-trait = "0.1.85"
+clap = { version = "4.5.40", features = ["derive"] }
 base64 = "0.23.0"
 dyn-clone = "1.0.17"
 futures = "0.3.31"
