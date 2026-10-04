@@ -10,6 +10,7 @@ pub mod documents;
 pub mod entries;
 pub mod errors;
 pub mod ids;
+pub mod session;
 pub mod storage;
 pub mod tasks;
 #[cfg(any(test, feature = "durable-testing"))]
@@ -28,6 +29,10 @@ pub use errors::{ConversationBusy, Error, ReadAfterWrite, Result, StorageRejecte
 pub use ids::{
     ConversationId, DocumentId, EntryId, Id, ROOT_CONVERSATION_ID, Seq, SubmissionId, TaskId,
     id_from_number, seq_from_number,
+};
+pub use session::{
+    DocDraft, DocumentState, DocumentWatch, Session, SessionHooks, SessionImpl, Transaction,
+    TransactionScope, Tx, create_session,
 };
 pub use storage::memory::{MemoryStorage, PreparedMemoryCommit};
 pub use tasks::{Task, TaskDefinition, define_task};
