@@ -14,6 +14,7 @@ mod conversations;
 mod events;
 mod examples;
 mod examples_chat;
+mod examples_events;
 mod generation;
 mod generation_recovery;
 mod inbox;

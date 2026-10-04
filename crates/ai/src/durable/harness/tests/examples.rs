@@ -1,7 +1,7 @@
 //! Ports of `test/examples/06`–`08`, `10`, `12`, `13`, and `24` as tests: each example runs against a Harness and
 //! asserts what the TS script prints. The SQLite file of 13 and 24 is `ControlledStorage::persistent()`. Example 07
-//! omits the app-tool snippet section (Rust tools have no app metadata), and 24 prints its task graph with the views
-//! milestone.
+//! omits the app-tool snippet section (Rust tools have no app metadata). The printed task graph of 24 is compared
+//! line by line without the TS two-space indent.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -655,6 +655,55 @@ struct Cards {
     cards: Vec<String>,
 }
 
+/// The live tasks as a tree along their owner edges, one line per task (`printGraph`).
+fn print_graph(graph: &crate::durable::harness::task_graph::TaskGraph) -> Vec<String> {
+    use crate::durable::harness::task_graph::{TaskGraphNode, TaskGraphState};
+    fn print(
+        nodes: &[&TaskGraphNode],
+        node: &TaskGraphNode,
+        depth: usize,
+        lines: &mut Vec<String>,
+    ) {
+        let status = match &node.state {
+            TaskGraphState::Waiting { on, .. } => format!(
+                "waiting on {}",
+                on.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            state => to_json(state)["status"].as_str().unwrap().to_string(),
+        };
+        lines.push(format!(
+            "{}{} {}: {status}",
+            "  ".repeat(depth),
+            node.kind,
+            node.id
+        ));
+        for child in nodes
+            .iter()
+            .filter(|candidate| candidate.owner == Some(node.id))
+        {
+            print(nodes, child, depth + 1, lines);
+        }
+    }
+    let nodes: Vec<&TaskGraphNode> = graph.tasks.values().collect();
+    let mut lines = Vec::new();
+    for node in nodes.iter().filter(|candidate| candidate.owner.is_none()) {
+        print(&nodes, node, 0, &mut lines);
+    }
+    lines
+}
+
+fn graph_payments(line: &str) -> Vec<String> {
+    line.split("waiting on ")
+        .nth(1)
+        .unwrap()
+        .split(", ")
+        .map(str::to_string)
+        .collect()
+}
+
 #[tokio::test]
 async fn example_24_child_tasks() {
     let context = BACKGROUND_CONTEXT.clone();
@@ -889,6 +938,18 @@ async fn example_24_child_tasks() {
     let id = start_checkout(root.clone(), &["visa-5", "visa-6", "visa-7", "visa-8"]).await;
     harness.resume().unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
+    let graph = harness.task_graph(&context).await.unwrap();
+    let printed = print_graph(&graph.value());
+    graph.dispose().unwrap();
+    assert_eq!(printed.len(), 5, "{printed:#?}");
+    let payments: Vec<String> = graph_payments(&printed[0]);
+    assert_eq!(
+        printed[0],
+        format!("example.checkout {id}: waiting on {}", payments.join(", "))
+    );
+    for (line, payment) in printed[1..].iter().zip(&payments) {
+        assert_eq!(*line, format!("  example.payment {payment}: running"));
+    }
     harness.abort_task(id, &context).await.unwrap();
     assert_eq!(
         outcome_status(harness.wait_for_task(id, &context).await.unwrap()),

@@ -1,6 +1,6 @@
 //! Ports of `test/examples/09`, `11`, `14`, `15`, and `20` as tests: each example runs against a Harness with the
 //! faux model and asserts what the TS script prints. Example 18 (print mode) needs the read and bash coding tools of
-//! M9, and 22 (foreground subagent) watches events, so it lives with the events suite.
+//! M9; 22 (foreground subagent) watches events, so it lives in `examples_events`.
 
 use std::sync::{Arc, LazyLock};
 
