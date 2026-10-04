@@ -11,6 +11,8 @@ pub mod generation;
 pub mod harness;
 pub mod inbox;
 pub mod live;
+pub mod output;
+pub mod prompt;
 pub mod provider;
 pub mod registry;
 pub mod scheduler;

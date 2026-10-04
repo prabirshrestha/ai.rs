@@ -18,6 +18,7 @@ use crate::durable::types::{
 use crate::types::{Message, UserMessage};
 
 use super::agent::{AGENT_DOC, configure, create_agent, resolve_agent, resolve_settings};
+use super::compaction::{CompactionInput, create_compaction};
 use super::context::read_context;
 use super::inbox::{INBOX_DOC, QueueModes, withdraw_queued_inputs};
 use super::live::{LIVE_DOC, settle_scheduler_outcome};
@@ -26,9 +27,9 @@ use super::registry::{RegistrySnapshot, builtin_tasks};
 use super::scheduler::{AbortTaskResult, InvocationBinding, TaskScheduler, TaskSchedulerOptions};
 use super::submissions::{AbortSubmissionResult, Submission, Submissions};
 use super::types::{
-    Agent, AgentChange, ContextView, ConversationAbortOptions, ConversationCreateOptions,
-    ConversationInit, DocumentReader, EnvTarget, HarnessInspection, HarnessOptions, Settings,
-    SettledTask, SubmissionDraft,
+    Agent, AgentChange, CompactionReason, CompactionResult, ContextView, ConversationAbortOptions,
+    ConversationCreateOptions, ConversationInit, DocumentReader, EnvTarget, HarnessInspection,
+    HarnessOptions, Settings, SettledTask, SubmissionDraft,
 };
 use super::usage::{USAGE_DOC, UsageState, add_usage_state};
 use super::util::scan_all;
@@ -661,6 +662,28 @@ impl Conversation {
             .inner
             .submissions
             .submit(self.id, submission, context)
+            .await
+    }
+
+    /// Start a manual compaction; it places its summary through a write submission (spec §8.7).
+    pub async fn compact(
+        &self,
+        instructions: Option<String>,
+        context: &Context,
+    ) -> Result<TaskId<CompactionResult>> {
+        self.harness.inner.scheduler.resume();
+        let id = self.id;
+        let input = CompactionInput {
+            reason: CompactionReason::Manual,
+            instructions,
+        };
+        self.harness
+            .session
+            .commit_with(
+                move |tx| async move { create_compaction(&tx, id, input, None).await },
+                context,
+                TransactionScope::default(),
+            )
             .await
     }
 
