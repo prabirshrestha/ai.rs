@@ -1,0 +1,69 @@
+//! Port of `utils/model-operations.ts` (chat and image models; classifier
+//! models are not ported).
+
+use crate::types::{AnyModel, ImageModel, Model, ModelType};
+use crate::utils::models_error::{ModelsError, ModelsErrorCode};
+
+/// The type of a model. Models without `type` are chat models.
+pub fn get_model_type(model: &AnyModel) -> ModelType {
+    match model {
+        AnyModel::Chat(model) => model.model_type.unwrap_or(ModelType::Chat),
+        AnyModel::Image(_) => ModelType::Image,
+    }
+}
+
+/// Runtime-checked model type test, including legacy chat models without `type`.
+pub fn is_model_type(model: &AnyModel, model_type: ModelType) -> bool {
+    get_model_type(model) == model_type
+}
+
+pub fn assert_chat_model(model: &AnyModel) -> Result<&Model, ModelsError> {
+    match model {
+        AnyModel::Chat(chat) if is_model_type(model, ModelType::Chat) => Ok(chat),
+        _ => Err(ModelsError::new(
+            ModelsErrorCode::Provider,
+            format!(
+                "Model {}/{} is not a chat model",
+                model.provider(),
+                model.id()
+            ),
+        )),
+    }
+}
+
+pub fn assert_image_model(model: &AnyModel) -> Result<&ImageModel, ModelsError> {
+    match model {
+        AnyModel::Image(image) => Ok(image),
+        _ => Err(ModelsError::new(
+            ModelsErrorCode::Provider,
+            format!(
+                "Model {}/{} is not an image model",
+                model.provider(),
+                model.id()
+            ),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrows_legacy_chat_models_and_image_models() {
+        let chat = AnyModel::Chat(Model {
+            id: "m".to_string(),
+            provider: "p".to_string(),
+            ..Default::default()
+        });
+        assert!(is_model_type(&chat, ModelType::Chat));
+        assert!(assert_chat_model(&chat).is_ok());
+        assert_eq!(
+            assert_image_model(&chat).unwrap_err().to_string(),
+            "Model p/m is not an image model"
+        );
+        let image = AnyModel::Image(ImageModel::default());
+        assert_eq!(get_model_type(&image), ModelType::Image);
+        assert!(assert_chat_model(&image).is_err());
+    }
+}

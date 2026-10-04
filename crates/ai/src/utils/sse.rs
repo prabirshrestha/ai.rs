@@ -1,3 +1,6 @@
+//! Server-sent events decoding for the API modules (Rust plumbing; Pi uses
+//! the provider SDKs' SSE parsers).
+
 use async_stream::try_stream;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -47,7 +50,7 @@ fn events_with_limits(
         loop {
             let chunk = if let Some(cancellation_token) = cancellation_token.as_ref() {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => Err(Error::Cancelled),
+                    _ = cancellation_token.cancelled() => Err(Error::Aborted("Request was aborted".to_string())),
                     chunk = byte_stream.next() => Ok(chunk),
                 }?
             } else {
@@ -198,7 +201,7 @@ mod tests {
             .await
             .expect("SSE read should be cancelled while waiting for a body chunk");
 
-        assert!(matches!(item, Some(Err(Error::Cancelled))));
+        assert!(matches!(item, Some(Err(Error::Aborted(_)))));
     }
 
     #[tokio::test(flavor = "current_thread")]

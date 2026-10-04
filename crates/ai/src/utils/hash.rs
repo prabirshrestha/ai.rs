@@ -1,3 +1,6 @@
+//! Port of `utils/hash.ts`.
+
+/// Fast deterministic hash to shorten long strings (UTF-16 code units, as in JS).
 pub fn short_hash(input: &str) -> String {
     let mut h1 = 0xdead_beefu32;
     let mut h2 = 0x41c6_ce57u32;

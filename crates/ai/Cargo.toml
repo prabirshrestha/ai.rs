@@ -1,6 +1,6 @@
 [package]
 name = "ai"
-version = "0.7.2"
+version = "0.8.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,6 +15,7 @@ base64.workspace = true
 dyn-clone.workspace = true
 futures.workspace = true
 httpdate.workspace = true
+indexmap.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
 regex.workspace = true
