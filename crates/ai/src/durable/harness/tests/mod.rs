@@ -5,6 +5,8 @@
 pub(crate) mod support;
 
 mod chat;
+mod compaction;
+mod compaction_support;
 mod context;
 mod conversations;
 mod events;
