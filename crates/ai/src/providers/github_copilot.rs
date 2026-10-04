@@ -5,12 +5,22 @@
 //! device flow (`lazyOAuth(loadGitHubCopilotOAuth)`). OAuth credentials set
 //! the request base URL per credential (`toAuth`), and `filter_models` applies
 //! the credential's `availableModelIds`.
+//!
+//! Routing follows Pi's catalog (`github-copilot.models.ts`): Claude models
+//! use the Anthropic Messages API, GPT/Grok/MAI models the Responses API, and
+//! the rest Chat Completions. The [`GitHubCopilot`] handle falls back to the
+//! same family rules for ids missing from the catalog.
+//!
+//! ai.rs extras, not in Pi: the [`GitHubCopilot`] handle and
+//! [`get_oauth_api_key`] (pre-1.0 helper that refreshes an expired stored
+//! credential and returns the request token).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use super::catalog::github_copilot_models;
 use super::handle::{HandleAuth, HandleStreams, bind, clean_key};
@@ -26,7 +36,8 @@ pub use crate::auth::oauth::{
     modify_github_copilot_models,
 };
 use crate::auth::{
-    Credential, LazyOAuthInput, OAuthAuth, ProviderAuth, env_api_key_auth, lazy_oauth, models_error,
+    Credential, LazyOAuthInput, OAuthAuth, OAuthCredential, ProviderAuth, env_api_key_auth,
+    lazy_oauth, models_error,
 };
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
@@ -35,6 +46,7 @@ use crate::models::{
 };
 use crate::types::{AnyModel, KnownApi, Model, ModelInput, ProviderStreams};
 use crate::utils::models_error::ModelsErrorCode;
+use crate::utils::time::now_millis;
 
 const DEFAULT_PROVIDER_ID: &str = "github-copilot";
 const DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
@@ -73,6 +85,33 @@ fn github_copilot_provider_oauth() -> Arc<dyn OAuthAuth> {
 /// The GitHub Copilot OAuth implementation (pre-1.0 `github_copilot::oauth()`).
 pub fn oauth() -> Arc<dyn OAuthAuth> {
     github_copilot_provider_oauth()
+}
+
+/// The request token for a stored credential, plus the credential to persist
+/// (refreshed when it had expired).
+#[derive(Clone, Debug)]
+pub struct OAuthApiKey {
+    pub new_credentials: OAuthCredential,
+    pub api_key: String,
+}
+
+/// Pre-1.0 helper (not in Pi, where `Models.getAuth` refreshes under the
+/// credential store lock): refresh `credentials` when expired and derive the
+/// Copilot request token. Persist `new_credentials` back to your store.
+pub async fn get_oauth_api_key(credentials: &OAuthCredential) -> Result<OAuthApiKey> {
+    let oauth = oauth();
+    let credentials = if now_millis() >= credentials.expires {
+        oauth
+            .refresh(credentials.clone(), CancellationToken::new())
+            .await?
+    } else {
+        credentials.clone()
+    };
+    let auth = oauth.to_auth(&credentials).await?;
+    Ok(OAuthApiKey {
+        api_key: auth.api_key.unwrap_or_else(|| credentials.access.clone()),
+        new_credentials: credentials,
+    })
 }
 
 fn copilot_apis(
@@ -438,5 +477,251 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(forced.api, "openai-responses");
+    }
+
+    fn catalog(id: &str) -> Model {
+        github_copilot_models()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("github-copilot catalog has {id}"))
+    }
+
+    // model-catalog-types.test.ts
+
+    #[test]
+    fn routes_github_copilot_grok_4_5_through_the_responses_api() {
+        assert_eq!(catalog("grok-4.5").api, "openai-responses");
+    }
+
+    #[test]
+    fn routes_all_github_copilot_gpt_models_through_the_responses_api() {
+        let gpt_models: Vec<_> = github_copilot_models()
+            .values()
+            .filter(|model| model.id.starts_with("gpt-"))
+            .collect();
+        assert!(!gpt_models.is_empty());
+        assert!(
+            gpt_models
+                .iter()
+                .all(|model| model.api == "openai-responses")
+        );
+        assert_eq!(catalog("gpt-6-astra").api, "openai-responses");
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let model = catalog(id);
+            assert_eq!(model.api, "openai-responses");
+            assert_eq!(
+                (model.context_window, model.max_tokens),
+                (1_000_000, 128_000)
+            );
+            let map = model.thinking_level_map.unwrap();
+            assert_eq!(
+                map.get(&crate::types::ModelThinkingLevel::Off),
+                Some(&Some("none".to_string()))
+            );
+            assert_eq!(
+                map.get(&crate::types::ModelThinkingLevel::Max),
+                Some(&Some("max".to_string()))
+            );
+        }
+    }
+
+    // providers.test.ts (github-copilot rows)
+
+    #[test]
+    fn enables_mid_conversation_system_messages_only_for_verified_models() {
+        let models = crate::providers::all::builtin_models(Default::default());
+        let compat = |id: &str| {
+            models
+                .get_model(DEFAULT_PROVIDER_ID, id)
+                .unwrap_or_else(|| panic!("github-copilot/{id}"))
+                .compat()
+        };
+        for id in [
+            "gpt-5.6-terra",
+            "claude-opus-5",
+            "claude-opus-4.8",
+            "kimi-k3",
+        ] {
+            assert_eq!(
+                compat(id).supports_mid_convo_system_messages,
+                Some(true),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            compat("claude-sonnet-4.6").supports_mid_convo_system_messages,
+            None
+        );
+    }
+
+    #[test]
+    fn routes_proxied_tool_changes_through_verified_transports_only() {
+        let models = crate::providers::all::builtin_models(Default::default());
+        let compat = |id: &str| models.get_model(DEFAULT_PROVIDER_ID, id).unwrap().compat();
+        // Proxies pass `additional_tools` through to OpenAI but are not verified for tool search.
+        assert_eq!(
+            compat("gpt-5.6-terra").supports_additional_tools,
+            Some(true)
+        );
+        assert_eq!(compat("gpt-5.6-terra").supports_tool_search, None);
+        // Proxied Anthropic endpoints reject `tool_addition`/`tool_removal` blocks.
+        assert_eq!(
+            compat("claude-opus-5").supports_mid_convo_tool_changes,
+            None
+        );
+        // Kimi-style tool-bearing system messages do not survive Copilot.
+        assert_eq!(compat("kimi-k3").supports_mid_convo_tool_additions, None);
+    }
+
+    // ai.rs handle tests (pre-1.0 API shape)
+
+    #[test]
+    fn selects_the_api_pi_assigns_to_each_copilot_model() {
+        for id in [
+            "claude-sonnet-5",
+            "claude-opus-4.8",
+            "claude-haiku-4.5",
+            "claude-sonnet-4",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::AnthropicMessages,
+                "{id}"
+            );
+        }
+        for id in [
+            "gpt-5.6-sol",
+            "grok-4.5",
+            "oswe-preview",
+            "mai-code-1-flash",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::OpenAiResponses,
+                "{id}"
+            );
+        }
+        for id in [
+            "gpt-4.1",
+            "gemini-3.7-flash",
+            "claude-sonnet-3.7",
+            "o3-mini",
+        ] {
+            assert_eq!(
+                default_api_for_model(id),
+                GitHubCopilotApi::OpenAiChatCompletions,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_api_supports_unknown_model_ids_and_custom_base_urls() {
+        let handle = builder()
+            .api_key("test-token")
+            .chat_completions()
+            .base_url("https://copilot.example")
+            .build()
+            .unwrap();
+        let model = handle.model("future-model").build().unwrap();
+        assert_eq!(model.id, "future-model");
+        assert_eq!(model.provider, "github-copilot");
+        assert_eq!(model.api, "openai-completions");
+        assert_eq!(model.base_url, "https://copilot.example");
+        let catalog = handle.model("claude-sonnet-5").build().unwrap();
+        assert_eq!(catalog.base_url, "https://copilot.example");
+        assert_eq!(
+            handle
+                .model("gpt-5.4")
+                .build()
+                .unwrap()
+                .compat()
+                .supports_openai_grammar_tools,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_oauth_api_key_returns_unexpired_credentials_unchanged() {
+        let credentials = OAuthCredential {
+            refresh: "ghu_refresh".to_string(),
+            access: "tid=1;proxy-ep=proxy.business.githubcopilot.com".to_string(),
+            expires: now_millis() + 3_600_000,
+            extra: Default::default(),
+        };
+        let key = get_oauth_api_key(&credentials).await.unwrap();
+        assert_eq!(key.api_key, credentials.access);
+        assert_eq!(key.new_credentials, credentials);
+        assert_eq!(
+            base_url_for_credentials(&key.new_credentials),
+            "https://api.business.githubcopilot.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_routes_claude_to_messages_and_gpt_to_responses_with_copilot_headers() {
+        use crate::api::openai_client::test_support::{MockResponse, MockServer};
+        use crate::types::{Context, StopReason, StreamOptions};
+
+        let anthropic_events = [
+            json!({ "type": "message_start", "message": { "id": "msg_1", "usage": { "input_tokens": 1, "output_tokens": 0 } } }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 1 } }),
+            json!({ "type": "message_stop" }),
+        ];
+        let mut anthropic = MockResponse::sse(&[]);
+        anthropic.body = anthropic_events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect();
+        let responses = MockResponse::sse(&[json!({
+            "type": "response.completed",
+            "response": { "id": "resp_1", "status": "completed", "output": [] },
+        })]);
+        let server = MockServer::start(vec![anthropic, responses]).await;
+        let base_url = server.url.trim_end_matches("/v1").to_string();
+        let handle = builder()
+            .api_key("tid_copilot")
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let context: Context = serde_json::from_value(json!({
+            "messages": [{ "role": "user", "content": "hi", "timestamp": 1 }],
+        }))
+        .unwrap();
+
+        let claude = handle.model("claude-sonnet-5").build().unwrap();
+        let result = handle
+            .models()
+            .complete(&claude, &context, StreamOptions::default())
+            .await;
+        assert_eq!(result.error_message, None);
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        let request = server.last();
+        assert_eq!(request.path, "/v1/messages?beta=true");
+        assert_eq!(request.header("authorization"), Some("Bearer tid_copilot"));
+        assert_eq!(
+            request.header("copilot-integration-id"),
+            Some("vscode-chat")
+        );
+        assert_eq!(request.header("x-initiator"), Some("user"));
+        assert_eq!(request.body["model"], "claude-sonnet-5");
+
+        let gpt = handle.model("gpt-5.5").build().unwrap();
+        let result = handle
+            .models()
+            .complete(&gpt, &context, StreamOptions::default())
+            .await;
+        assert_eq!(result.error_message, None);
+        let request = server.last();
+        assert_eq!(request.path, "/responses");
+        assert_eq!(request.header("authorization"), Some("Bearer tid_copilot"));
+        assert_eq!(request.header("editor-version"), Some("vscode/1.107.0"));
+        assert_eq!(request.header("openai-intent"), Some("conversation-edits"));
+        assert_eq!(request.body["model"], "gpt-5.5");
     }
 }
