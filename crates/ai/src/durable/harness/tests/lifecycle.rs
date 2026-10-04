@@ -1,7 +1,7 @@
 //! Port of `test/harness-lifecycle.test.ts` (Harness open, close, and pausing).
 //!
-//! The SQLite reopen case runs over `ControlledStorage::persistent()`. The view/task-graph observer cases and the
-//! chat-driven tool/hook join case arrive with the views and generation milestones.
+//! The SQLite reopen case runs over `ControlledStorage::persistent()`. The view/task-graph observer cases arrive with the
+//! views milestone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -149,6 +149,108 @@ async fn joins_a_task_handler_that_ignores_its_signal_before_closing_storage() {
     closing.await.unwrap().unwrap();
     assert_eq!(*read_after_release.lock(), Some(true));
     assert!(!storage_open(&storage).await);
+}
+
+#[tokio::test]
+async fn joins_a_tool_execute_and_a_hook_that_ignore_their_signal_before_closing_storage() {
+    for in_tool in [true, false] {
+        let setup = super::chat::chat_setup();
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let reached = Deferred::default();
+        let gate = Deferred::default();
+        let read_after_release = Arc::new(Mutex::new(None::<bool>));
+        let stubborn = {
+            let (reached, gate, storage, read) = (
+                reached.clone(),
+                gate.clone(),
+                storage.clone(),
+                read_after_release.clone(),
+            );
+            move || {
+                let (reached, gate, storage, read) =
+                    (reached.clone(), gate.clone(), storage.clone(), read.clone());
+                async move {
+                    reached.resolve();
+                    gate.wait().await;
+                    *read.lock() = Some(storage_open(&storage).await);
+                }
+            }
+        };
+        let in_execute = stubborn.clone();
+        add_tool(
+            &setup.registry,
+            crate::durable::harness::define_tool(
+                "wait",
+                "wait",
+                json!({ "type": "object", "properties": {} }),
+                move |_, _, _| {
+                    let stubborn = in_execute.clone();
+                    async move {
+                        if in_tool {
+                            stubborn().await;
+                        }
+                        Ok(crate::durable::harness::types::ToolExecutionResult {
+                            content: Some(Vec::new()),
+                            ..Default::default()
+                        })
+                    }
+                },
+            ),
+        );
+        add_hooks(
+            &setup.registry,
+            crate::durable::harness::hook(
+                &*crate::durable::harness::generation::GENERATION_TASK,
+                crate::durable::harness::types::GenerationHooks {
+                    before_request: Some(Arc::new(move |_, _, _| {
+                        let stubborn = stubborn.clone();
+                        Box::pin(async move {
+                            if !in_tool {
+                                stubborn().await;
+                            }
+                            Ok(None)
+                        })
+                    })),
+                    ..Default::default()
+                },
+            ),
+        );
+        setup.faux.set_responses([
+            crate::providers::faux::faux_assistant_message(
+                vec![crate::providers::faux::faux_tool_call(
+                    "wait",
+                    json!({}),
+                    Some("c1"),
+                )],
+                crate::providers::faux::FauxMessageOptions {
+                    stop_reason: Some(crate::types::StopReason::ToolUse),
+                    ..Default::default()
+                },
+            )
+            .into(),
+            crate::providers::faux::faux_assistant_message(
+                "done",
+                crate::providers::faux::FauxMessageOptions::default(),
+            )
+            .into(),
+        ]);
+        let (harness, root) = super::chat::open_chat(storage.clone(), &setup).await;
+        root.submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap();
+        reached.wait().await;
+        let closing = {
+            let harness = harness.clone();
+            async move { harness.close(&context()).await }
+        };
+        let (done, closing) = settled(closing).await;
+        assert!(!done);
+        assert!(storage_open(&storage).await);
+        gate.resolve();
+        closing.await.unwrap().unwrap();
+        assert_eq!(*read_after_release.lock(), Some(true));
+        assert!(!storage_open(&storage).await);
+    }
 }
 
 #[tokio::test]
