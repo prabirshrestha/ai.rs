@@ -29,6 +29,12 @@ pub use agent::{
     run_agent_loop_continue, run_tool_call, set_default_stream_fn, stream_proxy, stream_simple_fn,
 };
 pub use api::lazy::lazy_stream;
+pub use api::openai_completions::{
+    OpenAICompletionsOptions, stream_openai_completions, stream_simple_openai_completions,
+};
+pub use api::openai_responses::{
+    OpenAIResponsesOptions, stream_openai_responses, stream_simple_openai_responses,
+};
 pub use auth::oauth::{
     OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthLoginCallbacksBuilder,
     OAuthPrompt, OAuthSelectOption, OAuthSelectPrompt, anthropic_oauth, get_oauth_provider,

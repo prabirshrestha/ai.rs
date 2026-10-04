@@ -445,12 +445,13 @@ mod tests {
         let _lock = REGISTRY_TEST_LOCK.lock().await;
         let model = get_model("openai", "gpt-5.5").unwrap();
         assert!(get_builtin_provider_for_model(&model).is_some());
-        let result = complete_simple(model, context(), None).await.unwrap();
+        let (options, payloads) = capture_payload_options();
+        let result = complete_simple(model, context(), Some(options))
+            .await
+            .unwrap();
         assert_eq!(result.stop_reason, StopReason::Error);
-        assert_eq!(
-            result.error_message.as_deref(),
-            Some("API openai-responses is not implemented yet")
-        );
+        assert_eq!(result.error_message.as_deref(), Some("payload captured"));
+        assert_eq!(payloads.lock()[0]["model"], "gpt-5.5");
     }
 
     #[tokio::test]
@@ -461,11 +462,26 @@ mod tests {
             .build()
             .unwrap();
         let model = handle.model("gpt-5.5").build().unwrap();
-        let result = complete_simple(model, context(), None).await.unwrap();
+        let (options, payloads) = capture_payload_options();
+        let result = complete_simple(model, context(), Some(options))
+            .await
+            .unwrap();
         assert_eq!(result.provider, "handle-only");
-        assert_eq!(
-            result.error_message.as_deref(),
-            Some("API openai-responses is not implemented yet")
-        );
+        assert_eq!(result.error_message.as_deref(), Some("payload captured"));
+        assert_eq!(payloads.lock()[0]["model"], "gpt-5.5");
+    }
+
+    /// Options whose `onPayload` hook records the request body and fails
+    /// the request, proving dispatch reached the API implementation without
+    /// a network call.
+    fn capture_payload_options() -> (
+        SimpleStreamOptions,
+        std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let (hook, payloads) = crate::api::openai_client::test_support::payload_hook(true);
+        let mut options = SimpleStreamOptions::default();
+        options.stream.api_key = Some("test-key".to_string());
+        options.stream.on_payload = Some(hook);
+        (options, payloads)
     }
 }

@@ -18,7 +18,12 @@ use crate::models::{
     CreateModelsOptions, CreateProviderOptions, Models, Provider, ProviderApi, create_models,
     create_provider,
 };
-use crate::types::{AnyModel, KnownApi, Model, ModelInput};
+use crate::types::{
+    AnyModel, KnownApi, Model, ModelInput, ProviderHeaders, ProviderStreams, SimpleStreamOptions,
+    StreamOptions, TranscriptContext,
+};
+use crate::utils::event_stream::AssistantMessageEventStream;
+use crate::utils::headers::has_non_empty_header;
 use crate::utils::models_error::ModelsErrorCode;
 use crate::{Result, auth::models_error};
 
@@ -137,6 +142,64 @@ pub fn from_env() -> Result<OpenAi> {
     OpenAi::from_env()
 }
 
+/// Rust addition for keyless handles (a custom base URL and no key): Pi's
+/// OpenAI API modules refuse requests without an API key or an
+/// `Authorization` header. When a request has neither, this adapter passes a
+/// placeholder key and suppresses the `Authorization` header, so the server
+/// receives no credentials.
+struct KeylessStreams {
+    inner: Arc<dyn ProviderStreams>,
+}
+
+impl KeylessStreams {
+    fn wrap(inner: Arc<dyn ProviderStreams>) -> Arc<dyn ProviderStreams> {
+        Arc::new(Self { inner })
+    }
+
+    fn apply(options: &mut StreamOptions) {
+        let has_key = options
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty());
+        let has_authorization = options.headers.as_ref().is_some_and(|headers| {
+            has_non_empty_header(headers, "authorization")
+                || has_non_empty_header(headers, "cf-aig-authorization")
+        });
+        if has_key || has_authorization {
+            return;
+        }
+        options.api_key = Some(KEYLESS_API_KEY.to_string());
+        options
+            .headers
+            .get_or_insert_with(ProviderHeaders::new)
+            .insert("Authorization", None::<String>);
+    }
+}
+
+const KEYLESS_API_KEY: &str = "keyless";
+
+impl ProviderStreams for KeylessStreams {
+    fn stream(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        mut options: StreamOptions,
+    ) -> AssistantMessageEventStream {
+        Self::apply(&mut options);
+        self.inner.stream(model, context, options)
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        mut options: SimpleStreamOptions,
+    ) -> AssistantMessageEventStream {
+        Self::apply(&mut options);
+        self.inner.stream_simple(model, context, options)
+    }
+}
+
 #[derive(Default)]
 pub struct OpenAiBuilder {
     provider_id: Option<String>,
@@ -207,14 +270,22 @@ impl OpenAiBuilder {
                 })
             })
             .collect();
+        let wrap = |api: Arc<dyn ProviderStreams>| {
+            let api = if keyless {
+                KeylessStreams::wrap(api)
+            } else {
+                api
+            };
+            HandleStreams::wrap(api, &self.http_client)
+        };
         let streams: IndexMap<String, _> = [
             (
                 OpenAiApi::Responses.id().to_string(),
-                HandleStreams::wrap(openai_responses_api(), &self.http_client),
+                wrap(openai_responses_api()),
             ),
             (
                 OpenAiApi::ChatCompletions.id().to_string(),
-                HandleStreams::wrap(openai_completions_api(), &self.http_client),
+                wrap(openai_completions_api()),
             ),
         ]
         .into_iter()
@@ -245,6 +316,7 @@ impl OpenAiBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::openai_client::test_support::{CapturedRequest, MockResponse, MockServer};
 
     #[test]
     fn openai_provider_lists_the_generated_catalog() {
@@ -314,5 +386,69 @@ mod tests {
             assert_eq!(auth.auth.api_key, None);
             assert_eq!(auth.source.as_deref(), Some("keyless"));
         }
+    }
+
+    async fn request_through_handle(
+        configure: impl FnOnce(OpenAiBuilder) -> OpenAiBuilder,
+        response: MockResponse,
+    ) -> (CapturedRequest, crate::types::AssistantMessage) {
+        let server = MockServer::start(vec![response]).await;
+        let handle = configure(builder().base_url(server.url.clone()))
+            .build()
+            .unwrap();
+        let model = handle.model("local-model").build().unwrap();
+        let context: crate::types::Context = serde_json::from_value(serde_json::json!({
+            "messages": [{ "role": "user", "content": "hi", "timestamp": 1 }],
+        }))
+        .unwrap();
+        let result = handle
+            .models()
+            .complete(&model, &context, StreamOptions::default())
+            .await;
+        (server.last(), result)
+    }
+
+    fn chat_completion_stop() -> MockResponse {
+        MockResponse::sse(&[serde_json::json!({
+            "id": "chatcmpl-1",
+            "choices": [{ "index": 0, "delta": { "content": "ok" }, "finish_reason": "stop" }],
+        })])
+    }
+
+    #[tokio::test]
+    async fn chat_completions_handle_posts_to_chat_completions() {
+        let (request, result) = request_through_handle(
+            |builder| builder.api_key(Some("sk-handle")).chat_completions(),
+            chat_completion_stop(),
+        )
+        .await;
+        assert_eq!(request.path, "/v1/chat/completions");
+        assert_eq!(request.header("authorization"), Some("Bearer sk-handle"));
+        assert_eq!(request.body["model"], "local-model");
+        assert_eq!(result.error_message, None);
+        assert_eq!(result.stop_reason, crate::types::StopReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn keyless_handles_send_no_authorization_header() {
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        let (request, result) =
+            request_through_handle(|builder| builder.chat_completions(), chat_completion_stop())
+                .await;
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(result.error_message, None);
+
+        let (request, _) = request_through_handle(
+            |builder| builder,
+            MockResponse::sse(&[serde_json::json!({
+                "type": "response.completed",
+                "response": { "id": "resp_1", "status": "completed", "output": [] },
+            })]),
+        )
+        .await;
+        assert_eq!(request.path, "/v1/responses");
+        assert_eq!(request.header("authorization"), None);
     }
 }
