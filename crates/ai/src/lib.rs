@@ -5,6 +5,7 @@
 //! (`stream()`, `stream_simple()`, ...) that keep ai.rs's pre-1.0 call shape.
 //! Divergences from Pi are documented on the items involved.
 
+pub mod agent;
 pub mod api;
 pub mod auth;
 #[cfg(feature = "durable")]
@@ -19,6 +20,14 @@ pub mod providers;
 pub mod types;
 pub mod utils;
 
+pub use agent::types::*;
+pub use agent::{
+    Agent, AgentError, AgentEventStream, AgentInitialState, AgentOptions, AgentOptionsBuilder,
+    AgentPrepareNextTurnFn, AgentPrepareNextTurnWithContextFn, AgentResult, AgentSubscription,
+    ProxyAssistantMessageEvent, ProxyStreamOptions, RunToolCallOptions, ToolCallHooks,
+    ToolUpdateCallback, agent_loop, agent_loop_continue, get_default_stream_fn, run_agent_loop,
+    run_agent_loop_continue, run_tool_call, set_default_stream_fn, stream_proxy, stream_simple_fn,
+};
 pub use api::lazy::lazy_stream;
 pub use auth::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthCheck, AuthContext, AuthEvent, AuthInfoLink,
