@@ -12,6 +12,8 @@ readme = "README.md"
 default = ["durable"]
 # Pi Durable and the chord subset it uses (`chord`, later `durable`).
 durable = []
+# Reusable durable storage conformance suite (`durable::testing`).
+durable-testing = ["durable"]
 
 [dependencies]
 async-trait.workspace = true

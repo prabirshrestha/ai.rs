@@ -11,6 +11,8 @@ pub mod auth;
 #[cfg(feature = "durable")]
 pub mod chord;
 pub mod compat;
+#[cfg(feature = "durable")]
+pub mod durable;
 pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
