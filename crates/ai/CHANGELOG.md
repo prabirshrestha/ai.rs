@@ -77,5 +77,11 @@ Agent:
 - Agent hooks (`before_tool_call`, `after_tool_call`, `prepare_request`,
   `prepare_next_turn`, `finish_turn`, ...), `run_tool_call`, `stream_proxy`,
   `peek_queued_messages`.
-- OpenRouter image models in the builtin providers; `ai::chord` (feature
-  `durable`, on by default).
+- OpenRouter image models in the builtin providers.
+- `ai::durable` (feature `durable`, on by default): Pi Durable 1.0.2, with
+  `ai::chord`. Durable conversations, tasks, submissions and documents over
+  memory, JSONL (`durable-local-env`) or SQLite (`durable-sqlite`) storage;
+  the `Harness` with extensions, generation, tool and compaction tasks,
+  views and agent events; the `read`, `write`, `edit` and `bash` coding
+  tools (`CODING_TOOLS`) over an `ExecutionEnv`; and a storage conformance
+  suite (`durable-testing`).

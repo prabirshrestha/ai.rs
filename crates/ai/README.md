@@ -53,8 +53,14 @@ Other Pi providers (Google, Bedrock, Mistral, xAI, OpenRouter chat, Codex,
 
 Crate features:
 
-- `durable` (default): Pi Durable and the subset of chord it uses
-  (`ai::chord`, later `ai::durable`).
+- `durable` (default): Pi Durable (`ai::durable`) and the subset of chord it
+  uses (`ai::chord`), with memory and portable JSONL/SQLite storage cores and
+  the coding tools.
+- `durable-local-env` (default): `LocalExecutionEnv` (local files and
+  processes) and the local JSONL storage adapter.
+- `durable-sqlite`: `SqliteStorage` over a bundled SQLite (`rusqlite`).
+- `durable-testing`: the storage conformance suite (`ai::durable::testing`)
+  for custom `Storage` backends.
 
 ## Installation
 
@@ -823,9 +829,120 @@ async fn main() -> Result<()> {
 
 ## Durable (feature `durable`, on by default)
 
-Pi Durable is being ported. `ai::chord` (context, JSON deltas, replicated
-state) is available today; the durable runtime and its documentation land in
-a follow-up commit.
+`ai::durable` is Pi Durable: conversations whose transcript, tasks,
+submissions and documents live in a `Storage`, so a run survives a crash or
+restart and resumes where it stopped. A `Harness` opens one storage and runs
+the built-in generation, tool and compaction tasks; extensions add tools,
+prompt sections, hooks and tasks through a `Registry`. `ai::chord` holds the
+contexts, JSON deltas and replicated state it builds on.
+
+The example below opens a Harness over memory storage, plays the model with
+the faux provider, offers the `read`, `write`, `edit` and `bash` coding tools
+(`CODING_TOOLS`), and submits input to the root conversation:
+
+```rust
+use std::sync::Arc;
+
+use ai::{
+    FauxMessageOptions, Message, StopReason, content_text, create_models, faux_assistant_message,
+    faux_provider, faux_tool_call,
+};
+# #[cfg(feature = "durable-local-env")]
+use ai::{
+    chord::background_context,
+    durable::{
+        ASSISTANT_ENTRY, MemoryStorage, SubmissionStatus,
+        env::{ExecutionEnv, local::LocalExecutionEnv},
+        harness::{
+            AgentChange, CreateOptions, Harness, HarnessOptions, ModelRef, SubmissionDraft,
+            create_registry,
+        },
+        tools::CODING_TOOLS,
+    },
+};
+
+# #[cfg(not(feature = "durable-local-env"))]
+# fn main() {}
+# #[cfg(feature = "durable-local-env")]
+#[tokio::main]
+async fn main() -> ai::durable::Result<()> {
+    let context = background_context();
+
+    // The faux provider plays the model: one `bash` call, then an answer.
+    let faux = faux_provider(Default::default());
+    faux.set_responses([
+        faux_assistant_message(
+            faux_tool_call("bash", serde_json::json!({ "command": "echo hello" }), Some("call-1")),
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            },
+        )
+        .into(),
+        faux_assistant_message("It printed hello.", FauxMessageOptions::default()).into(),
+    ]);
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
+
+    let registry = create_registry();
+    registry.install(CODING_TOOLS.clone())?;
+    let mut options = HarnessOptions::new(models, Arc::new(registry));
+    // Tools reach files and processes only through the environment the Harness builds for each
+    // call, here a local one in the conversation's directory.
+    options.env = Some(Arc::new(|target, _| {
+        let cwd = target.cwd.unwrap_or_else(|| ".".into());
+        let env: Arc<dyn ExecutionEnv> = Arc::new(LocalExecutionEnv::at(cwd));
+        Box::pin(async move { Ok(Some(env)) })
+    }));
+
+    // Memory storage keeps nothing across processes; `open_local_jsonl_storage` or
+    // `open_rusqlite_storage` (feature `durable-sqlite`) persist the session.
+    let harness = Harness::open(Arc::new(MemoryStorage::new()), options, &context).await?;
+    // The root conversation remembers its model and directory.
+    let agent = AgentChange::default()
+        .model(ModelRef::new("faux", "faux-1"))
+        .cwd(std::env::temp_dir().to_string_lossy());
+    let root = harness
+        .root(&context, CreateOptions { agent: Some(agent), init: None })
+        .await?;
+
+    // The input runs as durable tasks: a generation, a `bash` tool task, then a second generation.
+    let submission = root.submit(SubmissionDraft::input("Say hello."), &context).await?;
+    let settled = submission.wait(&context).await?;
+    assert_eq!(settled.status, SubmissionStatus::Done);
+
+    let answer = settled.answer.expect("a done input has an answer");
+    let entry = root
+        .commit(move |tx| async move { tx.entry_of(&ASSISTANT_ENTRY, answer).await }, &context)
+        .await?
+        .expect("the answer entry");
+    if let Some(Message::Assistant(message)) = entry.model.as_deref().and_then(<[_]>::first) {
+        assert_eq!(content_text(&message.content), "It printed hello.");
+    }
+    harness.close(&context).await
+}
+```
+
+Beyond this:
+
+- **Storage.** `MemoryStorage`, the portable `JsonlStorage` and
+  `SqliteStorage` cores over any `FileSystem`/database, the local adapters
+  (`open_local_jsonl_storage`, `open_rusqlite_storage`), and a conformance
+  suite for custom backends (`durable-testing`).
+- **Conversations.** `submit` with `when_busy` steering and follow-ups,
+  `configure` (model, thinking level, extensions, tools, instructions,
+  `cwd`), owned child conversations for subagents, `abort`, `fork`,
+  `reset`, `compact`, `context`/`view_state` reads, and `watch_events` for
+  Pi's agent events.
+- **Tasks.** `define_task` state machines with phases, waits
+  (`all_settled`/`fail_fast`), owned work, abort handlers and migrations;
+  `Harness::inspect` and `task_graph` show live work.
+- **Extensions.** `define_extension` with tools (`define_tool`), prompt
+  sections, hooks on the generation and tool tasks, wraps, and documents
+  (`define_doc`) for extension state.
+- **Coding tools.** `create_read_tool`, `create_write_tool`,
+  `create_edit_tool` and `create_bash_tool` (output limits, spill files,
+  a command prefix and a `prepare` hook) over an `ExecutionEnv`.
 
 ## Differences from Pi
 
@@ -863,6 +980,20 @@ differences. Each is also documented on the module or item involved.
   state snapshot.
 - **chord.** No JS Proxy: change drafts are owned values diffed at prepare
   time; diffs use deep equality.
+- **Durable.** Records serialize to Pi's JSON shapes, so stores stay
+  compatible with the TS backends. Documents are typed tokens with one
+  address argument, transaction drafts are `DocDraft` handles
+  (`get`/`edit`), and Pi's eager promises are spawned Tokio tasks.
+  Callbacks are `Arc` closures returning `Result`; a panicking phase handler
+  faults its task like a throw. `AgentChange` fields are `Option<Option<_>>`
+  (keep or clear), and settings are a closure read at each resolution. The
+  local environment is POSIX only, and SQLite runs on a dedicated thread
+  through `rusqlite`. The coding tools' edit diff uses `similar`'s Myers
+  diff, whose hunks can differ from jsdiff's on ties; `BashPrepare` takes
+  and returns the execution by value. `CompactionPolicy.reserve_tokens` is
+  an `i64` like Pi's `number`; a negative reserve sends `max_tokens` 0 for
+  the summary request. `ToolExecutionApi::detached` (feature
+  `durable-testing`) runs a tool outside a Harness for tests.
 - **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot and
   OpenRouter images; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses;
   classifiers; telemetry contexts.

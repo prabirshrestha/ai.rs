@@ -1,6 +1,6 @@
 //! Port of durable `src/harness/`: the durable agent Harness over one Session.
 //!
-//! See `/mnt/project-files/pi-port/progress/durable-m6-m8.md` for the divergences recorded while porting.
+//! Divergences from Pi are documented on the submodules and items involved.
 
 pub mod agent;
 pub mod compaction;

@@ -37,6 +37,10 @@ Module layout of `crates/ai/src` (mirrors Pi's package folders):
   `stream_fn`).
 - `src/chord/` and `src/durable/`: the chord subset used by Pi Durable and
   Pi Durable itself, behind the `durable` cargo feature (on by default).
+  `durable-local-env` (default) adds the local environment and JSONL
+  adapter, `durable-sqlite` the `rusqlite` storage, `durable-testing` the
+  storage conformance suite. The Pi test suites are ported as unit tests
+  next to the code (`durable/harness/tests/`, `durable/tools/tests.rs`).
 
 Scope: chat through OpenAI (Responses and Chat Completions), Anthropic
 (Messages) and GitHub Copilot, plus the faux provider for tests; image
