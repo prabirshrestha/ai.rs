@@ -212,6 +212,18 @@ mod tests {
                 last_usage_index: None,
             }
         );
+        let model = Model {
+            id: "test-model".to_string(),
+            api: "openai-responses".to_string(),
+            provider: "openai".to_string(),
+            context_window: 10_000,
+            max_tokens: 8_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::api::simple_options::build_base_options(&model, &context, None, None).max_tokens,
+            Some(4_899)
+        );
     }
 
     #[test]

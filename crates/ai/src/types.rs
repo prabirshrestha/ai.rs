@@ -1336,6 +1336,58 @@ impl TranscriptContext {
     }
 }
 
+/// The uniform stream contract of an API implementation module
+/// (`ProviderStreams`): every module under `api/` provides `stream` and
+/// `stream_simple`; capable modules may also provide deferred-response
+/// methods (`supports_*` reports whether Pi's optional method exists).
+///
+/// Implementations return immediately and produce events from a spawned
+/// Tokio task, so they must be called inside a Tokio runtime.
+#[async_trait::async_trait]
+pub trait ProviderStreams: Send + Sync {
+    fn stream(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: StreamOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream;
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: SimpleStreamOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream;
+
+    fn supports_fetch_deferred(&self) -> bool {
+        false
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: Model,
+        _handle: DeferredHandle,
+        _options: DeferredFetchOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream {
+        crate::api::lazy::error_stream(&model, "API does not support deferred responses")
+    }
+
+    fn supports_cancel_deferred(&self) -> bool {
+        false
+    }
+
+    async fn cancel_deferred(
+        &self,
+        _model: Model,
+        _handle: DeferredHandle,
+        _options: DeferredCancelOptions,
+    ) -> Result<()> {
+        Err(crate::Error::message(
+            "API cannot cancel deferred responses",
+        ))
+    }
+}
+
 /// Event protocol for [`AssistantMessageEventStream`].
 ///
 /// Successful streams emit `Start` before partial updates and terminate with
@@ -1737,6 +1789,12 @@ pub struct Model {
     pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ModelCompat>,
+    /// Rust addition: the [`Models`](crate::models::Models) collection a
+    /// provider handle (such as `providers::openai::builder()`) bound this
+    /// model to. The compat entry points (`stream_simple()` and friends)
+    /// dispatch through it. Not serialized and ignored by `==`.
+    #[serde(skip)]
+    pub bound_models: Option<crate::models::Models>,
 }
 
 impl fmt::Debug for Model {
