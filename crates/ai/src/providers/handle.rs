@@ -12,8 +12,9 @@ use crate::Result;
 use crate::auth::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth};
 use crate::models::Models;
 use crate::types::{
-    DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, Model, ProviderHeaders,
-    ProviderStreams, SimpleStreamOptions, StreamOptions, TranscriptContext,
+    AssistantImages, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, ImageModel,
+    ImagesContext, ImagesOptions, Model, ProviderHeaders, ProviderImages, ProviderStreams,
+    SimpleStreamOptions, StreamOptions, TranscriptContext,
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
 
@@ -143,6 +144,46 @@ impl ProviderStreams for HandleStreams {
         self.client(&mut options.http_client);
         self.inner.cancel_deferred(model, handle, options).await
     }
+}
+
+/// Adds the handle's HTTP client to image requests that do not bring their
+/// own.
+pub(crate) struct HandleImages {
+    pub inner: Arc<dyn ProviderImages>,
+    pub http_client: Option<reqwest::Client>,
+}
+
+impl HandleImages {
+    pub fn wrap(
+        inner: Arc<dyn ProviderImages>,
+        http_client: &Option<reqwest::Client>,
+    ) -> Arc<dyn ProviderImages> {
+        Arc::new(Self {
+            inner,
+            http_client: http_client.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl ProviderImages for HandleImages {
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        context: ImagesContext,
+        mut options: ImagesOptions,
+    ) -> AssistantImages {
+        if options.http_client.is_none() {
+            options.http_client.clone_from(&self.http_client);
+        }
+        self.inner.generate_images(model, context, options).await
+    }
+}
+
+/// Bind an image model to the handle's collection.
+pub(crate) fn bind_image(mut model: ImageModel, models: &Models) -> ImageModel {
+    model.bound_models = Some(models.clone());
+    model
 }
 
 /// Trim and drop empty keys, like the pre-1.0 builders.

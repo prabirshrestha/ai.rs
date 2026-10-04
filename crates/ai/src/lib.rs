@@ -11,8 +11,12 @@ pub mod auth;
 #[cfg(feature = "durable")]
 pub mod chord;
 pub mod compat;
+pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
+pub mod image_models;
+pub mod images;
+pub mod images_api_registry;
 pub mod model_catalog;
 pub mod models;
 pub mod models_store;
@@ -51,11 +55,20 @@ pub use auth::{
     env_api_key_auth,
 };
 pub use compat::{complete, complete_simple, register_faux_provider, stream, stream_simple};
+pub use embeddings::{
+    Embedding, EmbeddingBatch, EmbeddingEncodingFormat, EmbeddingModel, EmbeddingModelBuilder,
+    EmbeddingOptions, EmbeddingUsage, EmbeddingVector, embed, embed_many,
+};
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
+pub use image_models::{get_image_model, get_image_models, get_image_providers};
+pub use images::generate_images;
+pub use images_api_registry::{
+    ImagesApiProvider, RegisteredImagesApiProvider, get_images_api_provider,
+    register_images_api_provider,
+};
 pub use models::*;
 pub use models_store::*;
-pub use providers::ModelBuilder;
 pub use providers::anthropic::Anthropic;
 pub use providers::faux::{
     FauxContent, FauxContentBlock, FauxCore, FauxDeferredOptions, FauxMessageOptions,
@@ -66,6 +79,8 @@ pub use providers::faux::{
 };
 pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
+pub use providers::openrouter::OpenRouter;
+pub use providers::{ImageModelBuilder, ModelBuilder};
 pub use types::*;
 pub use utils::assistant_message_frame::*;
 pub use utils::diagnostics::*;

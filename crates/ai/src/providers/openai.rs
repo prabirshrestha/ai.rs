@@ -2,25 +2,32 @@
 //!
 //! The ChatGPT subscription OAuth (`lazyOAuth(loadOpenAIChatGPTOAuth)`) is not
 //! ported; the provider offers api-key auth only.
+//!
+//! ai.rs extras on the handle, not in Pi: [`OpenAi::image_model`]
+//! (OpenAI-compatible `/images/generations`, api `openai-images`) and
+//! [`OpenAi::embedding_model`] (`/embeddings`, see [`crate::embeddings`]).
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use super::catalog::openai_models;
-use super::handle::{HandleAuth, HandleStreams, bind, clean_key};
-use super::model_builder::ModelBuilder;
+use super::handle::{HandleAuth, HandleImages, HandleStreams, bind, bind_image, clean_key};
+use super::model_builder::{ImageModelBuilder, ModelBuilder};
 use crate::api::openai_completions::openai_completions_api;
+use crate::api::openai_images::openai_images_api;
 use crate::api::openai_responses::openai_responses_api;
 use crate::auth::{ProviderAuth, env_api_key_auth};
+use crate::embeddings::{EmbeddingBinding, EmbeddingModelBuilder, bound_embedding_model};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, Models, Provider, ProviderApi, create_models,
     create_provider,
 };
 use crate::types::{
-    AnyModel, KnownApi, Model, ModelInput, ProviderHeaders, ProviderStreams, SimpleStreamOptions,
-    StreamOptions, TranscriptContext,
+    AnyModel, AssistantImages, ImageModel, ImageModelType, ImagesContext, ImagesOptions, KnownApi,
+    KnownImageApi, Model, ModelInput, ModelOutput, ProviderHeaders, ProviderImages,
+    ProviderStreams, SimpleStreamOptions, StreamOptions, TranscriptContext,
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::has_non_empty_header;
@@ -81,6 +88,8 @@ pub struct OpenAi {
     base_url: String,
     api: OpenAiApi,
     models: Models,
+    http_client: Option<reqwest::Client>,
+    keyless: bool,
 }
 
 impl OpenAi {
@@ -130,6 +139,40 @@ impl OpenAi {
         };
         ModelBuilder::new(bind(model, &self.models))
     }
+
+    /// ai.rs extra: an OpenAI-compatible image model (`openai-images`,
+    /// `/images/generations`), text input and image output by default.
+    pub fn image_model(&self, id: &str) -> ImageModelBuilder {
+        ImageModelBuilder::new(bind_image(
+            ImageModel {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: KnownImageApi::OpenaiImages.as_str().to_string(),
+                provider: self.provider_id.clone(),
+                base_url: self.base_url.clone(),
+                model_type: ImageModelType::Image,
+                input: vec![ModelInput::Text],
+                output: vec![ModelOutput::Image],
+                ..Default::default()
+            },
+            &self.models,
+        ))
+    }
+
+    /// ai.rs extra: an OpenAI-compatible embedding model (`/embeddings`).
+    pub fn embedding_model(&self, id: &str) -> EmbeddingModelBuilder {
+        bound_embedding_model(
+            id,
+            &self.provider_id,
+            &self.base_url,
+            None,
+            EmbeddingBinding {
+                models: self.models.clone(),
+                http_client: self.http_client.clone(),
+                keyless: self.keyless,
+            },
+        )
+    }
 }
 
 /// `openai::builder()`.
@@ -149,11 +192,22 @@ pub fn from_env() -> Result<OpenAi> {
 /// receives no credentials.
 struct KeylessStreams {
     inner: Arc<dyn ProviderStreams>,
+    images: Option<Arc<dyn ProviderImages>>,
 }
 
 impl KeylessStreams {
     fn wrap(inner: Arc<dyn ProviderStreams>) -> Arc<dyn ProviderStreams> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            images: None,
+        })
+    }
+
+    fn wrap_images(images: Arc<dyn ProviderImages>) -> Arc<dyn ProviderImages> {
+        Arc::new(Self {
+            inner: openai_responses_api(),
+            images: Some(images),
+        })
     }
 
     fn apply(options: &mut StreamOptions) {
@@ -177,6 +231,37 @@ impl KeylessStreams {
 }
 
 const KEYLESS_API_KEY: &str = "keyless";
+
+#[async_trait::async_trait]
+impl ProviderImages for KeylessStreams {
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        context: ImagesContext,
+        mut options: ImagesOptions,
+    ) -> AssistantImages {
+        let has_key = options
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty());
+        let has_authorization = options
+            .headers
+            .as_ref()
+            .is_some_and(|headers| has_non_empty_header(headers, "authorization"));
+        if !has_key && !has_authorization {
+            options.api_key = Some(KEYLESS_API_KEY.to_string());
+            options
+                .headers
+                .get_or_insert_with(ProviderHeaders::new)
+                .insert("Authorization", None::<String>);
+        }
+        self.images
+            .as_ref()
+            .expect("keyless images adapter wraps an images implementation")
+            .generate_images(model, context, options)
+            .await
+    }
+}
 
 impl ProviderStreams for KeylessStreams {
     fn stream(
@@ -290,6 +375,17 @@ impl OpenAiBuilder {
         ]
         .into_iter()
         .collect();
+        let images_api = if keyless {
+            KeylessStreams::wrap_images(openai_images_api())
+        } else {
+            openai_images_api()
+        };
+        let images = [(
+            KnownImageApi::OpenaiImages.as_str().to_string(),
+            HandleImages::wrap(images_api, &self.http_client),
+        )]
+        .into_iter()
+        .collect();
         let provider = create_provider(CreateProviderOptions {
             id: provider_id.clone(),
             name: Some("OpenAI".to_string()),
@@ -300,6 +396,7 @@ impl OpenAiBuilder {
             },
             models,
             api: Some(ProviderApi::ByApi(streams)),
+            images: Some(images),
             ..Default::default()
         })?;
         let collection = create_models(CreateModelsOptions::default());
@@ -309,6 +406,8 @@ impl OpenAiBuilder {
             base_url,
             api: self.api,
             models: collection,
+            http_client: self.http_client,
+            keyless,
         })
     }
 }
@@ -450,5 +549,82 @@ mod tests {
         .await;
         assert_eq!(request.path, "/v1/responses");
         assert_eq!(request.header("authorization"), None);
+    }
+
+    fn images_response(body: serde_json::Value) -> MockResponse {
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: body.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn image_models_generate_through_the_handle() {
+        let server = MockServer::start(vec![images_response(serde_json::json!({
+            "data": [{ "b64_json": "ZmFrZS1wbmc=" }],
+        }))])
+        .await;
+        let handle = builder()
+            .api_key(Some("test-key"))
+            .base_url(server.url.clone())
+            .build()
+            .unwrap();
+        let model = handle.image_model("gpt-image-2").build_image().unwrap();
+        assert_eq!(model.api, "openai-images");
+        assert_eq!(model.input, vec![ModelInput::Text]);
+        assert_eq!(model.output, vec![ModelOutput::Image]);
+        let output = crate::generate_images(
+            model,
+            ImagesContext::builder().text("A tiny robot").build(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.stop_reason, crate::types::ImagesStopReason::Stop);
+        let request = server.last();
+        assert_eq!(request.path, "/v1/images/generations");
+        assert_eq!(request.header("authorization"), Some("Bearer test-key"));
+        assert_eq!(request.body["prompt"], "A tiny robot");
+    }
+
+    #[tokio::test]
+    async fn ollama_compatible_image_endpoints_work_without_a_key() {
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        let server = MockServer::start(vec![images_response(serde_json::json!({
+            "created": 1710000000,
+            "data": [{ "b64_json": "b2xsYW1h" }],
+        }))])
+        .await;
+        let ollama = builder()
+            .provider_id("ollama")
+            .base_url(server.url.clone())
+            .build()
+            .unwrap();
+        let model = ollama.image_model("x/z-image-turbo").build_image().unwrap();
+        let output = crate::generate_images(
+            model,
+            ImagesContext::builder().text("Generate a cat").build(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.stop_reason, crate::types::ImagesStopReason::Stop);
+        assert_eq!(
+            output.output,
+            vec![crate::types::UserContent::Image(
+                crate::types::ImageContent {
+                    data: "b2xsYW1h".to_string(),
+                    mime_type: "image/png".to_string(),
+                }
+            )]
+        );
+        let request = server.last();
+        assert_eq!(request.path, "/v1/images/generations");
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(request.body["model"], "x/z-image-turbo");
+        assert_eq!(request.body["response_format"], "b64_json");
     }
 }

@@ -25,6 +25,25 @@ pub type Api = String;
 pub type ImageApi = String;
 pub type ProviderId = String;
 
+/// Image APIs with a built-in implementation (`KnownImageApi`).
+/// `OpenaiImages` is an ai.rs extra (OpenAI-compatible `/images/generations`),
+/// not part of Pi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownImageApi {
+    OpenrouterImages,
+    OpenaiImages,
+}
+
+impl KnownImageApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenrouterImages => "openrouter-images",
+            Self::OpenaiImages => "openai-images",
+        }
+    }
+}
+
 /// APIs with a built-in implementation in Pi (`KnownApi`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1855,7 +1874,7 @@ impl Model {
 }
 
 /// Image-generation model: usable with `generate_images()` only.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageModel {
     pub id: String,
@@ -1875,6 +1894,27 @@ pub struct ImageModel {
     pub cost: ModelCost,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
+    /// Rust addition: the [`Models`](crate::models::Models) collection a
+    /// provider handle bound this model to. `generate_images()` dispatches
+    /// through it. Not serialized and ignored by `==`.
+    #[serde(skip)]
+    pub bound_models: Option<crate::models::Models>,
+}
+
+impl PartialEq for ImageModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.api == other.api
+            && self.provider == other.provider
+            && self.base_url == other.base_url
+            && self.model_type == other.model_type
+            && self.input == other.input
+            && self.output == other.output
+            && self.input_limits == other.input_limits
+            && self.cost == other.cost
+            && self.headers == other.headers
+    }
 }
 
 /// The `"image"` discriminator of [`ImageModel`].
@@ -1966,6 +2006,152 @@ impl From<ImageModel> for AnyModel {
     fn from(value: ImageModel) -> Self {
         Self::Image(value)
     }
+}
+
+/// `TextContent | ImageContent` accepted by image generation.
+pub type ImagesInputContent = UserContent;
+/// `TextContent | ImageContent` returned by image generation.
+pub type ImagesOutputContent = UserContent;
+
+/// `ImagesContext`: the prompt for an image-generation request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagesContext {
+    pub input: Vec<ImagesInputContent>,
+}
+
+impl ImagesContext {
+    /// Rust addition kept from the pre-1.0 API.
+    pub fn builder() -> ImagesContextBuilder {
+        ImagesContextBuilder::default()
+    }
+}
+
+/// Builder for [`ImagesContext`] (pre-1.0 API).
+#[derive(Debug, Clone, Default)]
+pub struct ImagesContextBuilder {
+    context: ImagesContext,
+}
+
+impl ImagesContextBuilder {
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.context.input.push(UserContent::text(text));
+        self
+    }
+
+    pub fn image(mut self, image: ImageContent) -> Self {
+        self.context.input.push(UserContent::Image(image));
+        self
+    }
+
+    pub fn input(mut self, input: impl IntoIterator<Item = ImagesInputContent>) -> Self {
+        self.context.input.extend(input);
+        self
+    }
+
+    pub fn build(self) -> ImagesContext {
+        self.context
+    }
+}
+
+/// `ImagesStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImagesStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `AssistantImages`: the result of an image-generation request. Failures
+/// are reported in-band (`stop_reason` error/aborted plus `error_message`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantImages {
+    pub api: ImageApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub output: Vec<ImagesOutputContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: ImagesStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl AssistantImages {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &ImageModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            output: Vec::new(),
+            response_id: None,
+            usage: None,
+            stop_reason: ImagesStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for image requests (`ProviderRequestOptions<ImageModel>`).
+pub type ImagesPayloadHook =
+    Arc<dyn Fn(Value, &ImageModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for image requests.
+pub type ImagesResponseHook =
+    Arc<dyn Fn(ProviderResponse, &ImageModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `ImagesOptions` (`ProviderImagesOptions`): request options for image
+/// generation. Pi's open `Record<string, unknown>` extras become
+/// `provider_options`.
+#[derive(Clone, Default)]
+pub struct ImagesOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<ImagesPayloadHook>,
+    pub on_response: Option<ImagesResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Optional metadata to include in API requests. Providers extract the
+    /// fields they understand and ignore the rest.
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    /// API-specific options (`ProviderImagesOptions` record entries).
+    pub provider_options: serde_json::Map<String, Value>,
+}
+
+impl fmt::Debug for ImagesOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImagesOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("headers", &self.headers)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("provider_options", &self.provider_options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderImages`: the uniform contract of an image-generation API
+/// implementation. Never fails: errors are reported in the result.
+#[async_trait::async_trait]
+pub trait ProviderImages: Send + Sync {
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        context: ImagesContext,
+        options: ImagesOptions,
+    ) -> AssistantImages;
 }
 
 #[cfg(test)]

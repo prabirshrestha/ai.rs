@@ -11,7 +11,8 @@
 //! the rest Chat Completions. The [`GitHubCopilot`] handle falls back to the
 //! same family rules for ids missing from the catalog.
 //!
-//! ai.rs extras, not in Pi: the [`GitHubCopilot`] handle and
+//! ai.rs extras, not in Pi: the [`GitHubCopilot`] handle (including
+//! [`GitHubCopilot::embedding_model`], see [`crate::embeddings`]) and
 //! [`get_oauth_api_key`] (pre-1.0 helper that refreshes an expired stored
 //! credential and returns the request token).
 
@@ -39,6 +40,7 @@ use crate::auth::{
     Credential, LazyOAuthInput, OAuthAuth, OAuthCredential, ProviderAuth, env_api_key_auth,
     lazy_oauth, models_error,
 };
+use crate::embeddings::{EmbeddingBinding, EmbeddingModelBuilder, bound_embedding_model};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, FilterModels, Models, Provider, ProviderApi,
@@ -228,6 +230,7 @@ pub struct GitHubCopilot {
     base_url: String,
     api: Option<GitHubCopilotApi>,
     models: Models,
+    http_client: Option<reqwest::Client>,
 }
 
 impl GitHubCopilot {
@@ -280,6 +283,26 @@ impl GitHubCopilot {
             model.api = api.id().to_string();
         }
         ModelBuilder::new(bind(model, &self.models))
+    }
+
+    /// ai.rs extra: an OpenAI-compatible embedding model served by Copilot
+    /// (`/embeddings`) with Copilot's static headers. OAuth credentials
+    /// resolve the per-account base URL like chat requests.
+    pub fn embedding_model(&self, id: &str) -> EmbeddingModelBuilder {
+        bound_embedding_model(
+            id,
+            &self.provider_id,
+            &self.base_url,
+            github_copilot_models()
+                .values()
+                .next()
+                .and_then(|model| model.headers.clone()),
+            EmbeddingBinding {
+                models: self.models.clone(),
+                http_client: self.http_client.clone(),
+                keyless: false,
+            },
+        )
     }
 }
 
@@ -369,6 +392,7 @@ impl GitHubCopilotBuilder {
             })
             .collect();
         let http_client = self.http_client;
+        let handle_client = http_client.clone();
         let filter: FilterModels = Arc::new(filter_available_models);
         let provider = create_provider(CreateProviderOptions {
             id: provider_id.clone(),
@@ -390,6 +414,7 @@ impl GitHubCopilotBuilder {
             base_url,
             api: self.api,
             models: collection,
+            http_client: handle_client,
         })
     }
 }

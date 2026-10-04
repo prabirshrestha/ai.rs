@@ -8,7 +8,9 @@
 //!   through it first.
 //! - The builtin APIs are the in-scope ones (anthropic-messages,
 //!   openai-completions, openai-responses), and the builtin providers are
-//!   anthropic, github-copilot and openai. The Cloudflare auth branch has no
+//!   anthropic, github-copilot, openai and openrouter (image models only).
+//!   Image generation (`generateImages` and its registry) lives in
+//!   [`crate::images`] and [`crate::images_api_registry`]. The Cloudflare auth branch has no
 //!   in-scope provider and is not ported.
 //! - The legacy `getModel`/`getModels`/`getProviders` aliases are the
 //!   `providers::all` getters.

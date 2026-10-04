@@ -2,13 +2,17 @@
 //! in-scope providers. The data files are Pi 1.0.2's generated JSON
 //! (`providers/data/*.json`), embedded at compile time and flattened with
 //! `flatten_chat_model_catalog()` on first use.
+//!
+//! OpenRouter ships only its image catalog (`OPENROUTER_IMAGE_MODELS`, the
+//! `openrouter-images` group of Pi's `openrouter.json`): OpenRouter chat and
+//! classifier models are out of scope.
 
 use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 
-use crate::model_catalog::{ModelGroups, flatten_chat_model_catalog};
-use crate::types::Model;
+use crate::model_catalog::{ModelGroups, flatten_chat_model_catalog, flatten_image_model_catalog};
+use crate::types::{ImageModel, Model};
 
 fn load(provider: &str, json: &str) -> IndexMap<String, Model> {
     let groups: ModelGroups =
@@ -23,6 +27,13 @@ static OPENAI_MODELS: LazyLock<IndexMap<String, Model>> =
 static GITHUB_COPILOT_MODELS: LazyLock<IndexMap<String, Model>> =
     LazyLock::new(|| load("github-copilot", include_str!("data/github-copilot.json")));
 
+static OPENROUTER_IMAGE_MODELS: LazyLock<IndexMap<String, ImageModel>> = LazyLock::new(|| {
+    let groups: ModelGroups = serde_json::from_str(include_str!("data/openrouter-images.json"))
+        .expect("generated model catalog is valid JSON");
+    flatten_image_model_catalog("openrouter", &groups)
+        .expect("generated model catalog matches ImageModel")
+});
+
 /// `ANTHROPIC_MODELS`.
 pub fn anthropic_models() -> &'static IndexMap<String, Model> {
     &ANTHROPIC_MODELS
@@ -36,6 +47,11 @@ pub fn openai_models() -> &'static IndexMap<String, Model> {
 /// `GITHUB_COPILOT_MODELS`.
 pub fn github_copilot_models() -> &'static IndexMap<String, Model> {
     &GITHUB_COPILOT_MODELS
+}
+
+/// `OPENROUTER_IMAGE_MODELS`.
+pub fn openrouter_image_models() -> &'static IndexMap<String, ImageModel> {
+    &OPENROUTER_IMAGE_MODELS
 }
 
 #[cfg(test)]
@@ -90,6 +106,18 @@ mod tests {
                 );
             }
         }
+        let groups: ModelGroups =
+            serde_json::from_str(include_str!("data/openrouter-images.json")).unwrap();
+        let raw: Vec<&Value> = groups.values().flat_map(|models| models.values()).collect();
+        assert_eq!(raw.len(), openrouter_image_models().len());
+        for value in raw {
+            let model = &openrouter_image_models()[value["id"].as_str().unwrap()];
+            assert_eq!(
+                normalize_numbers(serde_json::to_value(model).unwrap()),
+                normalize_numbers(value.clone())
+            );
+        }
+        assert_eq!(openrouter_image_models().len(), 59);
         assert_eq!(anthropic_models().len(), 16);
         assert_eq!(openai_models().len(), 44);
         assert_eq!(github_copilot_models().len(), 34);

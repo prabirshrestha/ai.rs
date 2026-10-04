@@ -1,20 +1,23 @@
-//! Port of `providers/all.ts` for the in-scope providers (anthropic, openai,
-//! github-copilot). Image and classifier getters arrive with those model
-//! types.
+//! Port of `providers/all.ts` for the in-scope providers (anthropic,
+//! github-copilot, openai, and openrouter for image models only). Classifier
+//! getters are not ported.
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use super::anthropic::anthropic_provider;
-use super::catalog::{anthropic_models, github_copilot_models, openai_models};
+use super::catalog::{
+    anthropic_models, github_copilot_models, openai_models, openrouter_image_models,
+};
 use super::github_copilot::github_copilot_provider;
 use super::openai::openai_provider;
+use super::openrouter::openrouter_provider;
 use crate::models::{CreateModelsOptions, Models, Provider, create_models};
-use crate::types::{AnyModel, Model};
+use crate::types::{AnyModel, ImageModel, Model};
 
 /// Providers present in the generated catalog (`BuiltinProvider`).
-pub const BUILTIN_PROVIDERS: [&str; 3] = ["anthropic", "github-copilot", "openai"];
+pub const BUILTIN_PROVIDERS: [&str; 4] = ["anthropic", "github-copilot", "openai", "openrouter"];
 
 fn catalog(provider: &str) -> Option<&'static IndexMap<String, Model>> {
     match provider {
@@ -23,6 +26,24 @@ fn catalog(provider: &str) -> Option<&'static IndexMap<String, Model>> {
         "openai" => Some(openai_models()),
         _ => None,
     }
+}
+
+fn image_catalog(provider: &str) -> Option<&'static IndexMap<String, ImageModel>> {
+    match provider {
+        "openrouter" => Some(openrouter_image_models()),
+        _ => None,
+    }
+}
+
+/// Read of one generated built-in image model.
+pub fn get_builtin_image_model(provider: &str, model_id: &str) -> Option<ImageModel> {
+    image_catalog(provider)?.get(model_id).cloned()
+}
+
+pub fn get_builtin_image_models(provider: &str) -> Vec<ImageModel> {
+    image_catalog(provider)
+        .map(|models| models.values().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Read of one generated built-in chat model.
@@ -44,6 +65,11 @@ pub fn get_all_builtin_models(provider: &str) -> Vec<AnyModel> {
     get_builtin_models(provider)
         .into_iter()
         .map(AnyModel::Chat)
+        .chain(
+            get_builtin_image_models(provider)
+                .into_iter()
+                .map(AnyModel::Image),
+        )
         .collect()
 }
 
@@ -53,6 +79,7 @@ pub fn builtin_providers() -> Vec<Arc<dyn Provider>> {
         anthropic_provider(),
         github_copilot_provider(),
         openai_provider(),
+        openrouter_provider(),
     ]
 }
 

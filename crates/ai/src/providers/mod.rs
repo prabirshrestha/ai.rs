@@ -9,5 +9,6 @@ pub mod github_copilot;
 pub(crate) mod handle;
 pub mod model_builder;
 pub mod openai;
+pub mod openrouter;
 
-pub use model_builder::ModelBuilder;
+pub use model_builder::{ImageModelBuilder, ModelBuilder};

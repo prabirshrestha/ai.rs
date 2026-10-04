@@ -1,7 +1,7 @@
 //! Port of `utils/model-operations.ts` (chat and image models; classifier
 //! models are not ported).
 
-use crate::types::{AnyModel, ImageModel, Model, ModelType};
+use crate::types::{AnyModel, AssistantImages, ImageModel, ImagesStopReason, Model, ModelType};
 use crate::utils::models_error::{ModelsError, ModelsErrorCode};
 
 /// The type of a model. Models without `type` are chat models.
@@ -42,6 +42,23 @@ pub fn assert_image_model(model: &AnyModel) -> Result<&ImageModel, ModelsError> 
                 model.id()
             ),
         )),
+    }
+}
+
+/// `imageErrorResult()`: an error (or aborted) `AssistantImages` for `model`.
+pub fn image_error_result(
+    model: &ImageModel,
+    error: impl std::fmt::Display,
+    aborted: bool,
+) -> AssistantImages {
+    AssistantImages {
+        stop_reason: if aborted {
+            ImagesStopReason::Aborted
+        } else {
+            ImagesStopReason::Error
+        },
+        error_message: Some(error.to_string()),
+        ..AssistantImages::empty_for(model)
     }
 }
 

@@ -8,8 +8,7 @@
 //!   are paired with a `supports_*` probe (`refresh_models`, deferred calls).
 //! - Requests run on spawned Tokio tasks; abandoned operations are dropped
 //!   (cancelled) instead of continuing in the background.
-//! - Classifier models and `generate_images()`/`classify()` are not ported in
-//!   this module yet; image models are listed but not generated.
+//! - Classifier models and `classify()` are not ported.
 //! - Unknown model types cannot be represented by [`AnyModel`], so Pi's
 //!   `hasKnownModelType()` filtering of stored catalogs happens at
 //!   deserialization time instead.
@@ -37,14 +36,15 @@ use crate::models_store::{
     InMemoryModelsStore, ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions,
 };
 use crate::types::{
-    AnyModel, AssistantMessage, BoxFuture, Context, DeferredCancelOptions, DeferredFetchOptions,
-    DeferredHandle, ImageModel, Model, ModelCostRates, ModelThinkingLevel, ModelType, ProviderEnv,
-    ProviderHeaders, ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StreamOptions,
-    TranscriptContext, Usage, UsageCost,
+    AnyModel, AssistantImages, AssistantMessage, BoxFuture, Context, DeferredCancelOptions,
+    DeferredFetchOptions, DeferredHandle, ImageModel, ImagesContext, ImagesOptions, Model,
+    ModelCostRates, ModelThinkingLevel, ModelType, ProviderEnv, ProviderHeaders, ProviderImages,
+    ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StreamOptions, TranscriptContext,
+    Usage, UsageCost,
 };
 use crate::utils::abort::{operation_signal, race_with_abort_signal};
 use crate::utils::event_stream::AssistantMessageEventStream;
-use crate::utils::model_operations::assert_chat_model;
+use crate::utils::model_operations::{assert_chat_model, image_error_result};
 
 use crate::utils::time::now_millis;
 use crate::utils::transcript::normalize_context;
@@ -146,6 +146,7 @@ pub type ModelsApiStreamOptions = ModelsOptions<StreamOptions>;
 pub type ModelsSimpleStreamOptions = ModelsOptions<SimpleStreamOptions>;
 pub type ModelsDeferredFetchOptions = ModelsOptions<DeferredFetchOptions>;
 pub type ModelsDeferredCancelOptions = ModelsOptions<DeferredCancelOptions>;
+pub type ModelsImagesOptions = ModelsOptions<ImagesOptions>;
 
 /// A provider is the concrete runtime unit. It owns id/name/base metadata,
 /// auth methods, model listing, and the operations its models support.
@@ -256,6 +257,30 @@ pub trait Provider: Send + Sync {
             format!("Provider {} does not support deferred responses", self.id()),
         ))
     }
+
+    /// Whether [`Provider::generate_images`] is implemented (providers with
+    /// dedicated image models).
+    fn supports_generate_images(&self) -> bool {
+        false
+    }
+
+    /// Present when the provider supports dedicated image models. Never
+    /// fails: errors are reported in the result.
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        _context: ImagesContext,
+        _options: ImagesOptions,
+    ) -> AssistantImages {
+        image_error_result(
+            &model,
+            ModelsError::new(
+                ModelsErrorCode::Provider,
+                format!("Provider {} does not support image generation", self.id()),
+            ),
+            false,
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -339,6 +364,7 @@ impl_auth_request_options!(StreamOptions);
 impl_auth_request_options!(ProviderRequestOptions);
 impl_auth_request_options!(SimpleStreamOptions, stream);
 impl_auth_request_options!(DeferredFetchOptions, request);
+impl_auth_request_options!(ImagesOptions);
 
 /// What [`Models::get_auth`] resolves auth for: a provider id, or a model
 /// (provider auth plus the model's static headers).
@@ -1189,14 +1215,30 @@ impl Models {
         model: &Model,
         options: ModelsOptions<T>,
     ) -> Result<(Model, T)> {
-        self.require_provider(&model.provider)?;
+        let (base_url, request_options) = self.apply_auth_to(model.into(), options).await?;
+        let mut request_model = model.clone();
+        if let Some(base_url) = base_url {
+            request_model.base_url = base_url;
+        }
+        Ok((request_model, request_options))
+    }
+
+    /// `applyAuth()` for any model type: the resolved base URL override and
+    /// the request options with auth merged in.
+    async fn apply_auth_to<T: AuthRequestOptions>(
+        &self,
+        target: AuthTarget,
+        options: ModelsOptions<T>,
+    ) -> Result<(Option<String>, T)> {
+        let provider_id = target.provider.clone();
+        self.require_provider(&provider_id)?;
         let ModelsOptions {
             options: mut request_options,
             transform_headers,
         } = options;
         let resolution = self
             .get_auth(
-                model,
+                target,
                 AuthResolutionOverrides {
                     api_key: request_options.api_key().cloned(),
                     env: request_options.env().cloned(),
@@ -1208,7 +1250,7 @@ impl Models {
         let Some(resolution) = resolution else {
             return Err(models_error(
                 ModelsErrorCode::Auth,
-                format!("Provider is not configured: {}", model.provider),
+                format!("Provider is not configured: {provider_id}"),
             ));
         };
         let auth = resolution.auth;
@@ -1226,12 +1268,9 @@ impl Models {
         } else {
             None
         };
-        let mut request_model = model.clone();
-        if let Some(base_url) = auth.base_url.filter(|base_url| !base_url.is_empty()) {
-            request_model.base_url = base_url;
-        }
+        let base_url = auth.base_url.filter(|base_url| !base_url.is_empty());
         request_options.set_auth(api_key, headers, env);
-        Ok((request_model, request_options))
+        Ok((base_url, request_options))
     }
 
     pub fn stream(
@@ -1342,6 +1381,47 @@ impl Models {
             .cancel_deferred(request_model, handle.clone(), request_options)
             .await
     }
+
+    /// Generate images through the owning provider with auth resolved like
+    /// `stream()`. Never fails: unknown providers, unconfigured auth, and
+    /// providers without `generate_images` return an error `AssistantImages`.
+    pub async fn generate_images(
+        &self,
+        model: &ImageModel,
+        context: &ImagesContext,
+        options: impl Into<ModelsImagesOptions>,
+    ) -> AssistantImages {
+        let options = options.into();
+        let aborted = options
+            .options
+            .signal
+            .clone()
+            .map(|signal| move || signal.is_cancelled());
+        let result = async {
+            let provider = self.require_provider(&model.provider)?;
+            if !provider.supports_generate_images() {
+                return Err(models_error(
+                    ModelsErrorCode::Provider,
+                    format!(
+                        "Provider {} does not support image generation",
+                        model.provider
+                    ),
+                ));
+            }
+            let (base_url, request_options) = self.apply_auth_to(model.into(), options).await?;
+            let mut request_model = model.clone();
+            if let Some(base_url) = base_url {
+                request_model.base_url = base_url;
+            }
+            Ok(provider
+                .generate_images(request_model, context.clone(), request_options)
+                .await)
+        }
+        .await;
+        result.unwrap_or_else(|error| {
+            image_error_result(model, error, aborted.is_some_and(|aborted| aborted()))
+        })
+    }
 }
 
 /// `fetchModels`: fetch a dynamic model overlay of every type.
@@ -1378,6 +1458,8 @@ pub struct CreateProviderOptions {
     pub filter_models: Option<FilterModels>,
     pub filter_all_models: Option<FilterAllModels>,
     pub api: Option<ProviderApi>,
+    /// Image-generation implementations keyed by `model.api`.
+    pub images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
 }
 
 struct CreatedProvider {
@@ -1393,6 +1475,7 @@ struct CreatedProvider {
     filter_all_models: Option<FilterAllModels>,
     single: Option<Arc<dyn ProviderStreams>>,
     by_api: IndexMap<String, Arc<dyn ProviderStreams>>,
+    images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
     fetch_deferred: bool,
     cancel_deferred: bool,
 }
@@ -1610,6 +1693,40 @@ impl Provider for CreatedProvider {
             )),
         }
     }
+
+    fn supports_generate_images(&self) -> bool {
+        self.images.is_some()
+    }
+
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        context: ImagesContext,
+        options: ImagesOptions,
+    ) -> AssistantImages {
+        let implementation = self
+            .images
+            .as_ref()
+            .and_then(|images| images.get(&model.api).cloned());
+        match implementation {
+            Some(implementation) => {
+                implementation
+                    .generate_images(model, context, options)
+                    .await
+            }
+            None => {
+                let message = format!(
+                    "Provider {} has no image generation implementation for \"{}\"",
+                    self.id, model.api
+                );
+                image_error_result(
+                    &model,
+                    ModelsError::new(ModelsErrorCode::Provider, message),
+                    false,
+                )
+            }
+        }
+    }
 }
 
 /// Builds a provider from parts. Built-in provider factories go through this.
@@ -1623,7 +1740,8 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
         None => (None, IndexMap::new()),
     };
     let streams: Vec<&Arc<dyn ProviderStreams>> = single.iter().chain(by_api.values()).collect();
-    if streams.is_empty() {
+    let images = input.images.filter(|images| !images.is_empty());
+    if streams.is_empty() && images.is_none() {
         return Err(Error::message(format!(
             "Provider {}: at least one of \"api\", \"images\", or \"classifiers\" is required.",
             input.id
@@ -1645,6 +1763,7 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
         filter_all_models: input.filter_all_models,
         single,
         by_api,
+        images,
         fetch_deferred,
         cancel_deferred,
     }))
@@ -4254,6 +4373,627 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(images.len(), 1);
+    }
+
+    // images-models.test.ts
+
+    struct EnvAuthContext(HashMap<String, String>);
+
+    #[async_trait]
+    impl AuthContext for EnvAuthContext {
+        async fn env(&self, name: &str) -> Option<String> {
+            self.0.get(name).cloned()
+        }
+        async fn file_exists(&self, _path: &str) -> bool {
+            false
+        }
+    }
+
+    fn fake_auth_context(env: &[(&str, &str)]) -> Arc<dyn AuthContext> {
+        Arc::new(EnvAuthContext(
+            env.iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        ))
+    }
+
+    fn ok_images(model: &ImageModel) -> AssistantImages {
+        AssistantImages {
+            output: vec![crate::types::UserContent::Image(
+                crate::types::ImageContent {
+                    data: "aGk=".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            )],
+            ..AssistantImages::empty_for(model)
+        }
+    }
+
+    type ImageCalls = Arc<Mutex<Vec<(ImageModel, ImagesOptions)>>>;
+
+    fn recording_images(calls: &ImageCalls) -> Arc<dyn ProviderImages> {
+        let calls = calls.clone();
+        crate::images_api_registry::images_fn(move |model, _context, options| {
+            let calls = calls.clone();
+            async move {
+                let result = ok_images(&model);
+                calls.lock().push((model, options));
+                result
+            }
+        })
+    }
+
+    fn env_var_auth(env_var: Option<&'static str>) -> ProviderAuth {
+        ProviderAuth {
+            api_key: Some(Arc::new(api_key_auth(Arc::new(move |input| {
+                Box::pin(async move {
+                    let Some(env_var) = env_var else {
+                        return Ok(Some(AuthResult::default()));
+                    };
+                    let stored = input
+                        .credential
+                        .as_ref()
+                        .and_then(|credential| credential.key.clone());
+                    let has_credential = stored.is_some();
+                    let key = match stored {
+                        Some(key) => Some(key),
+                        None => input.ctx.env(env_var).await,
+                    };
+                    Ok(key.map(|key| AuthResult {
+                        auth: ModelAuth {
+                            api_key: Some(key),
+                            ..Default::default()
+                        },
+                        env: None,
+                        source: Some(if has_credential { "stored" } else { env_var }.to_string()),
+                    }))
+                })
+            })))),
+            oauth: None,
+        }
+    }
+
+    fn image_test_provider(
+        id: &str,
+        models: Option<Vec<AnyModel>>,
+        env_var: Option<&'static str>,
+        calls: &ImageCalls,
+        image_apis: &[&str],
+    ) -> Arc<dyn Provider> {
+        create_provider(CreateProviderOptions {
+            id: id.to_string(),
+            auth: env_var_auth(env_var),
+            models: models.unwrap_or_else(|| vec![AnyModel::Image(image_model(id, "model-a"))]),
+            api: Some(ProviderApi::ByApi(
+                [(
+                    "test-chat".to_string(),
+                    match chat_streams() {
+                        ProviderApi::Single(streams) => streams,
+                        ProviderApi::ByApi(_) => unreachable!(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )),
+            images: Some(
+                image_apis
+                    .iter()
+                    .map(|api| (api.to_string(), recording_images(calls)))
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn images_context() -> ImagesContext {
+        ImagesContext::builder().text("a red circle").build()
+    }
+
+    fn image_of(models: &Models, provider: &str, id: &str) -> ImageModel {
+        models
+            .get_model_of_type(ModelType::Image, provider, id)
+            .and_then(|model| model.as_image().cloned())
+            .unwrap()
+    }
+
+    #[test]
+    fn lists_chat_image_and_all_models_through_typed_accessors() {
+        let calls = ImageCalls::default();
+        let models = create_models(Default::default());
+        models.set_provider(image_test_provider(
+            "p1",
+            Some(vec![
+                AnyModel::Chat(test_model("p1", "c1")),
+                AnyModel::Image(image_model("p1", "i1")),
+                AnyModel::Image(image_model("p1", "i2")),
+            ]),
+            None,
+            &calls,
+            &["test-images"],
+        ));
+        models.set_provider(image_test_provider(
+            "p2",
+            Some(vec![AnyModel::Image(image_model("p2", "i3"))]),
+            None,
+            &calls,
+            &["test-images"],
+        ));
+        let ids = |models: Vec<AnyModel>| {
+            models
+                .iter()
+                .map(|model| model.id().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(models.get_models_of_type(ModelType::Chat, None)),
+            ["c1"]
+        );
+        assert_eq!(
+            ids(models.get_models_of_type(ModelType::Image, None)),
+            ["i1", "i2", "i3"]
+        );
+        assert_eq!(
+            ids(models.get_models_of_type(ModelType::Image, Some("p1"))),
+            ["i1", "i2"]
+        );
+        assert_eq!(ids(models.get_all_models(None)), ["c1", "i1", "i2", "i3"]);
+        assert_eq!(models.get_model("p1", "c1").unwrap().id, "c1");
+        assert!(models.get_model("p1", "i1").is_none());
+        assert!(
+            models
+                .get_model_of_type(ModelType::Image, "p1", "i1")
+                .is_some()
+        );
+        assert!(
+            models
+                .get_model_of_type(ModelType::Image, "p1", "c1")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn splits_available_models_by_type() {
+        let calls = ImageCalls::default();
+        let models = create_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[("KEY", "k")])),
+            ..Default::default()
+        });
+        models.set_provider(image_test_provider(
+            "p1",
+            Some(vec![
+                AnyModel::Chat(test_model("p1", "c1")),
+                AnyModel::Image(image_model("p1", "i1")),
+            ]),
+            Some("KEY"),
+            &calls,
+            &["test-images"],
+        ));
+        models.set_provider(image_test_provider(
+            "p2",
+            Some(vec![AnyModel::Image(image_model("p2", "i2"))]),
+            Some("MISSING"),
+            &calls,
+            &["test-images"],
+        ));
+        let chat = models
+            .get_available(None, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(ids(&chat), ["c1"]);
+        let images = models
+            .get_available_of_type(ModelType::Image, None, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(images.iter().map(AnyModel::id).collect::<Vec<_>>(), ["i1"]);
+        let all = models
+            .get_all_available(None, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            all.iter().map(AnyModel::id).collect::<Vec<_>>(),
+            ["c1", "i1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_auth_and_merges_it_into_image_requests_explicit_options_win() {
+        let calls = ImageCalls::default();
+        let models = create_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[("TEST_KEY", "env-key")])),
+            ..Default::default()
+        });
+        models.set_provider(image_test_provider(
+            "p1",
+            None,
+            Some("TEST_KEY"),
+            &calls,
+            &["test-images"],
+        ));
+        let model = image_of(&models, "p1", "model-a");
+        let api_key = |result: Option<AuthResult>| result.and_then(|result| result.auth.api_key);
+        assert_eq!(
+            api_key(models.get_auth(&model, Default::default()).await.unwrap()).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(
+            api_key(models.get_auth("p1", Default::default()).await.unwrap()).as_deref(),
+            Some("env-key")
+        );
+        let explicit = AuthResolutionOverrides {
+            api_key: Some("explicit-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            api_key(models.get_auth(&model, explicit).await.unwrap()).as_deref(),
+            Some("explicit-key")
+        );
+
+        let result = models
+            .generate_images(&model, &images_context(), ImagesOptions::default())
+            .await;
+        assert_eq!(result.stop_reason, crate::types::ImagesStopReason::Stop);
+        assert_eq!(calls.lock()[0].1.api_key.as_deref(), Some("env-key"));
+
+        models
+            .generate_images(
+                &model,
+                &images_context(),
+                ImagesOptions {
+                    api_key: Some("explicit".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(calls.lock()[1].1.api_key.as_deref(), Some("explicit"));
+    }
+
+    #[tokio::test]
+    async fn image_requests_merge_provider_env_and_apply_header_transforms() {
+        let calls = ImageCalls::default();
+        let models = create_models(Default::default());
+        let resolve: ResolveFn = Arc::new(|_| {
+            Box::pin(async {
+                Ok(Some(AuthResult {
+                    auth: ModelAuth {
+                        api_key: Some("provider-key".to_string()),
+                        headers: Some([("x-base", Some("1".to_string()))].into_iter().collect()),
+                        base_url: None,
+                    },
+                    env: Some(
+                        [("PROVIDER_ONLY", "provider"), ("SHARED", "provider")]
+                            .into_iter()
+                            .map(|(name, value)| (name.to_string(), value.to_string()))
+                            .collect(),
+                    ),
+                    source: None,
+                }))
+            })
+        });
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "p1".to_string(),
+                auth: ProviderAuth {
+                    api_key: Some(Arc::new(api_key_auth(resolve))),
+                    oauth: None,
+                },
+                models: vec![AnyModel::Image(image_model("p1", "model-a"))],
+                images: Some(
+                    [("test-images".to_string(), recording_images(&calls))]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let model = image_of(&models, "p1", "model-a");
+        let transform: HeadersTransform = Arc::new(|mut headers: ProviderHeaders| {
+            headers.insert("x-extra", Some("2".to_string()));
+            Box::pin(async move { Ok(headers) })
+        });
+        models
+            .generate_images(
+                &model,
+                &images_context(),
+                ModelsOptions {
+                    options: ImagesOptions {
+                        api_key: Some("request-key".to_string()),
+                        env: Some(
+                            [("REQUEST_ONLY", "request"), ("SHARED", "request")]
+                                .into_iter()
+                                .map(|(name, value)| (name.to_string(), value.to_string()))
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    },
+                    transform_headers: Some(transform),
+                },
+            )
+            .await;
+        let calls = calls.lock();
+        let options = &calls[0].1;
+        assert_eq!(options.api_key.as_deref(), Some("request-key"));
+        let env = options.env.clone().unwrap();
+        assert_eq!(env.len(), 3);
+        assert_eq!(env["PROVIDER_ONLY"], "provider");
+        assert_eq!(env["REQUEST_ONLY"], "request");
+        assert_eq!(env["SHARED"], "request");
+        assert_eq!(
+            options.headers,
+            Some(
+                [
+                    ("x-base", Some("1".to_string())),
+                    ("x-extra", Some("2".to_string()))
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn image_generation_returns_error_results_instead_of_rejecting() {
+        use crate::types::ImagesStopReason;
+
+        let models = create_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[])),
+            ..Default::default()
+        });
+        let ghost = models
+            .generate_images(
+                &image_model("ghost", "m"),
+                &images_context(),
+                ImagesOptions::default(),
+            )
+            .await;
+        assert_eq!(ghost.stop_reason, ImagesStopReason::Error);
+        assert!(
+            ghost
+                .error_message
+                .unwrap()
+                .contains("Unknown provider: ghost")
+        );
+
+        // Unconfigured auth is an error, matching stream().
+        let calls = ImageCalls::default();
+        models.set_provider(image_test_provider(
+            "p1",
+            None,
+            Some("MISSING"),
+            &calls,
+            &["test-images"],
+        ));
+        let model = image_of(&models, "p1", "model-a");
+        assert!(
+            models
+                .get_auth(&model, Default::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let unconfigured = models
+            .generate_images(&model, &images_context(), ImagesOptions::default())
+            .await;
+        assert_eq!(unconfigured.stop_reason, ImagesStopReason::Error);
+        assert!(
+            unconfigured
+                .error_message
+                .unwrap()
+                .contains("not configured")
+        );
+        assert!(calls.lock().is_empty());
+
+        let signal = CancellationToken::new();
+        signal.cancel();
+        let cancelled = models
+            .generate_images(
+                &model,
+                &images_context(),
+                ImagesOptions {
+                    signal: Some(signal),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(cancelled.stop_reason, ImagesStopReason::Aborted);
+        assert!(calls.lock().is_empty());
+
+        // A provider without any images implementation rejects image models it lists.
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "chat-only".to_string(),
+                auth: ambient_auth(),
+                models: vec![AnyModel::Image(image_model("chat-only", "i"))],
+                api: Some(chat_streams()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let unsupported = models
+            .generate_images(
+                &image_of(&models, "chat-only", "i"),
+                &images_context(),
+                ImagesOptions::default(),
+            )
+            .await;
+        assert_eq!(unsupported.stop_reason, ImagesStopReason::Error);
+        assert!(
+            unsupported
+                .error_message
+                .unwrap()
+                .contains("does not support image generation")
+        );
+
+        // An images map without the model's api yields a provider error result.
+        models.set_provider(image_test_provider(
+            "wrong-api",
+            Some(vec![AnyModel::Image(image_model("wrong-api", "i"))]),
+            None,
+            &calls,
+            &["other-images"],
+        ));
+        let missing_api = models
+            .generate_images(
+                &image_of(&models, "wrong-api", "i"),
+                &images_context(),
+                ImagesOptions::default(),
+            )
+            .await;
+        assert_eq!(missing_api.stop_reason, ImagesStopReason::Error);
+        assert!(
+            missing_api
+                .error_message
+                .unwrap()
+                .contains("no image generation implementation for \"test-images\"")
+        );
+    }
+
+    #[test]
+    fn requires_at_least_one_concrete_operation_implementation() {
+        let create =
+            |api: Option<ProviderApi>,
+             images: Option<IndexMap<String, Arc<dyn ProviderImages>>>| {
+                create_provider(CreateProviderOptions {
+                    id: "empty".to_string(),
+                    auth: ambient_auth(),
+                    api,
+                    images,
+                    ..Default::default()
+                })
+            };
+        let message = "at least one of \"api\", \"images\", or \"classifiers\"";
+        for result in [
+            create(None, None),
+            create(Some(ProviderApi::ByApi(IndexMap::new())), None),
+            create(None, Some(IndexMap::new())),
+        ] {
+            assert!(result.err().unwrap().to_string().contains(message));
+        }
+    }
+
+    #[tokio::test]
+    async fn supports_dynamic_providers_listing_image_models_via_refresh() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let models_store = Arc::new(InMemoryModelsStore::default());
+        let models = create_models(CreateModelsOptions {
+            models_store: Some(models_store.clone()),
+            ..Default::default()
+        });
+        let counter = fetches.clone();
+        let calls = ImageCalls::default();
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "dyn".to_string(),
+                auth: ambient_auth(),
+                fetch_models: Some(Arc::new(move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async {
+                        Ok(vec![
+                            AnyModel::Image(image_model("dyn", "listed")),
+                            AnyModel::Chat(test_model("dyn", "chat")),
+                        ])
+                    })
+                })),
+                images: Some(
+                    [("test-images".to_string(), recording_images(&calls))]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert!(models.get_all_models(Some("dyn")).is_empty());
+        let result = models
+            .refresh(ModelsRefreshOptions {
+                providers: Some(vec!["dyn".to_string()]),
+                ..Default::default()
+            })
+            .await;
+        assert!(result.errors.is_empty());
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert!(
+            models
+                .get_model_of_type(ModelType::Image, "dyn", "listed")
+                .is_some()
+        );
+        assert!(models.get_model("dyn", "chat").is_some());
+        let stored = models_store
+            .read("dyn", Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.models.iter().map(AnyModel::id).collect::<Vec<_>>(),
+            ["listed", "chat"]
+        );
+    }
+
+    #[test]
+    fn keeps_existing_built_in_and_compat_model_reads_chat_only() {
+        use crate::providers::all::{
+            get_all_builtin_models, get_builtin_image_model, get_builtin_image_models,
+            get_builtin_models,
+        };
+        let chat = get_builtin_models("openrouter");
+        let images = get_builtin_image_models("openrouter");
+        let all = get_all_builtin_models("openrouter");
+        assert!(
+            all.iter()
+                .any(|model| is_model_type(model, ModelType::Image))
+        );
+        assert_eq!(crate::compat::get_models("openrouter"), chat);
+        assert_eq!(chat.len() + images.len(), all.len());
+        assert_eq!(
+            get_builtin_image_model("openrouter", "black-forest-labs/flux.2-pro")
+                .unwrap()
+                .model_type,
+            crate::types::ImageModelType::Image
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_models_exposes_openrouter_image_models_under_the_openrouter_provider() {
+        let models = crate::providers::all::builtin_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[("OPENROUTER_API_KEY", "or-key")])),
+            ..Default::default()
+        });
+        let provider = models.get_provider("openrouter").unwrap();
+        let images = models.get_models_of_type(ModelType::Image, Some("openrouter"));
+        assert!(!images.is_empty());
+        assert!(provider.get_models().unwrap().is_empty());
+        assert!(
+            provider
+                .get_all_models()
+                .unwrap()
+                .iter()
+                .any(|model| is_model_type(model, ModelType::Image))
+        );
+        assert!(
+            images
+                .iter()
+                .all(|model| model.api() == "openrouter-images")
+        );
+        assert!(
+            models
+                .get_models_of_type(ModelType::Image, None)
+                .iter()
+                .all(|model| model.provider() == "openrouter")
+        );
+        let image = images[0].as_image().unwrap();
+        assert_eq!(
+            models
+                .get_auth(image, Default::default())
+                .await
+                .unwrap()
+                .unwrap()
+                .auth
+                .api_key
+                .as_deref(),
+            Some("or-key")
+        );
+        assert!(provider.supports_generate_images());
     }
 
     // max-thinking.test.ts and supports-xhigh.test.ts (catalog parts)
