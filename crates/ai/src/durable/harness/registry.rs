@@ -68,6 +68,18 @@ impl RegistryState {
         })
     }
 
+    /// A copy lacking the task `name`, as a hand-built snapshot without the built-in tasks would be.
+    #[cfg(test)]
+    pub(crate) fn without_task(&self, name: &str) -> Self {
+        let mut tasks = self.tasks.clone();
+        tasks.shift_remove(name);
+        Self {
+            extensions: self.extensions.clone(),
+            by_name: self.by_name.clone(),
+            tasks,
+        }
+    }
+
     /// Installed extensions, in install order.
     pub fn installed(&self) -> &[Extension] {
         &self.extensions
