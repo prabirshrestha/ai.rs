@@ -64,14 +64,29 @@ pub(crate) fn pending_task(id: u64, phase: &str) -> JsonValue {
     })
 }
 
+pub(crate) fn terminal_task(id: u64) -> JsonValue {
+    json!({
+        "id": id,
+        "conversationId": 1,
+        "kind": "test.task",
+        "version": 1,
+        "input": null,
+        "state": { "status": "terminal", "outcome": { "status": "completed", "result": null } },
+        "background": false,
+        "abortRequested": false,
+    })
+}
+
 pub(crate) fn json<T: serde::Serialize>(value: &T) -> JsonValue {
     serde_json::to_value(value).expect("serializable")
 }
 
+#[cfg_attr(not(feature = "durable-sqlite"), allow(dead_code))]
 pub(crate) fn entry_json(stored: &StoredEntry) -> JsonValue {
     json!({ "entry": json(&stored.entry), "commitSeq": stored.commit_seq })
 }
 
+#[cfg_attr(not(feature = "durable-sqlite"), allow(dead_code))]
 pub(crate) fn document_json(stored: &StoredDocument) -> JsonValue {
     json!({
         "record": json(&stored.record),
@@ -81,6 +96,7 @@ pub(crate) fn document_json(stored: &StoredDocument) -> JsonValue {
     })
 }
 
+#[cfg_attr(not(feature = "durable-sqlite"), allow(dead_code))]
 pub(crate) fn page_json<T: serde::Serialize>(page: &Page<T>) -> JsonValue {
     let mut value = json!({ "items": json(&page.items) });
     if let Some(next) = &page.next {

@@ -9,13 +9,15 @@ repository.workspace = true
 readme = "README.md"
 
 [features]
-default = ["durable"]
+default = ["durable", "durable-local-env"]
 # Pi Durable and the chord subset it uses (`chord`, later `durable`).
 durable = []
 # Reusable durable storage conformance suite (`durable::testing`).
 durable-testing = ["durable"]
 # `SqliteStorage` over a bundled SQLite (`durable::storage::sqlite::rusqlite`).
 durable-sqlite = ["durable", "dep:rusqlite"]
+# `LocalExecutionEnv` and the local JSONL storage adapter (`durable::env::local`).
+durable-local-env = ["durable", "tokio/fs", "tokio/process", "dep:libc"]
 
 [dependencies]
 async-trait.workspace = true
@@ -36,6 +38,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "net"] }
