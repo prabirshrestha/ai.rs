@@ -706,8 +706,9 @@ pub struct RetryPolicyOverrides {
 pub struct CompactionPolicy {
     /// Threshold and overflow compaction.
     pub enabled: bool,
-    /// Room kept free for the answer.
-    pub reserve_tokens: u64,
+    /// Room kept free for the answer: generation blocks to compact above `context_window - reserve_tokens`. Signed,
+    /// as TS's `number`: a negative reserve puts the blocking threshold above the window.
+    pub reserve_tokens: i64,
     /// Approximate size of the recent context a summary keeps verbatim.
     pub keep_recent_tokens: u64,
     /// Background compaction starts `background_tokens` below the blocking threshold; `0` disables it.
@@ -718,7 +719,7 @@ pub struct CompactionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CompactionPolicyOverrides {
     pub enabled: Option<bool>,
-    pub reserve_tokens: Option<u64>,
+    pub reserve_tokens: Option<i64>,
     pub keep_recent_tokens: Option<u64>,
     pub background_tokens: Option<u64>,
 }

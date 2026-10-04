@@ -3,8 +3,7 @@
 //!
 //! Divergences: the reopened SQLite file is `ControlledStorage::persistent()`; the faux model window is 100k (TS: 128k)
 //! and thresholds are scaled to it; the blocking compaction that faults is a panicking `beforeCompact` hook (TS: a
-//! throwing `completeSimple`). Skipped: the two "treats silent overflow as an ordinary answer" cases, which need a
-//! negative `reserveTokens` that the unsigned Rust policy cannot hold.
+//! throwing `completeSimple`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -1151,6 +1150,51 @@ async fn shows_a_late_joiner_a_compaction_that_is_summarizing() {
     stream.stop().await;
     chat.harness.abort_task(id, &context()).await.unwrap();
     chat.close().await;
+}
+
+#[tokio::test]
+async fn treats_silent_overflow_as_an_ordinary_answer() {
+    let cases = [
+        ("a stop whose input exceeds the window", answer("fine")),
+        (
+            "a length stop that fills the window without output",
+            faux_assistant_message(
+                "",
+                FauxMessageOptions {
+                    stop_reason: Some(StopReason::Length),
+                    ..FauxMessageOptions::default()
+                },
+            ),
+        ),
+    ];
+    for (name, response) in cases {
+        let chat = open(OpenOptions {
+            context_window: Some(300),
+            ..OpenOptions::default()
+        })
+        .await;
+        history(&chat).await;
+        // Thresholds out of reach, so only overflow classification could compact.
+        chat.policy(CompactionPolicy {
+            enabled: true,
+            reserve_tokens: -100_000,
+            keep_recent_tokens: 150,
+            background_tokens: 0,
+        });
+        chat.faux.agent(response);
+        let input = submit(&chat, "go").await;
+        assert_eq!(settled_json(&input).await["status"], "done", "{name}");
+        let entries = all_entries(&chat.root).await;
+        let last = entries.last().unwrap();
+        let Some(crate::types::Message::Assistant(message)) =
+            last.model.as_ref().and_then(|model| model.first())
+        else {
+            panic!("{name}: the last entry is not an answer");
+        };
+        assert!(message.usage.input >= 300, "{name}");
+        assert!(chat.faux.summary_requests().is_empty(), "{name}");
+        chat.close().await;
+    }
 }
 
 #[tokio::test]

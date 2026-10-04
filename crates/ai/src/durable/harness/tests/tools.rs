@@ -1,7 +1,6 @@
 //! Port of `test/harness-tools.test.ts`.
 //!
-//! Skipped: the two `coding tools` cases (read/edit/bash tools are M9). The environment case uses
-//! `LocalExecutionEnv` for `NodeExecutionEnv`. Promises a tool leaves pending are spawned Tokio tasks.
+//! The environment and coding-tool cases use `LocalExecutionEnv` for `NodeExecutionEnv`. Promises a tool leaves pending are spawned Tokio tasks.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -2040,4 +2039,139 @@ async fn answers_an_aborted_tool_with_only_its_durable_output_discarding_buffere
         "durable\n|<harness>\n[error] Tool slow was aborted\n</harness>"
     );
     harness.close(&context()).await.unwrap();
+}
+
+// ─── Coding tools ───────────────────────────────────────────────────────────
+
+/// A fresh directory and the fixed local environment rooted in it.
+fn coding_env() -> (crate::durable::storage::test_support::TempDir, ChatOptions) {
+    let dir = crate::durable::storage::test_support::TempDir::new("pi-durable-coding-");
+    let cwd = dir
+        .join("")
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_owned();
+    let options = ChatOptions {
+        env: Some(fixed_env(Arc::new(LocalExecutionEnv::at(cwd)))),
+        ..ChatOptions::default()
+    };
+    (dir, options)
+}
+
+#[tokio::test]
+async fn answers_a_failing_command_with_its_retained_tail_and_diagnostics_in_order() {
+    let (_dir, options) = coding_env();
+    let setup = chat_setup();
+    add_tool(
+        &setup.registry,
+        crate::durable::tools::create_bash_tool(Default::default()),
+    );
+    let command = "i=1; while [ $i -le 3000 ]; do echo line-$i; i=$((i + 1)); done; exit 7";
+    let run = run_prepared(
+        &setup,
+        vec![
+            calls(&[("bash", json!({ "command": command }), "b")]),
+            done(),
+        ],
+        options,
+        |_, _| async {},
+    )
+    .await;
+    let entry = run
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "pi.tool-result")
+        .unwrap();
+    let result = &results(std::slice::from_ref(entry))[0];
+    assert!(result.is_error);
+    let text = result_text(result);
+    assert!(text.starts_with("line-1001\n"), "{text}");
+    let codes: Vec<JsonValue> = entry.data.as_ref().unwrap()["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|diagnostic| diagnostic["code"].clone())
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            json!("full_output"),
+            json!("tool_error"),
+            json!("truncated")
+        ]
+    );
+    assert!(
+        text.contains("line-3000\n|<harness>\n[info] Full output: "),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n[error] Command exited with code 7\n[warn] Output truncated to its end: 1000 lines, "
+        ),
+        "{text}"
+    );
+    run.harness.close(&context()).await.unwrap();
+}
+
+#[tokio::test]
+async fn reads_edits_and_runs_a_command_in_one_run_then_answers() {
+    let (dir, options) = coding_env();
+    std::fs::write(dir.join("notes.txt"), "hello world\n").unwrap();
+    let setup = chat_setup();
+    setup
+        .registry
+        .install(define_extension(ExtensionDefinition {
+            tools: vec![
+                crate::durable::tools::create_read_tool(),
+                crate::durable::tools::create_edit_tool(),
+                crate::durable::tools::create_bash_tool(Default::default()),
+            ],
+            ..ExtensionDefinition::new("coding")
+        }))
+        .unwrap();
+    let run = run_prepared(
+        &setup,
+        vec![
+            calls(&[("read", json!({ "path": "notes.txt" }), "r")]),
+            calls(&[(
+                "edit",
+                json!({ "path": "notes.txt", "edits": [{ "oldText": "world", "newText": "durable" }] }),
+                "e",
+            )]),
+            calls(&[("bash", json!({ "command": "cat notes.txt" }), "b")]),
+            done(),
+        ],
+        options,
+        |_, _| async {},
+    )
+    .await;
+    assert_eq!(run.status, SubmissionStatus::Done);
+    let seen: Vec<(String, bool, String)> = results(&run.entries)
+        .iter()
+        .map(|result| {
+            (
+                result.tool_name.clone(),
+                result.is_error,
+                result_text(result),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("read".into(), false, "hello world\n".into()),
+            (
+                "edit".into(),
+                false,
+                "Successfully replaced 1 block(s) in notes.txt.".into()
+            ),
+            ("bash".into(), false, "hello durable\n".into()),
+        ]
+    );
+    assert_eq!(run.entries.last().unwrap().kind, "pi.assistant");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        "hello durable\n"
+    );
+    run.harness.close(&context()).await.unwrap();
 }

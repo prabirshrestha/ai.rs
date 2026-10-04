@@ -17,6 +17,7 @@ mod examples_chat;
 #[cfg(feature = "durable-local-env")]
 mod examples_coding;
 mod examples_events;
+mod examples_subagents;
 mod generation;
 mod generation_recovery;
 mod inbox;
@@ -28,6 +29,7 @@ mod ownership;
 mod prompt;
 mod registry;
 mod spec_usage;
+mod structured;
 mod submissions;
 mod task_graph;
 mod tasks;

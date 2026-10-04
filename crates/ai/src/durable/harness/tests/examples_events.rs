@@ -2,7 +2,8 @@
 //! model and asserts what the TS script prints. Example 19 uses memory storage and a stub `bash` tool (the read and
 //! bash coding tools are M9), and covers both its `--events` and `--ops` modes. Example 21 joins at a gate after the
 //! fifth output line instead of after 500 ms. In 25 the overflow turn first crosses the blocking threshold, so it
-//! fails instead of showing an overflow summary. Example 23 (persistent background subagents) is not ported.
+//! fails instead of showing an overflow summary. Example 23 is in
+//! `examples_subagents`.
 
 use std::collections::HashSet;
 use std::sync::Arc;

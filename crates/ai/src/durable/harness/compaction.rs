@@ -1,4 +1,7 @@
 //! Port of durable `src/harness/compaction.ts`: the built-in compaction task (spec §8.7).
+//!
+//! Divergence from Pi: a negative `reserve_tokens` gives a summary request `max_tokens` of 0 (TS sends the negative
+//! `Math.floor(0.8 * reserveTokens)` as is).
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
@@ -246,7 +249,8 @@ async fn select_phase(task: Current, runtime: Runtime, context: Context) -> Resu
         }
         None => {}
     }
-    let reserve = (0.8 * policy.reserve_tokens as f64).floor() as u64;
+    // TS passes a negative `Math.floor(0.8 * reserveTokens)` on as is; the unsigned request clamps it to 0.
+    let reserve = (0.8 * policy.reserve_tokens as f64).floor().max(0.0) as u64;
     let request = SummaryRequest {
         attempt: 1,
         model: ref_,

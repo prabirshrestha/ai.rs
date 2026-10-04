@@ -1,7 +1,7 @@
 //! Port of `test/harness-tools-recovery.test.ts`.
 //!
 //! Divergences: the reopened SQLite file is `ControlledStorage::persistent()`. The faulting result carries a non-finite
-//! usage cost, which strict JSON rejects, instead of a function value. Skipped: the real `bash` command case (M9).
+//! usage cost, which strict JSON rejects, instead of a function value.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -596,5 +596,58 @@ async fn clears_the_interrupted_attempts_progress_before_a_safe_rerun() {
         json!([{ "severity": "info", "message": "second" }])
     );
     assert_eq!(slot.details, Some(json!({ "run": 2 })));
+    harness.close(&context()).await.unwrap();
+}
+
+#[tokio::test]
+async fn answers_a_real_bash_command_interrupted_by_close_and_reopen_then_finishes_the_run() {
+    let storage = storage();
+    let dir = crate::durable::storage::test_support::TempDir::new("pi-durable-bash-");
+    let cwd = dir
+        .join("")
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_owned();
+    let env = fixed_env(Arc::new(LocalExecutionEnv::at(cwd)));
+    let setup = chat_setup();
+    add_tool(
+        &setup.registry,
+        crate::durable::tools::create_bash_tool(Default::default()),
+    );
+    setup.faux.set_responses([
+        faux_assistant_message(
+            vec![faux_tool_call(
+                "bash",
+                json!({ "command": "echo started; sleep 30" }),
+                Some("b"),
+            )],
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..FauxMessageOptions::default()
+            },
+        )
+        .into(),
+        done(),
+    ]);
+    let (harness, root) = open(&storage, &setup, Some(env.clone())).await;
+    let id = submit(&root).await;
+    wait_for(|| async {
+        live_state(&harness, &root)
+            .await
+            .and_then(|live| live.tools)
+            .and_then(|tools| tools.first().and_then(|slot| slot.output.clone()))
+            .as_deref()
+            == Some("started\n")
+    })
+    .await;
+    harness.close(&context()).await.unwrap();
+
+    let (harness, root) = open(&storage, &setup, Some(env)).await;
+    assert_eq!(settle(&harness, id).await, SubmissionStatus::Done);
+    let entries = all_entries(&root).await;
+    assert_eq!(
+        text(results(&entries).first()),
+        "started\n|<harness>\n[error] Tool bash was interrupted and may have partially run\n</harness>"
+    );
     harness.close(&context()).await.unwrap();
 }
