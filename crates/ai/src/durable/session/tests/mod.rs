@@ -2,7 +2,7 @@
 
 #![allow(clippy::type_complexity)]
 
-mod support;
+pub(crate) mod support;
 
 mod checkpoints_migrations;
 mod documents;

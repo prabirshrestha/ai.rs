@@ -87,7 +87,13 @@ pub struct ControlledStorage {
     commit_gate: Arc<Mutex<Option<Arc<Held>>>>,
     find_gate: Arc<Mutex<Option<Arc<Held>>>>,
     commit_failure: Mutex<Option<Error>>,
+    close_failure: Mutex<Option<Error>>,
+    persistent: std::sync::atomic::AtomicBool,
+    commit_filter: Mutex<Option<CommitFilter>>,
 }
+
+/// Decides per batch whether a commit fails before reaching the inner storage.
+pub type CommitFilter = Box<dyn FnMut(&[StorageWrite]) -> Option<Error> + Send>;
 
 impl ControlledStorage {
     pub fn new() -> Self {
@@ -122,6 +128,26 @@ impl ControlledStorage {
         *self.commit_failure.lock() = Some(error);
     }
 
+    /// Fail `close()` after closing the inner storage.
+    #[allow(dead_code)] // Used by the Harness lifecycle suite.
+    pub fn fail_close(&self, error: Error) {
+        *self.close_failure.lock() = Some(error);
+    }
+
+    /// Keep the data readable after `close()`, as a durable backend reopened at the same path would be.
+    #[allow(dead_code)] // Used by the Harness recovery suites.
+    pub fn persistent() -> Self {
+        let storage = Self::default();
+        storage.persistent.store(true, Ordering::SeqCst);
+        storage
+    }
+
+    /// Fail the batches `filter` returns an error for.
+    #[allow(dead_code)] // Used by the Harness ownership suite.
+    pub fn filter_commits(&self, filter: CommitFilter) {
+        *self.commit_filter.lock() = Some(filter);
+    }
+
     pub fn commit_count(&self) -> usize {
         self.commits.lock().len()
     }
@@ -149,6 +175,14 @@ impl Storage for ControlledStorage {
         }
         let failure = self.commit_failure.lock().take();
         if let Some(failure) = failure {
+            return Err(failure);
+        }
+        let filtered = self
+            .commit_filter
+            .lock()
+            .as_mut()
+            .and_then(|filter| filter(writes));
+        if let Some(failure) = filtered {
             return Err(failure);
         }
         self.inner.commit(writes, context).await
@@ -294,7 +328,13 @@ impl Storage for ControlledStorage {
     }
 
     async fn close(&self, context: &Context) -> Result<()> {
-        self.inner.close(context).await
+        if !self.persistent.load(Ordering::SeqCst) {
+            self.inner.close(context).await?;
+        }
+        match self.close_failure.lock().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 

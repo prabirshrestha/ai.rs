@@ -8,7 +8,7 @@ pub mod session;
 pub mod transaction;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::chord::AttachedReplicatedState;
 
