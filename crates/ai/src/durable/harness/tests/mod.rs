@@ -23,3 +23,4 @@ mod tasks;
 mod tasks_recovery;
 mod tools;
 mod tools_recovery;
+mod view;

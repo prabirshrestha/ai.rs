@@ -26,6 +26,7 @@ use super::provider::PROVIDER_DOC;
 use super::registry::{RegistrySnapshot, builtin_tasks};
 use super::scheduler::{AbortTaskResult, InvocationBinding, TaskScheduler, TaskSchedulerOptions};
 use super::submissions::{AbortSubmissionResult, Submission, Submissions};
+use super::task_graph::{TaskGraph, TaskGraphView, TaskGraphWatch};
 use super::types::{
     Agent, AgentChange, CompactionReason, CompactionResult, ContextView, ConversationAbortOptions,
     ConversationCreateOptions, ConversationInit, DocumentReader, EnvTarget, HarnessInspection,
@@ -33,6 +34,7 @@ use super::types::{
 };
 use super::usage::{USAGE_DOC, UsageState, add_usage_state};
 use super::util::scan_all;
+use super::view::{ConversationView, ConversationViews, ConversationWatch};
 
 const SCAN_PAGE_SIZE: usize = 256;
 
@@ -70,6 +72,8 @@ struct HarnessInner {
     settings: Arc<dyn Fn() -> Settings + Send + Sync>,
     scheduler: Arc<TaskScheduler>,
     submissions: Arc<Submissions>,
+    task_graph: TaskGraphView,
+    views: ConversationViews,
     closed: AtomicBool,
 }
 
@@ -271,6 +275,10 @@ impl Harness {
                 }),
             )
             .expect("a new Session accepts listeners");
+            let task_graph =
+                TaskGraphView::new(session.clone()).expect("a new Session accepts listeners");
+            let views =
+                ConversationViews::new(session.clone()).expect("a new Session accepts listeners");
             HarnessInner {
                 session: session.clone(),
                 options,
@@ -279,6 +287,8 @@ impl Harness {
                 settings,
                 scheduler,
                 submissions,
+                task_graph,
+                views,
                 closed: AtomicBool::new(false),
             }
         });
@@ -289,6 +299,24 @@ impl Harness {
     /// The Session under this Harness.
     pub fn session(&self) -> &SessionImpl {
         &self.session
+    }
+
+    /// The conversation view mounts, for adapters built on them (TS `conversationViews(harness)`).
+    pub fn views(&self) -> &ConversationViews {
+        &self.inner.views
+    }
+
+    /// A disposable read-only Chord state of every live task (spec §9.5).
+    pub async fn task_graph(
+        &self,
+        context: &Context,
+    ) -> Result<crate::chord::AttachedReplicatedState<TaskGraph>> {
+        self.inner.task_graph.state(context).await
+    }
+
+    /// A serialized exact-frame watch of every live task (spec §9.5).
+    pub async fn watch_task_graph(&self, context: &Context) -> Result<TaskGraphWatch> {
+        self.inner.task_graph.watch(context).await
     }
 
     fn assert_open(&self) -> Result<()> {
@@ -792,6 +820,19 @@ impl Conversation {
             .scheduler
             .wait_for_idle(Some(self.id), context)
             .await
+    }
+
+    /// A disposable read-only Chord state of the conversation view (spec §9.3).
+    pub async fn view_state(
+        &self,
+        context: &Context,
+    ) -> Result<crate::chord::AttachedReplicatedState<ConversationView>> {
+        self.harness.inner.views.state(self.id, context).await
+    }
+
+    /// A serialized exact-frame watch of the conversation view; cancelling `context` stops it.
+    pub async fn watch(&self, context: &Context) -> Result<ConversationWatch> {
+        self.harness.inner.views.watch(self.id, context).await
     }
 }
 

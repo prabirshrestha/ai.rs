@@ -1,7 +1,6 @@
 //! Port of `test/harness-lifecycle.test.ts` (Harness open, close, and pausing).
 //!
-//! The SQLite reopen case runs over `ControlledStorage::persistent()`. The view/task-graph observer cases arrive with the
-//! views milestone.
+//! The SQLite reopen case runs over `ControlledStorage::persistent()`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +22,7 @@ use crate::durable::session::tests::support::{ControlledStorage, Deferred, flush
 use crate::durable::storage::memory::MemoryStorage;
 use crate::durable::types::{
     ConversationRecord, DocDefinition, EntryDraft, SessionScope, Storage, StorageWrite,
-    SubmissionCreate, SubmissionStatus, SubmissionType, TaskRecord, TaskState,
+    SubmissionCreate, SubmissionStatus, SubmissionType, TaskRecord, TaskState, WatchEnd,
 };
 use crate::models::Models;
 use crate::types::ModelThinkingLevel;
@@ -864,4 +863,151 @@ async fn lets_a_new_harness_open_the_same_storage_once_close_resolved_no_old_inv
         vec!["start 1", "end 1", "closed", "start 2", "end 2"]
     );
     second.close(&context()).await.unwrap();
+}
+
+#[tokio::test]
+async fn publishes_no_frame_to_states_and_watches_from_a_commit_that_settles_during_close() {
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct Notes {
+        text: String,
+    }
+    let notes = define_doc(DocDefinition::new(
+        "test.close-frames",
+        1,
+        SessionScope,
+        Notes::default,
+    ))
+    .unwrap();
+    let storage = Arc::new(ControlledStorage::new());
+    let (harness, _, _) = open_tasks(storage.clone(), vec![], TaskOptions::default()).await;
+    let root = harness
+        .root(&context(), CreateOptions::default())
+        .await
+        .unwrap();
+    {
+        let notes = notes.clone();
+        harness
+            .commit(
+                move |tx| async move {
+                    tx.doc(&notes, ())
+                        .await?
+                        .edit(|notes| notes.text = "before".into())
+                },
+                &context(),
+            )
+            .await
+            .unwrap();
+    }
+    let doc_state = harness
+        .document_state(&notes, (), &context())
+        .await
+        .unwrap()
+        .unwrap();
+    let doc_watch = harness
+        .watch_doc(&notes, (), &context())
+        .await
+        .unwrap()
+        .unwrap();
+    let view_state = root.view_state(&context()).await.unwrap();
+    let view_watch = root.watch(&context()).await.unwrap();
+    let graph_state = harness.task_graph(&context()).await.unwrap();
+    let graph_watch = harness.watch_task_graph(&context()).await.unwrap();
+    let frames: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let record = |name: &'static str| {
+        let frames = frames.clone();
+        move || frames.lock().push(name)
+    };
+    {
+        let push = record("graphState");
+        let _ = graph_state.subscribe(move |_, _, delivery| {
+            if delivery.kind == crate::chord::DeliveryKind::Update {
+                push();
+            }
+            crate::chord::ListenerOutcome::ok()
+        });
+        let push = record("graphWatch");
+        graph_watch
+            .start(move |_, _, _| {
+                push();
+                Box::pin(async { Ok(()) })
+            })
+            .unwrap();
+        let push = record("docState");
+        let _ = doc_state.subscribe(move |_, _, delivery| {
+            if delivery.kind == crate::chord::DeliveryKind::Update {
+                push();
+            }
+            crate::chord::ListenerOutcome::ok()
+        });
+        let push = record("viewState");
+        let _ = view_state.subscribe(move |_, _, delivery| {
+            if delivery.kind == crate::chord::DeliveryKind::Update {
+                push();
+            }
+            crate::chord::ListenerOutcome::ok()
+        });
+        let push = record("docWatch");
+        doc_watch
+            .start(move |_, _, _| {
+                push();
+                Box::pin(async { Ok(()) })
+            })
+            .unwrap();
+        let push = record("viewWatch");
+        view_watch
+            .start(move |_, _, _| {
+                push();
+                Box::pin(async { Ok(()) })
+            })
+            .unwrap();
+    }
+    let doc_value = doc_state.value().unwrap();
+    let view_value = view_state.value();
+
+    let held = storage.hold_commits();
+    let root_id = root.id;
+    let committing = tokio::spawn(harness.commit(
+        move |tx| async move {
+            tx.doc(&notes, ())
+                .await?
+                .edit(|notes| notes.text = "during close".into())?;
+            tx.append_entry(root_id, EntryDraft::new("note")).await?;
+            tx.create_task(
+                &noop_step("test.close-graph"),
+                (),
+                crate::durable::types::TaskOptions::conversation(Some(root_id)),
+            )
+            .await?;
+            Ok(())
+        },
+        &context(),
+    ));
+    held.entered().await;
+    let closing = tokio::spawn(harness.close(&context()));
+    flush().await;
+    held.release();
+    committing.await.unwrap().unwrap();
+    closing.await.unwrap().unwrap();
+    flush().await;
+    assert!(frames.lock().is_empty());
+    assert!(Arc::ptr_eq(&doc_state.value().unwrap(), &doc_value));
+    assert!(Arc::ptr_eq(
+        &view_state.value().entries,
+        &view_value.entries
+    ));
+    assert!(Arc::ptr_eq(&view_state.value().docs, &view_value.docs));
+    assert_eq!(to_json(&graph_state.value()), json!({ "tasks": {} }));
+    assert!(matches!(
+        graph_watch.closed().await,
+        WatchEnd::SessionClosed
+    ));
+    assert!(matches!(doc_watch.closed().await, WatchEnd::SessionClosed));
+    assert!(matches!(view_watch.closed().await, WatchEnd::SessionClosed));
+    // The commit itself settled.
+    assert!(
+        storage
+            .last_commit()
+            .iter()
+            .any(|write| matches!(write, StorageWrite::Entry { .. }))
+    );
 }
