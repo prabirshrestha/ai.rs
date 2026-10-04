@@ -25,6 +25,9 @@ use crate::api::openai_responses::openai_responses_api;
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{Models, Provider};
 use crate::providers::all::builtin_models;
+use crate::providers::faux::{
+    FauxProviderRegistration, RegisterFauxProviderOptions, create_faux_core, random_suffix,
+};
 use crate::types::{
     Api, AssistantMessage, Context, KnownApi, Model, ProviderStreams, SimpleStreamOptions,
     StreamOptions, TranscriptContext,
@@ -194,6 +197,18 @@ pub fn unregister_api_providers(source_id: &str) {
         .write()
         .providers
         .retain(|_, entry| entry.source_id.as_deref() != Some(source_id));
+}
+
+/// `registerFauxProvider(options)`: register a faux API implementation under
+/// its own source id. `unregister()` removes it again.
+pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderRegistration {
+    let core = create_faux_core(options);
+    let source_id = format!("faux-provider-{}", random_suffix());
+    register_api_provider(
+        ApiProvider::from_streams(core.api(), Arc::new(core.clone())),
+        Some(&source_id),
+    );
+    FauxProviderRegistration::new(core, source_id)
 }
 
 fn register_builtin_api_providers_into(registry: &mut Registry) {

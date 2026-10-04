@@ -4,6 +4,7 @@
 pub mod all;
 pub mod anthropic;
 pub mod catalog;
+pub mod faux;
 pub mod github_copilot;
 pub(crate) mod handle;
 pub mod model_builder;

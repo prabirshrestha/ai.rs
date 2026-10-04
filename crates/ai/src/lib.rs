@@ -26,13 +26,20 @@ pub use auth::{
     OAuthCredentials, ProviderAuth, ProviderAuthInteraction, default_provider_auth_context,
     env_api_key_auth,
 };
-pub use compat::{complete, complete_simple, stream, stream_simple};
+pub use compat::{complete, complete_simple, register_faux_provider, stream, stream_simple};
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
 pub use models::*;
 pub use models_store::*;
 pub use providers::ModelBuilder;
 pub use providers::anthropic::Anthropic;
+pub use providers::faux::{
+    FauxContent, FauxContentBlock, FauxCore, FauxDeferredOptions, FauxMessageOptions,
+    FauxModelDefinition, FauxProviderHandle, FauxProviderRegistration, FauxProviderState,
+    FauxResponseFactory, FauxResponseStep, FauxTokenSize, RegisterFauxProviderOptions,
+    create_faux_core, faux_assistant_message, faux_provider, faux_text, faux_thinking,
+    faux_tool_call,
+};
 pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
 pub use types::*;
