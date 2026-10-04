@@ -2,8 +2,8 @@
 //! interactions, and compaction events.
 //!
 //! Divergences: a faulting compaction is a panicking `beforeCompact` hook (TS: a throwing `getModel`); Rust model
-//! resolution and `complete_simple` cannot fail, a hook error is reported and skipped, and a panicking provider
-//! stream is not caught.
+//! resolution and `complete_simple` cannot fail (a panicking provider stream ends with an error event, an ordinary
+//! model error), and a hook error is reported and skipped.
 
 use std::sync::Arc;
 

@@ -13,15 +13,18 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use parking_lot::Mutex;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::lazy::panic_message;
 use crate::auth::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ProviderAuth};
 use crate::models::{CreateProviderOptions, Provider, ProviderApi, create_provider};
 use crate::types::{
@@ -1109,10 +1112,13 @@ impl ProviderStreams for FauxCore {
         let producer = outer.clone();
         tokio::spawn(async move {
             let model_id = model.id.clone();
-            if let Err(error) = core
-                .run_stream(&producer, step, model, context, options)
-                .await
-            {
+            // A panicking response factory ends the stream like a throwing one (TS `catch`).
+            let run = AssertUnwindSafe(core.run_stream(&producer, step, model, context, options));
+            let error = match run.catch_unwind().await {
+                Ok(result) => result.err(),
+                Err(payload) => Some(Error::message(panic_message(payload.as_ref()))),
+            };
+            if let Some(error) = error {
                 core.push_error(&producer, &error, &model_id);
             }
         });
@@ -1135,10 +1141,12 @@ impl ProviderStreams for FauxCore {
         let producer = outer.clone();
         tokio::spawn(async move {
             let model_id = model.id.clone();
-            if let Err(error) = core
-                .run_fetch_deferred(&producer, model, handle, options)
-                .await
-            {
+            let run = AssertUnwindSafe(core.run_fetch_deferred(&producer, model, handle, options));
+            let error = match run.catch_unwind().await {
+                Ok(result) => result.err(),
+                Err(payload) => Some(Error::message(panic_message(payload.as_ref()))),
+            };
+            if let Some(error) = error {
                 core.push_error(&producer, &error, &model_id);
             }
         });
@@ -1537,6 +1545,21 @@ mod tests {
         let (_, error) = terminal_error(&events[0]);
         assert_eq!(error.stop_reason, StopReason::Error);
         assert_eq!(error.error_message.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn emits_an_error_when_a_response_factory_panics() {
+        // A panic is the Rust form of a throwing factory: the stream ends with an error event.
+        let registration = register(Default::default()).await;
+        registration.set_responses([FauxResponseStep::factory(|_, _, _, _| {
+            panic!("factory panicked")
+        })]);
+
+        let events = collect_events(registration.get_model(), hi(), None).await;
+        assert_eq!(events.len(), 1);
+        let (_, error) = terminal_error(&events[0]);
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(error.error_message.as_deref(), Some("factory panicked"));
     }
 
     #[tokio::test]
