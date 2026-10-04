@@ -2,10 +2,10 @@
 //! entries, tasks, submissions and documents over a pluggable [`Storage`].
 //!
 //! The module tree mirrors Pi's `src/` layout. Execution environments live in
-//! [`env`](mod@env) and the SQLite and JSONL backends in [`storage`]; the harness and
-//! scheduler are later milestones. See
-//! `/mnt/project-files/pi-port/progress/durable-m2-m3.md` and `durable-m4-m5.md`
-//! for the divergences recorded while porting.
+//! [`env`](mod@env), the SQLite and JSONL backends in [`storage`], the Harness
+//! and scheduler in [`harness`], and the `read`, `write`, `edit`, and `bash`
+//! coding tools in [`tools`]. Divergences from Pi are documented on the modules
+//! and items involved.
 
 pub mod documents;
 pub mod entries;
@@ -18,6 +18,7 @@ pub mod storage;
 pub mod tasks;
 #[cfg(any(test, feature = "durable-testing"))]
 pub mod testing;
+pub mod tools;
 pub mod truncate;
 pub mod types;
 

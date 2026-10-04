@@ -1,0 +1,65 @@
+[
+ {
+  "a": "alpha\nbeta\ngamma\ndelta\n",
+  "b": "ALPHA\nbeta\nGAMMA\ndelta\n",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -1,4 +1,4 @@\n-alpha\n+ALPHA\n beta\n-gamma\n+GAMMA\n delta\n",
+  "diff": {
+   "diff": "-1 alpha\n+1 ALPHA\n 2 beta\n-3 gamma\n+3 GAMMA\n 4 delta",
+   "firstChangedLine": 1
+  }
+ },
+ {
+  "a": "a\nb",
+  "b": "a\nc",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file\n",
+  "diff": {
+   "diff": " 1 a\n-2 b\n+2 c",
+   "firstChangedLine": 2
+  }
+ },
+ {
+  "a": "",
+  "b": "x\n",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -0,0 +1,1 @@\n+x\n",
+  "diff": {
+   "diff": "+1 x",
+   "firstChangedLine": 1
+  }
+ },
+ {
+  "a": "one\ntwo\nthree\n",
+  "b": "one\nTWO\nthree",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -1,3 +1,3 @@\n one\n-two\n-three\n+TWO\n+three\n\\ No newline at end of file\n",
+  "diff": {
+   "diff": " 1 one\n-2 two\n-3 three\n+2 TWO\n+3 three",
+   "firstChangedLine": 2
+  }
+ },
+ {
+  "a": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\n",
+  "b": "line 1\nline 2\nLINE 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nLINE 26\nline 27\nline 28\nline 29\nline 30\n",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -1,7 +1,7 @@\n line 1\n line 2\n-line 3\n+LINE 3\n line 4\n line 5\n line 6\n line 7\n@@ -22,9 +22,9 @@\n line 22\n line 23\n line 24\n line 25\n-line 26\n+LINE 26\n line 27\n line 28\n line 29\n line 30\n",
+  "diff": {
+   "diff": "  1 line 1\n  2 line 2\n- 3 line 3\n+ 3 LINE 3\n  4 line 4\n  5 line 5\n  6 line 6\n  7 line 7\n    ...\n 22 line 22\n 23 line 23\n 24 line 24\n 25 line 25\n-26 line 26\n+26 LINE 26\n 27 line 27\n 28 line 28\n 29 line 29\n 30 line 30",
+   "firstChangedLine": 3
+  }
+ },
+ {
+  "a": "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n",
+  "b": "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nX\nY\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -6,9 +6,10 @@\n l6\n l7\n l8\n l9\n-l10\n+X\n+Y\n l11\n l12\n l13\n l14\n",
+  "diff": {
+   "diff": "    ...\n  6 l6\n  7 l7\n  8 l8\n  9 l9\n-10 l10\n+10 X\n+11 Y\n 11 l11\n 12 l12\n 13 l13\n 14 l14\n    ...",
+   "firstChangedLine": 10
+  }
+ },
+ {
+  "a": "k1\nk2\nk3\nk4\nk5\nk6\nk7\nk8\nk9\nk10\nk11\nk12\n",
+  "b": "k2\nk3\nk4\nk5\nk6\nk7\nk8\nk9\nk10\nk11\n",
+  "patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,4 @@\n-k1\n k2\n k3\n k4\n k5\n@@ -8,5 +7,4 @@\n k8\n k9\n k10\n k11\n-k12\n",
+  "diff": {
+   "diff": "- 1 k1\n  2 k2\n  3 k3\n  4 k4\n  5 k5\n    ...\n  8 k8\n  9 k9\n 10 k10\n 11 k11\n-12 k12",
+   "firstChangedLine": 1
+  }
+ }
+]

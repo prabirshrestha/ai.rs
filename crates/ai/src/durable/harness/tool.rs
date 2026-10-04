@@ -360,12 +360,23 @@ struct Reported {
 }
 
 struct ApiInner {
-    runtime: Runtime,
+    /// `None` for a [`ToolExecutionApi::detached`] api.
+    runtime: Option<Runtime>,
     call_id: String,
     env: Option<Arc<dyn ExecutionEnv>>,
     reported: Arc<Mutex<Reported>>,
     progress: Progress,
     ended: Arc<AtomicBool>,
+    /// What a detached api records instead of reporting to a tool task.
+    recorded: Option<Arc<Mutex<DetachedCalls>>>,
+}
+
+/// What a [`ToolExecutionApi::detached`] api recorded: every raw output chunk, the diagnostics, and the last details.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DetachedCalls {
+    pub output: Vec<String>,
+    pub diagnostics: Vec<ToolDiagnostic>,
+    pub details: Option<JsonValue>,
 }
 
 /// What a tool's execute function may use (`ToolExecutionApi`).
@@ -383,12 +394,48 @@ impl ToolExecutionApi {
         Ok(())
     }
 
+    /// A minimal api outside any tool task, for testing a tool's `execute` directly (Pi's tests build the same
+    /// shape by hand): the environment, and output, diagnostics, and details recorded into the returned
+    /// [`DetachedCalls`]. Everything durable (`task_id`, `commit`, `memo`, ...) panics.
+    #[cfg(any(test, feature = "durable-testing"))]
+    pub fn detached(
+        call_id: impl Into<String>,
+        env: Option<Arc<dyn ExecutionEnv>>,
+    ) -> (Self, Arc<Mutex<DetachedCalls>>) {
+        let recorded = Arc::new(Mutex::new(DetachedCalls::default()));
+        let api = Self(Arc::new(ApiInner {
+            runtime: None,
+            call_id: call_id.into(),
+            env,
+            reported: Arc::new(Mutex::new(Reported {
+                output: OutputBuffer::new(OutputLimits {
+                    max_bytes: DEFAULT_MAX_BYTES,
+                    max_lines: DEFAULT_MAX_LINES,
+                    retain: Retain::Head,
+                }),
+                diagnostics: Vec::new(),
+                details: None,
+            })),
+            progress: Progress::new(Arc::new(|| Box::pin(async { Ok(0) })), Arc::new(|_| {})),
+            ended: Arc::new(AtomicBool::new(false)),
+            recorded: Some(recorded.clone()),
+        }));
+        (api, recorded)
+    }
+
+    fn runtime(&self) -> &Runtime {
+        self.0
+            .runtime
+            .as_ref()
+            .expect("a detached ToolExecutionApi has no tool task")
+    }
+
     pub fn task_id(&self) -> TaskId {
-        self.0.runtime.task_id().erase()
+        self.runtime().task_id().erase()
     }
 
     pub fn conversation_id(&self) -> ConversationId {
-        self.0.runtime.conversation_id()
+        self.runtime().conversation_id()
     }
 
     pub fn call_id(&self) -> &str {
@@ -397,12 +444,12 @@ impl ToolExecutionApi {
 
     /// The tool task's phase snapshot.
     pub fn registry(&self) -> RegistrySnapshot {
-        self.0.runtime.registry()
+        self.runtime().registry()
     }
 
     /// The calling conversation's agent, as the tool task's phase resolved it.
     pub async fn agent(&self, context: &Context) -> Result<Agent> {
-        self.0.runtime.agent(context).await
+        self.runtime().agent(context).await
     }
 
     /// Built by `HarnessOptions.env` for this call; `None` without an environment.
@@ -413,6 +460,10 @@ impl ToolExecutionApi {
     /// Append running output; it becomes the result content when the result omits `content`.
     pub fn output(&self, chunk: &str) -> Result<()> {
         self.assert_live()?;
+        if let Some(recorded) = &self.0.recorded {
+            recorded.lock().output.push(chunk.to_string());
+            return Ok(());
+        }
         let accepted = self.0.reported.lock().output.push(chunk);
         if accepted {
             self.0.progress.mark();
@@ -423,6 +474,13 @@ impl ToolExecutionApi {
     /// `output(chunk)` with a byte chunk; incomplete characters wait for the next chunk.
     pub fn output_bytes(&self, chunk: &[u8]) -> Result<()> {
         self.assert_live()?;
+        if let Some(recorded) = &self.0.recorded {
+            recorded
+                .lock()
+                .output
+                .push(String::from_utf8_lossy(chunk).into_owned());
+            return Ok(());
+        }
         let accepted = self.0.reported.lock().output.push_bytes(chunk);
         if accepted {
             self.0.progress.mark();
@@ -433,6 +491,10 @@ impl ToolExecutionApi {
     /// Record a model-visible remark about this call.
     pub fn diagnostic(&self, diagnostic: ToolDiagnostic) -> Result<()> {
         self.assert_live()?;
+        if let Some(recorded) = &self.0.recorded {
+            recorded.lock().diagnostics.push(diagnostic);
+            return Ok(());
+        }
         self.0.reported.lock().diagnostics.push(diagnostic);
         self.0.progress.mark();
         Ok(())
@@ -443,6 +505,10 @@ impl ToolExecutionApi {
         self.assert_live()?;
         if let Some(signal) = context.abort_signal() {
             signal.throw_if_aborted()?;
+        }
+        if let Some(recorded) = &self.0.recorded {
+            recorded.lock().details = Some(value);
+            return Ok(());
         }
         self.0.reported.lock().details = Some(value);
         // Cancelling the wait leaves the update in place; the commit's own outcome stays observed.
@@ -459,8 +525,7 @@ impl ToolExecutionApi {
     {
         let slot: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
         let out = slot.clone();
-        self.0
-            .runtime
+        self.runtime()
             .commit(
                 move |tx, _| async move {
                     let value = change(tx).await?;
@@ -475,7 +540,7 @@ impl ToolExecutionApi {
     }
 
     pub async fn memo<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
-        self.0.runtime.memo(name).await
+        self.runtime().memo(name).await
     }
 
     pub async fn memo_with<T: Serialize + DeserializeOwned>(
@@ -484,7 +549,7 @@ impl ToolExecutionApi {
         candidate: T,
         context: &Context,
     ) -> Result<T> {
-        self.0.runtime.memo_with(name, candidate, context).await
+        self.runtime().memo_with(name, candidate, context).await
     }
 
     /// Create a task in a commit of its own; `options.conversation_id` is ignored (TS omits it).
@@ -518,11 +583,11 @@ impl ToolExecutionApi {
         id: TaskId<T>,
         context: &Context,
     ) -> Result<Option<TaskRecord>> {
-        self.0.runtime.get_task(id, context).await
+        self.runtime().get_task(id, context).await
     }
 
     pub async fn wait_for_task<T>(&self, id: TaskId<T>, context: &Context) -> Result<TaskRecord> {
-        self.0.runtime.wait_for_task(id, context).await
+        self.runtime().wait_for_task(id, context).await
     }
 
     /// Invocation-bound handle of an existing conversation, such as one this tool created in `commit()`.
@@ -531,7 +596,7 @@ impl ToolExecutionApi {
         id: ConversationId,
         context: &Context,
     ) -> Result<Option<ConversationHandle>> {
-        self.0.runtime.conversation(id, context).await
+        self.runtime().conversation(id, context).await
     }
 
     pub async fn snapshot<A: DocAccess>(
@@ -540,7 +605,7 @@ impl ToolExecutionApi {
         address: A::Address,
         context: &Context,
     ) -> Result<Option<A::Value>> {
-        self.0.runtime.snapshot(token, address, context).await
+        self.runtime().snapshot(token, address, context).await
     }
 
     pub async fn snapshot_as_of<A: RewindableDocAccess>(
@@ -550,8 +615,7 @@ impl ToolExecutionApi {
         at: EntryId,
         context: &Context,
     ) -> Result<Option<A::Value>> {
-        self.0
-            .runtime
+        self.runtime()
             .snapshot_as_of(token, address, at, context)
             .await
     }
@@ -562,7 +626,7 @@ impl ToolExecutionApi {
         address: A::Address,
         context: &Context,
     ) -> Result<Option<DocumentWatch>> {
-        self.0.runtime.watch_doc(token, address, context).await
+        self.runtime().watch_doc(token, address, context).await
     }
 }
 
@@ -602,12 +666,13 @@ async fn run(
         Err(error) => Err(error),
         Ok(env) => {
             let api = ToolExecutionApi(Arc::new(ApiInner {
-                runtime: runtime.clone(),
+                runtime: Some(runtime.clone()),
                 call_id: call.id.clone(),
                 env,
                 reported: reported.clone(),
                 progress: progress.clone(),
                 ended: ended.clone(),
+                recorded: None,
             }));
             (tool.execute)(args, api, context.clone()).await
         }

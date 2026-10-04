@@ -14,6 +14,8 @@ mod conversations;
 mod events;
 mod examples;
 mod examples_chat;
+#[cfg(feature = "durable-local-env")]
+mod examples_coding;
 mod examples_events;
 mod generation;
 mod generation_recovery;
@@ -25,6 +27,7 @@ mod output;
 mod ownership;
 mod prompt;
 mod registry;
+mod spec_usage;
 mod submissions;
 mod task_graph;
 mod tasks;

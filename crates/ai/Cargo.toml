@@ -10,8 +10,9 @@ readme = "README.md"
 
 [features]
 default = ["durable", "durable-local-env"]
-# Pi Durable and the chord subset it uses (`chord`, later `durable`).
-durable = []
+# Pi Durable and the chord subset it uses (`chord`, `durable`); `similar` and
+# `unicode-normalization` back the coding tools' edit diff and fuzzy matching.
+durable = ["dep:similar", "dep:unicode-normalization"]
 # Reusable durable storage conformance suite (`durable::testing`).
 durable-testing = ["durable"]
 # `SqliteStorage` over a bundled SQLite (`durable::storage::sqlite::rusqlite`).
@@ -35,9 +36,11 @@ ring.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar = { version = "3", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+unicode-normalization = { version = "0.1.25", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
