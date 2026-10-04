@@ -13,6 +13,10 @@ use super::handle::{HandleAuth, HandleStreams, bind, clean_key};
 use super::model_builder::ModelBuilder;
 use crate::Result;
 use crate::api::anthropic_messages::anthropic_messages_api;
+pub use crate::api::anthropic_messages::{
+    AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, AnthropicToolChoice,
+    stream_anthropic, stream_simple_anthropic,
+};
 use crate::auth::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthPrompt, AuthResult, ModelAuth, ProviderAuth,
     ProviderAuthInteraction, models_error, throw_if_aborted,
