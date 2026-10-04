@@ -1,10 +1,10 @@
 //! Port of `providers/github-copilot.ts`, plus the pre-1.0 [`GitHubCopilot`]
 //! handle.
 //!
-//! The GitHub Copilot OAuth device flow (`lazyOAuth(loadGitHubCopilotOAuth)`)
-//! lands with the auth/OAuth commit of the rewrite; until then the provider
-//! offers `COPILOT_GITHUB_TOKEN` api-key auth only. `filter_models` already
-//! applies the OAuth credential's `availableModelIds`.
+//! Auth: `COPILOT_GITHUB_TOKEN` api-key auth plus the GitHub Copilot OAuth
+//! device flow (`lazyOAuth(loadGitHubCopilotOAuth)`). OAuth credentials set
+//! the request base URL per credential (`toAuth`), and `filter_models` applies
+//! the credential's `availableModelIds`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,7 +19,15 @@ use crate::Result;
 use crate::api::anthropic_messages::anthropic_messages_api;
 use crate::api::openai_completions::openai_completions_api;
 use crate::api::openai_responses::openai_responses_api;
-use crate::auth::{Credential, ProviderAuth, env_api_key_auth, models_error};
+use crate::auth::oauth::load_github_copilot_oauth;
+pub use crate::auth::oauth::{
+    get_github_copilot_base_url as base_url,
+    github_copilot_base_url_for_credential as base_url_for_credentials,
+    modify_github_copilot_models,
+};
+use crate::auth::{
+    Credential, LazyOAuthInput, OAuthAuth, ProviderAuth, env_api_key_auth, lazy_oauth, models_error,
+};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, FilterModels, Models, Provider, ProviderApi,
@@ -52,6 +60,21 @@ fn filter_available_models(models: &[Model], credential: Option<&Credential>) ->
         .collect()
 }
 
+/// `lazyOAuth({ name: "GitHub Copilot", isSubscription: true, load: loadGitHubCopilotOAuth })`.
+fn github_copilot_provider_oauth() -> Arc<dyn OAuthAuth> {
+    lazy_oauth(LazyOAuthInput {
+        name: "GitHub Copilot".to_string(),
+        is_subscription: Some(true),
+        login_label: None,
+        load: Arc::new(|| Box::pin(load_github_copilot_oauth())),
+    })
+}
+
+/// The GitHub Copilot OAuth implementation (pre-1.0 `github_copilot::oauth()`).
+pub fn oauth() -> Arc<dyn OAuthAuth> {
+    github_copilot_provider_oauth()
+}
+
 fn copilot_apis(
     wrap: impl Fn(Arc<dyn ProviderStreams>) -> Arc<dyn ProviderStreams>,
 ) -> ProviderApi {
@@ -77,6 +100,12 @@ fn copilot_apis(
 
 /// `githubCopilotProvider()`.
 pub fn github_copilot_provider() -> Arc<dyn Provider> {
+    github_copilot_provider_with_oauth(github_copilot_provider_oauth())
+}
+
+/// [`github_copilot_provider`] with a given OAuth implementation (tests
+/// inject one with a stubbed `fetch`).
+pub(crate) fn github_copilot_provider_with_oauth(oauth: Arc<dyn OAuthAuth>) -> Arc<dyn Provider> {
     let filter: FilterModels = Arc::new(filter_available_models);
     create_provider(CreateProviderOptions {
         id: DEFAULT_PROVIDER_ID.to_string(),
@@ -87,7 +116,7 @@ pub fn github_copilot_provider() -> Arc<dyn Provider> {
                 "GitHub Copilot token",
                 &["COPILOT_GITHUB_TOKEN"],
             )),
-            oauth: None,
+            oauth: Some(oauth),
         },
         models: github_copilot_models()
             .values()
@@ -308,7 +337,7 @@ impl GitHubCopilotBuilder {
             base_url: Some(base_url.clone()),
             auth: ProviderAuth {
                 api_key: Some(Arc::new(auth)),
-                oauth: None,
+                oauth: Some(github_copilot_provider_oauth()),
             },
             models,
             filter_models: Some(filter),

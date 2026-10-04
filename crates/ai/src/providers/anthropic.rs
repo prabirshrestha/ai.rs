@@ -1,8 +1,7 @@
 //! Port of `providers/anthropic.ts`, plus the pre-1.0 [`Anthropic`] handle.
 //!
-//! The Claude Pro/Max OAuth (`lazyOAuth(loadAnthropicOAuth)`) lands with the
-//! auth/OAuth commit of the rewrite; until then the provider offers api-key
-//! auth only.
+//! Auth: Anthropic api keys/auth tokens, plus the Claude Pro/Max OAuth
+//! (`lazyOAuth(loadAnthropicOAuth)`).
 
 use std::sync::Arc;
 
@@ -17,9 +16,11 @@ pub use crate::api::anthropic_messages::{
     AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, AnthropicToolChoice,
     stream_anthropic, stream_simple_anthropic,
 };
+use crate::auth::oauth::load_anthropic_oauth;
 use crate::auth::{
-    ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthPrompt, AuthResult, ModelAuth, ProviderAuth,
-    ProviderAuthInteraction, models_error, throw_if_aborted,
+    ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthPrompt, AuthResult, LazyOAuthInput,
+    ModelAuth, OAuthAuth, ProviderAuth, ProviderAuthInteraction, lazy_oauth, models_error,
+    throw_if_aborted,
 };
 use crate::env_api_keys::{
     ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_FEDERATION_RULE_ID_ENV,
@@ -147,6 +148,16 @@ fn anthropic_api_key_auth() -> Arc<dyn ApiKeyAuth> {
     Arc::new(AnthropicApiKeyAuth)
 }
 
+/// `lazyOAuth({ name: "Anthropic (Claude Pro/Max)", isSubscription: true, load: loadAnthropicOAuth })`.
+fn anthropic_provider_oauth() -> Arc<dyn OAuthAuth> {
+    lazy_oauth(LazyOAuthInput {
+        name: "Anthropic (Claude Pro/Max)".to_string(),
+        is_subscription: Some(true),
+        login_label: None,
+        load: Arc::new(|| Box::pin(load_anthropic_oauth())),
+    })
+}
+
 /// `anthropicProvider()`.
 pub fn anthropic_provider() -> Arc<dyn Provider> {
     create_provider(CreateProviderOptions {
@@ -155,7 +166,7 @@ pub fn anthropic_provider() -> Arc<dyn Provider> {
         base_url: Some(DEFAULT_BASE_URL.to_string()),
         auth: ProviderAuth {
             api_key: Some(anthropic_api_key_auth()),
-            oauth: None,
+            oauth: Some(anthropic_provider_oauth()),
         },
         models: anthropic_models()
             .values()
@@ -307,7 +318,7 @@ impl AnthropicBuilder {
             base_url: Some(base_url.clone()),
             auth: ProviderAuth {
                 api_key: Some(Arc::new(auth)),
-                oauth: None,
+                oauth: Some(anthropic_provider_oauth()),
             },
             models,
             api: Some(ProviderApi::Single(HandleStreams::wrap(

@@ -29,6 +29,13 @@ pub use agent::{
     run_agent_loop_continue, run_tool_call, set_default_stream_fn, stream_proxy, stream_simple_fn,
 };
 pub use api::lazy::lazy_stream;
+pub use auth::oauth::{
+    OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthLoginCallbacksBuilder,
+    OAuthPrompt, OAuthSelectOption, OAuthSelectPrompt, anthropic_oauth, get_oauth_provider,
+    github_copilot_oauth, login_anthropic, login_github_copilot, modify_github_copilot_models,
+    refresh_anthropic_token, refresh_github_copilot_token, register_oauth_provider,
+    unregister_oauth_provider,
+};
 pub use auth::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthCheck, AuthContext, AuthEvent, AuthInfoLink,
     AuthInteraction, AuthOperationOptions, AuthPrompt, AuthPromptKind, AuthResolutionOverrides,
