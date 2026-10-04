@@ -7,6 +7,8 @@
 
 pub mod api;
 pub mod auth;
+#[cfg(feature = "durable")]
+pub mod chord;
 pub mod compat;
 pub mod env_api_keys;
 pub mod error;

@@ -8,6 +8,11 @@ description = "Simple to use LLM library for Rust with streaming, tool calling, 
 repository.workspace = true
 readme = "README.md"
 
+[features]
+default = ["durable"]
+# Pi Durable and the chord subset it uses (`chord`, later `durable`).
+durable = []
+
 [dependencies]
 async-trait.workspace = true
 async-stream.workspace = true
