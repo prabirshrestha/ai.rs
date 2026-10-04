@@ -1,0 +1,81 @@
+# Changelog
+
+## 0.8.0
+
+The crate was rewritten from scratch as a 1:1 port of Pi's `pi-ai` and
+`pi-agent-core` 1.0.2 (commit `200387122ca450d6387f033949423114a270b96c`).
+The provider handles, `stream_simple`/`complete_simple` and `Agent` keep their
+0.7 shape, but most types changed.
+
+### Breaking changes
+
+Streams and messages:
+
+- Stream events are no longer `Result`s: `AssistantMessageEventStream` yields
+  `AssistantMessageEvent`, and failures arrive as an `Error` event and a final
+  message with `stop_reason` `Error`/`Aborted`.
+- `stream()`/`stream_simple()` return `Result<AssistantMessageEventStream>`;
+  `complete()`/`complete_simple()` return `Result<AssistantMessage>`.
+- The system prompt and tools are transcript messages: `Message::System`
+  (`SystemMessage { content, sections, tools_added, tools_removed }`).
+  `Context::system_prompt` and `Context::tools` (now `Option<Vec<Tool>>`)
+  are shorthand for the leading one. The old deferred-tools design
+  (`added_tool_names`, tool references, deferred tool modes) is removed.
+  `Message::Custom` is removed.
+- `reasoning` is a `ThinkingLevel`; `signal: Option<CancellationToken>`
+  replaces `cancellation_token`. API-specific options are
+  `StreamOptions::provider_options` entries under Pi's names.
+- `ModelCompat` is one flat struct with Pi's compat fields.
+
+Providers and models:
+
+- `LanguageModelApi`, `ImageModelApi`, `EmbeddingModelApi`,
+  `ProviderCapabilities` and the old `Provider` trait are gone. The new
+  `Provider` trait and the `Models` registry (`create_models`,
+  `create_provider`, credential stores, `get_auth`, `login`) follow Pi.
+- `OpenAiApi` drops `Embeddings`/`Images`: use `OpenAi::embedding_model` and
+  `OpenAi::image_model`. The `.images()` builder flag is gone.
+- `from_env()` errors are `Error::Models` (`ModelsErrorCode::Auth`); HTTP
+  errors are `Error::ProviderHttp` and read `"<status> <body>"`.
+- `AssistantImages.usage` is an `Option`, and image outputs are `UserContent`.
+- OAuth moved to `ai::auth::oauth` (re-exported at the root): `OAuthProvider`,
+  `OAuthProviderInterface`, `poll_oauth_device_code_flow`,
+  `get_oauth_providers`, `refresh_oauth_token` and the provider structs are
+  replaced by Pi's `OAuthAuth` flows (`anthropic_oauth()`,
+  `github_copilot_oauth()`, `login_anthropic`, `login_github_copilot`).
+  `github_copilot::get_oauth_api_key` is kept.
+- Env var constants (`*_ENV_VAR`, `KnownProvider`) are replaced by
+  `ai::env_api_keys` (`get_env_api_key(provider, env)`, `find_env_keys`).
+- `session_resources` is removed. Event-stream types moved to
+  `ai::utils::event_stream` (re-exported).
+- Faux: `FauxAssistantContent`/`FauxAssistantMessageOptions` are
+  `FauxContent`/`FauxMessageOptions`; factories return `Result` and receive
+  a state snapshot; `faux_provider()` builds a provider for `Models`.
+
+Agent:
+
+- Removed: `set_system_prompt` (push a `SystemMessage`),
+  `AgentState::builder`/`AgentStateBuilder`, `AgentContext::system_prompt`
+  and `llm_context`, `should_stop_after_turn`, `added_tool_names`,
+  `clear_tools`/`clear_messages`, `AgentError::ToolNotFound`.
+- `AgentOptions` takes Pi's fields (hooks, `stream_fn`, `session_id`,
+  `thinking_budgets`, `transport`, ...) instead of `options:
+  SimpleStreamOptions`. Pass `stream_fn(stream_simple_fn())` or call
+  `set_default_stream_fn`; there is no implicit default.
+- State and queue methods are synchronous (`state()`, `set_model`,
+  `set_tools`, `steer`, `follow_up`, ...); `reset()` returns `Result`.
+  Error texts follow Pi.
+- `AgentLoopConfig` holds the stream options in `options`; `agent_loop`
+  takes an optional `StreamFn`.
+
+### Added
+
+- `Models` registry, credential stores, Anthropic and GitHub Copilot OAuth
+  with locked refresh, `get_available`, deferred responses.
+- Transcript utilities (`get_current_tools`, `get_tool_state_changes`, ...),
+  `retry`, `uuidv7`, diagnostics.
+- Agent hooks (`before_tool_call`, `after_tool_call`, `prepare_request`,
+  `prepare_next_turn`, `finish_turn`, ...), `run_tool_call`, `stream_proxy`,
+  `peek_queued_messages`.
+- OpenRouter image models in the builtin providers; `ai::chord` (feature
+  `durable`, on by default).

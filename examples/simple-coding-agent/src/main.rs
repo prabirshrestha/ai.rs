@@ -5,8 +5,9 @@ use std::time::Duration;
 use ai::{
     Agent, AgentError, AgentEvent, AgentOptions, AgentToolBuilder, AgentToolResult,
     AssistantContent, AssistantMessage, AssistantMessageEvent, DynAgentTool, Message, Model,
-    OAuthLoginCallbacks, Result,
+    OAuthLoginCallbacks, Result, login_github_copilot,
     providers::{github_copilot, openai},
+    stream_simple_fn,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -94,14 +95,14 @@ async fn main() -> Result<()> {
 
         match slash_command {
             Some("exit" | "quit") => break,
-            Some("clear") => {
-                agent.reset().await;
-                println!("context cleared");
-            }
+            Some("clear") => match agent.reset() {
+                Ok(()) => println!("context cleared"),
+                Err(error) => eprintln!("\nerror: {error}"),
+            },
             Some(command) if command == "model" || command.starts_with("model ") => {
                 let model_id = command.strip_prefix("model").map(str::trim).unwrap_or("");
                 if model_id.is_empty() {
-                    let model = agent.state().await.model;
+                    let model = agent.state().model;
                     println!("model: {} ({})", model.id, model.provider);
                 } else {
                     match switch_model(&agent, &active_provider, model_id).await {
@@ -175,6 +176,7 @@ Current working directory: {}"#,
         AgentOptions::builder(model)
             .system_prompt(system_prompt)
             .tool(build_bash_tool()?)
+            .stream_fn(stream_simple_fn())
             .build(),
     );
 
@@ -330,7 +332,7 @@ async fn switch_model(agent: &Agent, provider: &ActiveProvider, model_id: &str) 
     let model = provider.model(model_id)?;
     let provider_id = provider.id().to_string();
 
-    agent.set_model(model).await;
+    agent.set_model(model);
 
     Ok(provider_id)
 }
@@ -356,17 +358,20 @@ async fn login_github_copilot_and_swap(
         .on_progress(|message| println!("{message}"))
         .build();
 
-    let credentials = github_copilot::oauth().login(callbacks).await?;
+    let credentials = login_github_copilot(callbacks).await?;
     let model_id = env::var("COPILOT_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
     let base_url = github_copilot::base_url_for_credentials(&credentials);
+    let api_key = github_copilot::get_oauth_api_key(&credentials)
+        .await?
+        .api_key;
     let copilot = github_copilot::builder()
-        .api_key(credentials.access)
+        .api_key(api_key)
         .base_url(base_url)
         .build()?;
     let provider = ActiveProvider::GitHubCopilot(copilot);
     let model = provider.model(&model_id)?;
 
-    agent.set_model(model).await;
+    agent.set_model(model);
 
     Ok((model_id, provider))
 }

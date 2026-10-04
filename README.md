@@ -1,15 +1,16 @@
 # ai.rs
 
-Simple to use AI library for Rust with LLM streaming, embeddings, tool calling,
-OAuth helpers, and a lightweight agent loop, inspired by
-[`pi`](https://github.com/earendil-works/pi).
+LLM library for Rust with streaming, tool calling, a models registry with
+OAuth, image generation, embeddings, and an agent loop. It is a 1:1 port of
+[`pi`](https://github.com/earendil-works/pi)'s `pi-ai` and `pi-agent-core`
+1.0.2.
 
 ## Using the Library
 
 ```bash
 cargo add ai
 cargo add tokio --features macros,rt-multi-thread
-cargo add futures
+cargo add futures serde_json
 ```
 
 See [crates/ai/README.md](crates/ai/README.md) for the full API reference.
@@ -17,11 +18,12 @@ See [crates/ai/README.md](crates/ai/README.md) for the full API reference.
 ## Choosing an API
 
 Most applications should start with `stream_simple` for streaming responses and
-`complete_simple` for one-shot responses. They take `SimpleStreamOptions` and
-map common settings like reasoning, cache retention, API keys, retries,
-cancellation, and provider options onto the selected provider. Use `stream` or
-`complete` when you need the lower-level `StreamOptions` shape or direct
-provider-option forwarding.
+`complete_simple` for one-shot responses. They take `SimpleStreamOptions`,
+which map one reasoning level, tool choice, cache retention, API keys,
+retries and cancellation onto the selected provider. Use `stream` or
+`complete` for the lower-level `StreamOptions` shape and API-specific
+`provider_options`, and the `Models` registry for credential stores and
+OAuth.
 
 ## Examples
 
@@ -36,8 +38,8 @@ See [examples/simple-coding-agent](examples/simple-coding-agent/README.md) for a
 
 ### Complete
 
-```rust
-use ai::{complete_simple, providers::openai, Context, Message, Result};
+```rust,no_run
+use ai::{Context, Message, Result, complete_simple, content_text, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,17 +50,17 @@ async fn main() -> Result<()> {
         .build();
 
     let message = complete_simple(model, context, None).await?;
-    println!("{message:?}");
+    println!("{}", content_text(&message.content));
     Ok(())
 }
 ```
 
 ### Streaming
 
-```rust
+```rust,no_run
 use futures::StreamExt;
 
-use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
+use ai::{AssistantMessageEvent, Context, Message, Result, providers::openai, stream_simple};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,7 +72,7 @@ async fn main() -> Result<()> {
 
     let mut events = stream_simple(model, context, None)?;
     while let Some(event) = events.next().await {
-        if let AssistantMessageEvent::TextDelta { delta, .. } = event? {
+        if let AssistantMessageEvent::TextDelta { delta, .. } = event {
             print!("{delta}");
         }
     }
@@ -81,10 +83,11 @@ async fn main() -> Result<()> {
 
 ### Embeddings
 
-Use `embed` for one string and `embed_many` for multiple strings.
+Use `embed` for one string and `embed_many` for multiple strings. Embeddings
+are an ai.rs extra (not in Pi).
 
-```rust
-use ai::{embed, embed_many, providers::openai, Result};
+```rust,no_run
+use ai::{Result, embed, embed_many, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -103,108 +106,111 @@ async fn main() -> Result<()> {
 
 ### Provider Handles
 
-#### OpenAI Responses
+```rust,no_run
+use ai::{Result, providers::{anthropic, github_copilot, openai}};
 
-```rust
-use ai::providers::openai;
+fn main() -> Result<()> {
+    // OpenAI Responses (OPENAI_API_KEY).
+    let _openai_responses_from_env = openai::from_env()?;
+    let _openai_responses_with_key = openai::builder()
+        .api_key(Some("sk-..."))
+        .responses()
+        .build()?;
 
-let openai_responses_from_env = openai::from_env()?;
+    // OpenAI Chat Completions, and OpenAI-compatible servers such as Ollama.
+    let _openai_chat_with_key = openai::builder()
+        .api_key(Some("sk-..."))
+        .chat_completions()
+        .build()?;
+    let _ollama_chat = openai::builder()
+        .provider_id("ollama")
+        .base_url("http://localhost:11434/v1")
+        .chat_completions()
+        .build()?;
 
-let openai_responses_with_key = openai::builder()
-    .api_key(Some("sk-..."))
-    .responses()
-    .build()?;
+    // Anthropic (ANTHROPIC_API_KEY).
+    let _anthropic_from_env = anthropic::from_env()?;
+    let _anthropic_with_key = anthropic::builder().api_key("sk-ant-...").build()?;
+
+    // GitHub Copilot (COPILOT_GITHUB_TOKEN, or `login_github_copilot`).
+    let _copilot = github_copilot::from_env()?;
+    Ok(())
+}
 ```
 
-#### OpenAI Chat Completions
+### Image Generation
 
-```rust
-use ai::providers::openai;
+```rust,no_run
+use ai::{ImagesContext, Result, generate_images, providers::openai};
 
-let openai_chat_with_key = openai::builder()
-    .api_key(Some("sk-..."))
-    .chat_completions()
-    .build()?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.image_model("gpt-image-2").build_image()?;
+    let context = ImagesContext::builder()
+        .text("Generate a small watercolor robot reading a book.")
+        .build();
 
-let ollama_chat = openai::builder()
-    .base_url("http://localhost:11434/v1")
-    .chat_completions()
-    .build()?;
+    let images = generate_images(model, context, None).await?;
+    println!("{} images", images.output.len());
+    Ok(())
+}
 ```
 
-#### Anthropic
+For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use
+the OpenAI provider with the server's base URL:
 
-```rust
-use ai::providers::anthropic;
+```rust,no_run
+use ai::{ImagesContext, Result, generate_images, providers::openai};
 
-let anthropic_from_env = anthropic::from_env()?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let ollama = openai::builder()
+        .provider_id("ollama")
+        .base_url("http://localhost:11434/v1")
+        .build()?;
+    let model = ollama.image_model("x/z-image-turbo").build_image()?;
+    let context = ImagesContext::builder().text("Generate a robot.").build();
 
-let anthropic_with_key = anthropic::builder()
-    .api_key("sk-ant-...")
-    .build()?;
+    let images = generate_images(model, context, None).await?;
+    println!("{:?}", images.stop_reason);
+    Ok(())
+}
 ```
 
-#### OpenAI, llama.cpp, MLX, and Ollama Image Generation
-
-```rust
-use ai::{generate_images, providers::openai, ImagesContext};
-
-let openai = openai::from_env()?;
-let model = openai
-    .image_model("gpt-image-2")
-    .build_image()?;
-let context = ImagesContext::builder()
-    .text("Generate a small watercolor robot reading a book.")
-    .build();
-
-let images = generate_images(model, context, None).await?;
-```
-
-For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use the
-OpenAI provider with the compatible server's base URL. For example, with
-Ollama:
-
-```rust
-use ai::{generate_images, providers::openai, ImagesContext};
-
-let ollama = openai::builder()
-    .provider_id("ollama")
-    .base_url("http://localhost:11434/v1")
-    .images()
-    .build()?;
-let model = ollama.model("x/z-image-turbo").build_image()?;
-let context = ImagesContext::builder().text("Generate a robot.").build();
-
-let images = generate_images(model, context, None).await?;
-```
-
-OpenRouter image models are also available through `providers::openrouter`.
+OpenRouter image models are available through `providers::openrouter`
+(`openrouter.model("google/gemini-3-pro-image").build_image()?`).
 
 ### Agent
 
 Use `Agent` when you want conversation state, awaited event subscribers,
-abort, and steering/follow-up queues.
+abort, and steering/follow-up queues. The system prompt and tools live in
+the transcript as system messages.
 
-```rust
-use ai::{providers::anthropic, Agent, AgentEvent, AgentOptions, Result};
+```rust,no_run
+use ai::{
+    Agent, AgentEvent, AgentOptions, AssistantMessageEvent, providers::anthropic,
+    stream_simple_fn,
+};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let anthropic = anthropic::from_env()?;
     let model = anthropic.model("claude-sonnet-4-5").build()?;
-    let agent = Agent::new(AgentOptions::new(model));
+    let agent = Agent::new(
+        AgentOptions::builder(model)
+            .system_prompt("You are a concise coding assistant.")
+            .stream_fn(stream_simple_fn())
+            .build(),
+    );
 
-    agent
-        .set_system_prompt("You are a concise coding assistant.")
-        .await;
-
-    let subscription = agent.subscribe(async |event, cancellation_token| {
-        if cancellation_token.is_cancelled() {
+    let subscription = agent.subscribe(|event, signal| async move {
+        if signal.is_cancelled() {
             return Ok(());
         }
 
         if let AgentEvent::MessageUpdate {
-            assistant_message_event: ai::AssistantMessageEvent::TextDelta { delta, .. },
+            assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
             ..
         } = event
         {
@@ -228,20 +234,23 @@ Dropping the handle also unsubscribes.
 
 ### Low-Level Agent Loop
 
-```rust
+```rust,no_run
 use futures::StreamExt;
 
 use ai::{
-    agent_loop, providers::anthropic, AgentContext, AgentEvent, AgentLoopConfig,
-    AssistantMessageEvent, Message, Result,
+    AgentContext, AgentEvent, AgentLoopConfig, AssistantMessageEvent, Message, SystemMessage,
+    agent_loop, providers::anthropic, stream_simple_fn,
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let anthropic = anthropic::from_env()?;
     let model = anthropic.model("claude-sonnet-4-5").build()?;
     let context = AgentContext::builder()
-        .system_prompt("You are a concise coding assistant.")
+        .message(SystemMessage {
+            content: "You are a concise coding assistant.".into(),
+            ..Default::default()
+        })
         .build();
 
     let mut events = agent_loop(
@@ -249,7 +258,7 @@ async fn main() -> Result<()> {
         context,
         AgentLoopConfig::new(model),
         None,
-        None,
+        Some(stream_simple_fn()),
     );
 
     while let Some(event) = events.next().await {
@@ -262,6 +271,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let _new_messages = events.result().await?;
     Ok(())
 }
 ```

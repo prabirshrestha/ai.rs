@@ -5,18 +5,50 @@ Guidance for agents working in this repository.
 ## Project Shape
 
 This is a Rust workspace with the `ai` crate in `crates/ai` and example
-packages under `examples/`.
+packages under `examples/` (`examples/simple-coding-agent`).
 
-The crate provides:
+`ai` is a 1:1 port of Pi's `@earendil-works/pi-ai` and
+`@earendil-works/pi-agent-core` **1.0.2**, tracking Pi commit
+`200387122ca450d6387f033949423114a270b96c`. Pi is the source of truth; the
+ai.rs-specific API (provider handles, `stream_simple`/`complete_simple`
+returning `Result`, embeddings) sits on top of the ported core.
 
-- LLM streaming and one-shot completion APIs.
-- Tool calling and JSON Schema based tool definitions.
-- Model lookup and custom model configuration.
-- OAuth helpers for Anthropic and GitHub Copilot.
-- A lightweight agent loop with events, tool execution, steering, and follow-up queues.
+Module layout of `crates/ai/src` (mirrors Pi's package folders):
+
+- Root modules: `types` (Pi `types.ts`), `models` (the `Models` registry,
+  `Provider`, `create_provider`), `models_store`, `model_catalog`, `compat`
+  (the global API registry and `stream`/`complete`/`stream_simple`/
+  `complete_simple`), `images`, `image_models`, `images_api_registry`,
+  `env_api_keys`, `error`, and `embeddings` (ai.rs extra, not in Pi).
+- `src/api/`: API implementations (`anthropic_messages`, `openai_responses`
+  + `openai_responses_shared`, `openai_completions`, `openai_prompt_cache`,
+  `openai_client`, `transform_messages`, `simple_options`,
+  `constrained_sampling`, `github_copilot_headers`, `openrouter_images`,
+  `openai_images` and `openai_embeddings` (ai.rs extras)).
+- `src/providers/`: providers and the pre-1.0 handles (`openai`, `anthropic`,
+  `github_copilot`, `openrouter` (image models only), `faux`, `all`,
+  `catalog`, `model_builder`); catalog JSON in `providers/data/`.
+- `src/auth/`: auth types, credential stores, resolution with locked
+  refresh; `src/auth/oauth/`: Anthropic and GitHub Copilot OAuth flows,
+  device code, callback server, PKCE.
+- `src/utils/`: ports of Pi's utils (transcript, text, event stream, JSON
+  parse, overflow, retry, validation, SSE, ...).
+- `src/agent/`: `pi-agent-core` (`agent`, `agent_loop`, `types`, `proxy`,
+  `stream_fn`).
+- `src/chord/` and `src/durable/`: the chord subset used by Pi Durable and
+  Pi Durable itself, behind the `durable` cargo feature (on by default).
+
+Scope: chat through OpenAI (Responses and Chat Completions), Anthropic
+(Messages) and GitHub Copilot, plus the faux provider for tests; image
+generation through OpenAI-compatible `/images/generations` and OpenRouter;
+embeddings as an ai.rs extra. Other Pi providers and classifiers are not
+ported.
 
 The root `README.md` is intentionally short. The detailed crate documentation
-lives in `crates/ai/README.md`.
+lives in `crates/ai/README.md`, which is also the crate-level rustdoc
+(`#![doc = include_str!("../README.md")]`); its snippets and those of the root
+README run as doctests, so keep them compiling. Breaking changes go in
+`crates/ai/CHANGELOG.md`.
 
 ## Commands
 
@@ -45,15 +77,16 @@ cargo test --workspace
 
 Use `stream_simple` for streaming responses and `complete_simple` for one-shot
 responses unless the lower-level `StreamOptions` shape is needed. Use `stream`
-or `complete` for direct provider-option forwarding or lower-level request
-control.
+or `complete` for API-specific `provider_options` (under Pi's names) or
+lower-level request control, and the `Models` registry for credential stores
+and OAuth.
 
-The active built-in language provider scope is OpenAI, Anthropic, and GitHub
-Copilot. The active built-in image provider scope is OpenAI-compatible image
-generation and OpenRouter image generation. Azure Foundry and other compatible
-language endpoints should be documented and tested as configured provider
-handles, such as `providers::openai::builder()` plus
-`provider.model(...).base_url(...).headers(...).compat(...)`.
+The system prompt and tool set are transcript messages (`Message::System`),
+as in Pi 1.0; there is no separate system-prompt setter on the agent.
+
+Azure Foundry and other compatible language endpoints should be documented and
+tested as configured provider handles, such as `providers::openai::builder()`
+plus `provider.model(...).base_url(...).headers(...).compat(...)`.
 Do not add broad provider autodetection by provider name or base URL unless that
 provider is intentionally in scope.
 
@@ -77,6 +110,12 @@ provider is intentionally in scope.
   new abstractions.
 - Add or update tests for provider payload changes, stream event ordering,
   tool-call behavior, abort behavior, and agent loop state changes.
-- The tests currently live mostly as module-level unit tests under
-  `crates/ai/src`; there is no `crates/ai/tests` directory at the moment.
+- Port Pi's tests alongside the code. Tests live as module-level unit tests
+  under `crates/ai/src` (some in `*_tests.rs` siblings); there is no
+  `crates/ai/tests` directory. Tests run offline (faux provider, local mock
+  HTTP servers); tests touching the global API registry hold
+  `compat::REGISTRY_TEST_LOCK`.
+- Document every divergence from Pi on the module or item involved, and
+  summarize notable ones in the "Differences from Pi" section of
+  `crates/ai/README.md`.
 - Avoid unrelated README policy sections, logos, or copied upstream text.

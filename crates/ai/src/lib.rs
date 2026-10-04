@@ -1,9 +1,9 @@
-//! Rust port of Pi's `@earendil-works/pi-ai` 1.0 (`packages/ai`).
-//!
-//! The crate root mirrors Pi's `index.ts` (core types, the `Models` runtime,
-//! auth, and the side-effect free utilities) plus the `compat` entry points
-//! (`stream()`, `stream_simple()`, ...) that keep ai.rs's pre-1.0 call shape.
-//! Divergences from Pi are documented on the items involved.
+#![doc = include_str!("../README.md")]
+
+// Compile-checks the snippets of the workspace README as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct WorkspaceReadmeDoctests;
 
 pub mod agent;
 pub mod api;
