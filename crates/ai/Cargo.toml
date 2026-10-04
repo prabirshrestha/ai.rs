@@ -14,6 +14,8 @@ default = ["durable"]
 durable = []
 # Reusable durable storage conformance suite (`durable::testing`).
 durable-testing = ["durable"]
+# `SqliteStorage` over a bundled SQLite (`durable::storage::sqlite::rusqlite`).
+durable-sqlite = ["durable", "dep:rusqlite"]
 
 [dependencies]
 async-trait.workspace = true
@@ -25,6 +27,7 @@ httpdate.workspace = true
 indexmap.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 regex.workspace = true
 ring.workspace = true
 secrecy.workspace = true
