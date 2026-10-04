@@ -6,3 +6,5 @@ pub(crate) mod support;
 
 mod lifecycle;
 mod registry;
+mod tasks;
+mod tasks_recovery;
