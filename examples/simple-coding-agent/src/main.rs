@@ -5,7 +5,7 @@ use std::time::Duration;
 use ai::{
     Agent, AgentError, AgentEvent, AgentOptions, AgentToolBuilder, AgentToolResult,
     AssistantContent, AssistantMessage, AssistantMessageEvent, DynAgentTool, Message, Model,
-    OAuthLoginCallbacks, Result, login_github_copilot,
+    Models, OAuthLoginCallbacks, Result, login_github_copilot,
     providers::{github_copilot, openai},
     stream_simple_fn,
 };
@@ -176,7 +176,7 @@ Current working directory: {}"#,
         AgentOptions::builder(model)
             .system_prompt(system_prompt)
             .tool(build_bash_tool()?)
-            .stream_fn(stream_simple_fn())
+            .stream_fn(stream_simple_fn(provider.models().clone()))
             .build(),
     );
 
@@ -284,6 +284,14 @@ impl ActiveProvider {
             Self::GitHubCopilot(provider) => provider.model(model_id).build(),
         }
     }
+
+    /// The handle's `Models` registry, which serves its models.
+    fn models(&self) -> &Models {
+        match self {
+            Self::OpenAi(provider) => provider.models(),
+            Self::GitHubCopilot(provider) => provider.models(),
+        }
+    }
 }
 
 fn build_openai_provider(base_url: Option<&str>, api_key: Option<&str>) -> Result<openai::OpenAi> {
@@ -371,6 +379,7 @@ async fn login_github_copilot_and_swap(
     let provider = ActiveProvider::GitHubCopilot(copilot);
     let model = provider.model(&model_id)?;
 
+    agent.set_stream_function(Some(stream_simple_fn(provider.models().clone())));
     agent.set_model(model);
 
     Ok((model_id, provider))

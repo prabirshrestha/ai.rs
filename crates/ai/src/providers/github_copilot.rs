@@ -24,7 +24,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::catalog::github_copilot_models;
-use super::handle::{HandleAuth, HandleStreams, bind, clean_key};
+use super::handle::{HandleAuth, HandleStreams, clean_key};
 use super::model_builder::ModelBuilder;
 use crate::Result;
 use crate::api::anthropic_messages::anthropic_messages_api;
@@ -222,8 +222,8 @@ fn is_copilot_claude(id: &str) -> bool {
 }
 
 /// Pre-1.0 provider handle: `github_copilot::builder().api_key(..).build()?`
-/// then `handle.model("gpt-5.5").build()?`. Models it builds are bound to the
-/// handle's own [`Models`] collection.
+/// then `handle.model("gpt-5.5").build()?`. Requests go through the handle's
+/// own [`Models`] collection (`handle.models()`).
 #[derive(Clone, Debug)]
 pub struct GitHubCopilot {
     provider_id: String,
@@ -282,7 +282,7 @@ impl GitHubCopilot {
         if let Some(api) = self.api {
             model.api = api.id().to_string();
         }
-        ModelBuilder::new(bind(model, &self.models))
+        ModelBuilder::new(model)
     }
 
     /// ai.rs extra: an OpenAI-compatible embedding model served by Copilot

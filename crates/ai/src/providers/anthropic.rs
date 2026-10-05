@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::catalog::anthropic_models;
-use super::handle::{HandleAuth, HandleStreams, bind, clean_key};
+use super::handle::{HandleAuth, HandleStreams, clean_key};
 use super::model_builder::ModelBuilder;
 use crate::Result;
 use crate::api::anthropic_messages::anthropic_messages_api;
@@ -180,8 +180,8 @@ pub fn anthropic_provider() -> Arc<dyn Provider> {
 }
 
 /// Pre-1.0 provider handle: `anthropic::builder().api_key(..).build()?` then
-/// `handle.model("claude-sonnet-5").build()?`. Models it builds are bound to
-/// the handle's own [`Models`] collection.
+/// `handle.model("claude-sonnet-5").build()?`. Requests go through the
+/// handle's own [`Models`] collection (`handle.models()`).
 #[derive(Clone, Debug)]
 pub struct Anthropic {
     provider_id: String,
@@ -232,7 +232,7 @@ impl Anthropic {
                 max_tokens: 16_384,
                 ..Default::default()
             });
-        ModelBuilder::new(bind(model, &self.models))
+        ModelBuilder::new(model)
     }
 }
 
@@ -414,12 +414,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_are_bound_and_use_the_catalog() {
+    fn handle_models_use_the_catalog() {
         let handle = builder().api_key("key").build().unwrap();
         let model = handle.model("claude-opus-5").build().unwrap();
         assert_eq!(model.api, "anthropic-messages");
         assert!(model.reasoning);
-        assert!(model.bound_models.is_some());
         assert_eq!(anthropic_provider().get_models().unwrap().len(), 16);
     }
 }

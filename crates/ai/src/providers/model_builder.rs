@@ -1,8 +1,8 @@
 //! Rust addition: the `provider.model("id").build()` builder kept from the
 //! pre-1.0 API. Provider handles seed it with the catalog entry (or a
-//! default shape for ids missing from the catalog) and bind the result to the
-//! handle's `Models` collection. [`ImageModelBuilder`] does the same for
-//! image models (`provider.model("id").build_image()`).
+//! default shape for ids missing from the catalog); requests for the built
+//! model go through the handle's `Models` collection. [`ImageModelBuilder`]
+//! does the same for image models (`provider.model("id").build_image()`).
 
 use indexmap::IndexMap;
 use reqwest::header::{HeaderName, HeaderValue};

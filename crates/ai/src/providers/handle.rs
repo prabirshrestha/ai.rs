@@ -2,7 +2,8 @@
 //! (`providers::openai::builder()...build()`). A handle owns a private
 //! `Models` collection holding one provider built with `create_provider()`
 //! from the Pi provider's catalog and APIs, with the handle's explicit
-//! credentials layered over the Pi provider's ambient auth.
+//! credentials layered over the Pi provider's ambient auth. Requests go
+//! through that collection (`handle.models().complete_simple(..)`).
 
 use std::sync::Arc;
 
@@ -10,7 +11,6 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::auth::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth};
-use crate::models::Models;
 use crate::types::{
     AssistantImages, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, ImageModel,
     ImagesContext, ImagesOptions, Model, ProviderHeaders, ProviderImages, ProviderStreams,
@@ -180,20 +180,8 @@ impl ProviderImages for HandleImages {
     }
 }
 
-/// Bind an image model to the handle's collection.
-pub(crate) fn bind_image(mut model: ImageModel, models: &Models) -> ImageModel {
-    model.bound_models = Some(models.clone());
-    model
-}
-
 /// Trim and drop empty keys, like the pre-1.0 builders.
 pub(crate) fn clean_key(key: Option<String>) -> Option<String> {
     key.map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty())
-}
-
-/// Bind a model to the handle's collection.
-pub(crate) fn bind(mut model: Model, models: &Models) -> Model {
-    model.bound_models = Some(models.clone());
-    model
 }

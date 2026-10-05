@@ -10,15 +10,11 @@ pub mod api;
 pub mod auth;
 #[cfg(feature = "durable")]
 pub mod chord;
-pub mod compat;
 #[cfg(feature = "durable")]
 pub mod durable;
 pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
-pub mod image_models;
-pub mod images;
-pub mod images_api_registry;
 pub mod model_catalog;
 pub mod models;
 pub mod models_store;
@@ -56,28 +52,20 @@ pub use auth::{
     OAuthCredentials, ProviderAuth, ProviderAuthInteraction, default_provider_auth_context,
     env_api_key_auth,
 };
-pub use compat::{complete, complete_simple, register_faux_provider, stream, stream_simple};
 pub use embeddings::{
     Embedding, EmbeddingBatch, EmbeddingEncodingFormat, EmbeddingModel, EmbeddingModelBuilder,
     EmbeddingOptions, EmbeddingUsage, EmbeddingVector, embed, embed_many,
 };
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
-pub use image_models::{get_image_model, get_image_models, get_image_providers};
-pub use images::generate_images;
-pub use images_api_registry::{
-    ImagesApiProvider, RegisteredImagesApiProvider, get_images_api_provider,
-    register_images_api_provider,
-};
 pub use models::*;
 pub use models_store::*;
 pub use providers::anthropic::Anthropic;
 pub use providers::faux::{
     FauxContent, FauxContentBlock, FauxCore, FauxDeferredOptions, FauxMessageOptions,
-    FauxModelDefinition, FauxProviderHandle, FauxProviderRegistration, FauxProviderState,
-    FauxResponseFactory, FauxResponseStep, FauxTokenSize, RegisterFauxProviderOptions,
-    create_faux_core, faux_assistant_message, faux_provider, faux_text, faux_thinking,
-    faux_tool_call,
+    FauxModelDefinition, FauxProviderHandle, FauxProviderState, FauxResponseFactory,
+    FauxResponseStep, FauxTokenSize, RegisterFauxProviderOptions, create_faux_core,
+    faux_assistant_message, faux_provider, faux_text, faux_thinking, faux_tool_call,
 };
 pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};

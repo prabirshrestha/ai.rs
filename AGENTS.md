@@ -10,15 +10,14 @@ packages under `examples/` (`examples/simple-coding-agent`).
 `ai` is a 1:1 port of Pi's `@earendil-works/pi-ai` and
 `@earendil-works/pi-agent-core` **1.0.2**, tracking Pi commit
 `200387122ca450d6387f033949423114a270b96c`. Pi is the source of truth; the
-ai.rs-specific API (provider handles, `stream_simple`/`complete_simple`
-returning `Result`, embeddings) sits on top of the ported core.
+ai.rs-specific API (provider handles that own a `Models`, embeddings) sits on
+top of the ported core. As in Pi 1.0, the `Models` registry is the only
+request entry point; Pi's temporary global `compat` API is not ported.
 
 Module layout of `crates/ai/src` (mirrors Pi's package folders):
 
 - Root modules: `types` (Pi `types.ts`), `models` (the `Models` registry,
-  `Provider`, `create_provider`), `models_store`, `model_catalog`, `compat`
-  (the global API registry and `stream`/`complete`/`stream_simple`/
-  `complete_simple`), `images`, `image_models`, `images_api_registry`,
+  `Provider`, `create_provider`), `models_store`, `model_catalog`,
   `env_api_keys`, `error`, and `embeddings` (ai.rs extra, not in Pi).
 - `src/api/`: API implementations (`anthropic_messages`, `openai_responses`
   + `openai_responses_shared`, `openai_completions`, `openai_prompt_cache`,
@@ -79,11 +78,14 @@ cargo test --workspace
 
 ## API Guidance
 
-Use `stream_simple` for streaming responses and `complete_simple` for one-shot
-responses unless the lower-level `StreamOptions` shape is needed. Use `stream`
-or `complete` for API-specific `provider_options` (under Pi's names) or
-lower-level request control, and the `Models` registry for credential stores
-and OAuth.
+Requests go through a `Models` registry (`create_models`, `builtin_models`,
+or a provider handle's `handle.models()`). Use `Models::stream_simple` for
+streaming responses and `Models::complete_simple` for one-shot responses
+unless the lower-level `StreamOptions` shape is needed. Use `Models::stream`
+or `Models::complete` for API-specific `provider_options` (under Pi's names)
+or lower-level request control. The agent takes a `StreamFn`;
+`stream_simple_fn(models)` wraps `Models::stream_simple`. Tests register
+`faux_provider(..)` with `models.set_provider(faux.provider.clone())`.
 
 The system prompt and tool set are transcript messages (`Message::System`),
 as in Pi 1.0; there is no separate system-prompt setter on the agent.
@@ -117,8 +119,7 @@ provider is intentionally in scope.
 - Port Pi's tests alongside the code. Tests live as module-level unit tests
   under `crates/ai/src` (some in `*_tests.rs` siblings); there is no
   `crates/ai/tests` directory. Tests run offline (faux provider, local mock
-  HTTP servers); tests touching the global API registry hold
-  `compat::REGISTRY_TEST_LOCK`.
+  HTTP servers).
 - Document every divergence from Pi on the module or item involved, and
   summarize notable ones in the "Differences from Pi" section of
   `crates/ai/README.md`.

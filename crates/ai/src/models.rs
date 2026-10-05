@@ -4413,14 +4413,23 @@ mod tests {
 
     fn recording_images(calls: &ImageCalls) -> Arc<dyn ProviderImages> {
         let calls = calls.clone();
-        crate::images_api_registry::images_fn(move |model, _context, options| {
-            let calls = calls.clone();
-            async move {
+        struct Recording(ImageCalls);
+
+        #[async_trait]
+        impl ProviderImages for Recording {
+            async fn generate_images(
+                &self,
+                model: ImageModel,
+                _context: ImagesContext,
+                options: ImagesOptions,
+            ) -> AssistantImages {
                 let result = ok_images(&model);
-                calls.lock().push((model, options));
+                self.0.lock().push((model, options));
                 result
             }
-        })
+        }
+
+        Arc::new(Recording(calls))
     }
 
     fn env_var_auth(env_var: Option<&'static str>) -> ProviderAuth {
@@ -4943,7 +4952,6 @@ mod tests {
             all.iter()
                 .any(|model| is_model_type(model, ModelType::Image))
         );
-        assert_eq!(crate::compat::get_models("openrouter"), chat);
         assert_eq!(chat.len() + images.len(), all.len());
         assert_eq!(
             get_builtin_image_model("openrouter", "black-forest-labs/flux.2-pro")

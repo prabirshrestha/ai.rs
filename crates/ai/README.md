@@ -77,34 +77,40 @@ The crate runs on Tokio. Cancellation uses `tokio_util`'s `CancellationToken`
 ## Quick start
 
 ```rust,no_run
-use ai::{Context, Message, Result, complete_simple, content_text, providers::openai};
+use ai::{Context, Message, Result, SimpleStreamOptions, content_text, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Reads OPENAI_API_KEY.
     let openai = openai::from_env()?;
+    let models = openai.models();
     let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder()
         .system_prompt("You are a concise assistant.")
         .message(Message::user_text("Write a haiku about Rust."))
         .build();
 
-    let message = complete_simple(model, context, None).await?;
+    let message = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
     println!("{}", content_text(&message.content));
     Ok(())
 }
 ```
 
-`complete_simple` returns the final `AssistantMessage`. Provider failures do
-not come back as `Err`: they are reported in-band with
+Requests go through a [`Models`](#models-registry) registry, as in Pi 1.0.
+A provider handle owns one with its provider registered (`handle.models()`).
+`complete_simple` returns the final `AssistantMessage`. Failures never come
+back as `Err`: they are reported in-band with
 `stop_reason == StopReason::Error` (or `Aborted`) and `error_message`, like in
-Pi. `Err` is reserved for problems before a request starts, such as a model
-whose API has no registered implementation.
+Pi, including an unknown provider or missing auth.
 
 ## Streaming
 
 ```rust,no_run
-use ai::{AssistantMessageEvent, Context, Message, Result, providers::anthropic, stream_simple};
+use ai::{
+    AssistantMessageEvent, Context, Message, Result, SimpleStreamOptions, providers::anthropic,
+};
 use futures::StreamExt;
 
 #[tokio::main]
@@ -116,7 +122,9 @@ async fn main() -> Result<()> {
         .message(Message::user_text("Explain ownership in one paragraph."))
         .build();
 
-    let mut events = stream_simple(model, context, None)?;
+    let mut events = anthropic
+        .models()
+        .stream_simple(&model, &context, SimpleStreamOptions::default());
     while let Some(event) = events.next().await {
         match event {
             AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
@@ -157,10 +165,12 @@ argument JSON into the best-effort value so far.
 
 | Function | Options | Use it for |
 | --- | --- | --- |
-| `stream_simple` / `complete_simple` | `SimpleStreamOptions` | most code: one `reasoning` level, `tool_choice`, thinking budgets, plus everything in `StreamOptions` |
-| `stream` / `complete` | `StreamOptions` | lower-level control; API-specific options go in `provider_options` under Pi's names |
-| `Models::stream_simple` and friends | same, plus header transforms | an explicit [models registry](#models-registry) with credential stores and OAuth |
-| `api::*::stream_*` (e.g. `stream_openai_responses`) | typed per-API options | calling one API implementation directly |
+| `Models::stream_simple` / `Models::complete_simple` | `SimpleStreamOptions` | most code: one `reasoning` level, `tool_choice`, thinking budgets, plus everything in `StreamOptions` |
+| `Models::stream` / `Models::complete` | `StreamOptions` | lower-level control; API-specific options go in `provider_options` under Pi's names |
+| `api::*::stream_*` (e.g. `stream_openai_responses`) | typed per-API options | calling one API implementation directly, with explicit auth |
+
+The `Models` methods also take `ModelsOptions { options, transform_headers }`
+to transform the assembled request headers.
 
 `SimpleStreamOptions` derefs to `StreamOptions`, so both kinds of field are
 set the same way:
@@ -168,13 +178,15 @@ set the same way:
 ```rust,no_run
 use ai::{
     CacheRetention, Context, Message, Result, SimpleStreamOptions, StreamOptions, ThinkingLevel,
-    complete, complete_simple, providers::openai,
+    providers::openai,
 };
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let models = openai.models();
+    let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder().message(Message::user_text("Hi")).build();
 
     let simple = SimpleStreamOptions {
@@ -187,7 +199,7 @@ async fn main() -> Result<()> {
         },
         ..Default::default()
     };
-    complete_simple(model.clone(), context.clone(), Some(simple)).await?;
+    models.complete_simple(&model, &context, simple).await;
 
     // Lower level: API-specific options under Pi's names.
     let mut options = StreamOptions::default();
@@ -197,25 +209,27 @@ async fn main() -> Result<()> {
     options
         .provider_options
         .insert("reasoningSummary".into(), json!("detailed"));
-    complete(model, context, Some(options)).await?;
+    models.complete(&model, &context, options).await;
     Ok(())
 }
 ```
 
-When `api_key` is not set, `stream*`/`complete*` read the provider's
-environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`COPILOT_GITHUB_TOKEN`, ...). `get_env_api_key(provider, None)` and
-`find_env_keys` expose that lookup.
+When `api_key` is not set, the `Models` methods resolve the provider's auth:
+a stored credential, OAuth, or the provider's environment variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `COPILOT_GITHUB_TOKEN`, ...).
+`get_env_api_key(provider, None)` and `find_env_keys` expose the environment
+lookup.
 
 ## Providers
 
 Provider handles (`providers::openai`, `providers::anthropic`,
 `providers::github_copilot`, `providers::openrouter`) are the ai.rs entry point
 kept from 0.7. A handle owns a private [`Models`](#models-registry) collection
-with one provider in it. `handle.model("id")` starts from the catalog entry
-(or a default shape for unknown ids) and returns a `ModelBuilder`; the built
-`Model` is bound to the handle, so `stream_simple(model, ...)` uses the
-handle's key, base URL and HTTP client.
+with one provider in it, configured with the handle's key, base URL and HTTP
+client; `handle.models()` returns it. `handle.model("id")` starts from the
+catalog entry (or a default shape for unknown ids) and returns a
+`ModelBuilder` for a plain `Model`. Send requests for it through
+`handle.models()` (or any `Models` that has the handle's provider).
 
 `ModelBuilder` can override `name`, `base_url`, `reasoning`,
 `thinking_level_map`, `input`, `cost`, `context_window`, `max_tokens`,
@@ -311,7 +325,7 @@ fn main() -> Result<()> {
 
 Typed Messages options (`AnthropicOptions`, `AnthropicEffort`, ...) and
 `stream_anthropic` live in `ai::api::anthropic_messages`. Through
-`stream`/`complete` they are `provider_options` entries named as in Pi
+`Models::stream`/`Models::complete` they are `provider_options` entries named as in Pi
 (`thinkingEnabled`, `effort`, `toolChoice`, ...).
 
 ### GitHub Copilot
@@ -365,14 +379,16 @@ again until it stops asking for tools:
 
 ```rust,no_run
 use ai::{
-    AssistantContent, Context, Message, Result, StopReason, Tool, ToolResultMessage, UserContent,
-    complete_simple, providers::openai, validate_tool_call,
+    AssistantContent, Context, Message, Result, SimpleStreamOptions, StopReason, Tool,
+    ToolResultMessage, UserContent, providers::openai, validate_tool_call,
 };
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let models = openai.models();
+    let model = openai.model("gpt-5.5").build()?;
     let weather = Tool::builder("get_weather")
         .description("Current weather for a city")
         .parameters(json!({
@@ -389,7 +405,9 @@ async fn main() -> Result<()> {
         .build();
 
     loop {
-        let message = complete_simple(model.clone(), context.clone(), None).await?;
+        let message = models
+            .complete_simple(&model, &context, SimpleStreamOptions::default())
+            .await;
         context.messages.push(message.clone().into());
         if message.stop_reason != StopReason::ToolUse {
             break;
@@ -436,7 +454,7 @@ without rewriting earlier turns (so prompt caches stay valid):
 
 ```rust,no_run
 use ai::{
-    Context, Message, Result, SystemMessage, Tool, ToolReference, complete_simple,
+    Context, Message, Result, SimpleStreamOptions, SystemMessage, Tool, ToolReference,
     providers::anthropic,
 };
 use indexmap::IndexMap;
@@ -444,7 +462,9 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = anthropic::from_env()?.model("claude-sonnet-4-5").build()?;
+    let anthropic = anthropic::from_env()?;
+    let models = anthropic.models();
+    let model = anthropic.model("claude-sonnet-4-5").build()?;
     let search = Tool::builder("search")
         .description("Search the docs")
         .parameters(json!({ "type": "object", "properties": { "q": { "type": "string" } } }))
@@ -453,7 +473,9 @@ async fn main() -> Result<()> {
         .system_prompt("You are a support agent.")
         .message(Message::user_text("Hi"))
         .build();
-    let reply = complete_simple(model.clone(), context.clone(), None).await?;
+    let reply = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
     context.messages.push(reply.into());
 
     // Later: new instructions, a named section and a new tool.
@@ -467,7 +489,9 @@ async fn main() -> Result<()> {
         ..Default::default()
     }));
     context.messages.push(Message::user_text("How do I export data?"));
-    let reply = complete_simple(model.clone(), context.clone(), None).await?;
+    let reply = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
     context.messages.push(reply.into());
 
     // Remove the tool again.
@@ -499,13 +523,14 @@ later turns.
 
 ```rust,no_run
 use ai::{
-    Context, ImageContent, Message, Result, UserContent, UserMessage, UserMessageContent,
-    complete_simple, providers::openai,
+    Context, ImageContent, Message, Result, SimpleStreamOptions, UserContent, UserMessage,
+    UserMessageContent, providers::openai,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
     let png_base64 = String::from("iVBORw0KGgo...");
     let context = Context::builder()
         .message(UserMessage {
@@ -519,7 +544,10 @@ async fn main() -> Result<()> {
             timestamp: 0,
         })
         .build();
-    complete_simple(model, context, None).await?;
+    openai
+        .models()
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
     Ok(())
 }
 ```
@@ -532,12 +560,13 @@ image.
 ```rust,no_run
 use std::sync::Arc;
 
-use ai::{Context, Message, Result, StopReason, StreamOptions, complete, providers::openai};
+use ai::{Context, Message, Result, StopReason, StreamOptions, providers::openai};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let model = openai::from_env()?.model("gpt-5.5").build()?;
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder().message(Message::user_text("Count to 1000")).build();
 
     let signal = CancellationToken::new();
@@ -557,7 +586,7 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
 
-    let message = complete(model, context, Some(options)).await?;
+    let message = openai.models().complete(&model, &context, options).await;
     match message.stop_reason {
         StopReason::Aborted => println!("aborted; partial content is kept"),
         StopReason::Error => println!("failed: {:?}", message.error_message),
@@ -621,37 +650,37 @@ runs a provider's login flow with an `AuthInteraction` (prompts plus
 custom provider from models and `ProviderStreams` implementations, and
 `set_provider` registers it. Static catalog lookups without a registry:
 `ai::providers::all::{get_builtin_model, get_builtin_models,
-get_builtin_providers}` (also `ai::compat::{get_model, get_models,
-get_providers}`). `calculate_cost`, `models_are_equal` and
+get_builtin_providers, get_builtin_image_model, get_builtin_image_models}`.
+`calculate_cost`, `models_are_equal` and
 `get_model_type` are the remaining model helpers.
 
 ## Faux provider for tests
 
 The faux provider replays scripted assistant messages through the real event
-pipeline, without network. With the global API registry:
+pipeline, without network. Register `faux.provider` in a `Models` registry:
 
 ```rust
 use ai::{
-    Context, FauxMessageOptions, Message, RegisterFauxProviderOptions, Result, complete_simple,
-    content_text, faux_assistant_message, register_faux_provider,
+    Context, FauxMessageOptions, Message, RegisterFauxProviderOptions, SimpleStreamOptions,
+    content_text, create_models, faux_assistant_message, faux_provider,
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let faux = register_faux_provider(RegisterFauxProviderOptions::default());
+async fn main() {
+    let faux = faux_provider(RegisterFauxProviderOptions::default());
     faux.set_responses([faux_assistant_message("Hello!", FauxMessageOptions::default()).into()]);
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
 
     let context = Context::builder().message(Message::user_text("Hi")).build();
-    let message = complete_simple(faux.get_model(), context, None).await?;
+    let message = models
+        .complete_simple(&faux.get_model(), &context, SimpleStreamOptions::default())
+        .await;
     assert_eq!(content_text(&message.content), "Hello!");
-
-    faux.unregister();
-    Ok(())
 }
 ```
 
-With an explicit registry, use `faux_provider(..)` and register
-`handle.provider` with `Models::set_provider`. Responses can be built with
+Responses can be built with
 `faux_text`, `faux_thinking` and `faux_tool_call`, or computed per request
 with `FauxResponseStep::factory`. `faux.state().call_count` counts requests,
 and `RegisterFauxProviderOptions` sets models, token pacing and deferred
@@ -661,21 +690,25 @@ behavior.
 
 `Agent` (Pi's `pi-agent-core`) keeps the transcript, streams assistant turns,
 runs tools, and offers steering and follow-up queues. Pass the stream
-function explicitly (`stream_simple_fn()` uses the global entry points) or
-install one with `set_default_stream_fn`.
+function explicitly, as Pi's coding agent does with `models.streamSimple`:
+`stream_simple_fn(models)` wraps `Models::stream_simple`. Or install one for
+agents that omit it with `set_default_stream_fn`.
 
 ```rust
 use ai::{
     Agent, AgentEvent, AgentOptions, AgentToolBuilder, AgentToolResult, AssistantMessageEvent,
-    FauxMessageOptions, RegisterFauxProviderOptions, faux_assistant_message, faux_tool_call,
-    register_faux_provider, stream_simple_fn,
+    FauxMessageOptions, RegisterFauxProviderOptions, create_models, faux_assistant_message,
+    faux_provider, faux_tool_call, stream_simple_fn,
 };
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Swap in e.g. `openai::from_env()?.model("gpt-5.5").build()?`.
-    let faux = register_faux_provider(RegisterFauxProviderOptions::default());
+    // Swap in e.g. `let openai = openai::from_env()?;`, `openai.models()` and
+    // `openai.model("gpt-5.5").build()?`.
+    let faux = faux_provider(RegisterFauxProviderOptions::default());
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
     faux.set_responses([
         faux_assistant_message(
             faux_tool_call("add", json!({ "a": 2, "b": 3 }), None),
@@ -702,7 +735,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AgentOptions::builder(faux.get_model())
             .system_prompt("You are a calculator.")
             .tool(add)
-            .stream_fn(stream_simple_fn())
+            .stream_fn(stream_simple_fn(models))
             .build(),
     );
 
@@ -724,7 +757,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.prompt_text("What is 2 + 3?", Vec::new()).await?;
     // system, user, assistant (tool call), tool result, assistant
     assert_eq!(agent.messages().len(), 5);
-    faux.unregister();
     Ok(())
 }
 ```
@@ -767,7 +799,7 @@ proxy server, and `run_tool_call` runs a single tool call with the hooks.
 ## Image generation
 
 ```rust,no_run
-use ai::{ImagesContext, ImagesStopReason, Result, UserContent, generate_images, providers};
+use ai::{ImagesContext, ImagesOptions, ImagesStopReason, Result, UserContent, providers};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -777,7 +809,10 @@ async fn main() -> Result<()> {
     let context = ImagesContext::builder()
         .text("A small watercolor robot reading a book.")
         .build();
-    let images = generate_images(model, context, None).await?;
+    let images = openrouter
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
     if images.stop_reason == ImagesStopReason::Error {
         eprintln!("{:?}", images.error_message);
     }
@@ -792,15 +827,18 @@ async fn main() -> Result<()> {
     let openai = providers::openai::from_env()?;
     let model = openai.image_model("gpt-image-2").build_image()?;
     let context = ImagesContext::builder().text("A robot.").build();
-    generate_images(model, context, None).await?;
+    openai
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
     Ok(())
 }
 ```
 
 `ImagesContext::builder().image(..)` adds input images for editing models.
-`get_image_model(provider, id)`, `get_image_models` and
-`Models::generate_images` work with the registry, and
-`register_images_api_provider` adds image APIs.
+`builtin_models(..)` registers OpenRouter's image catalog too
+(`Models::get_model_of_type(ModelType::Image, ..)`), and a custom provider
+adds image APIs through `CreateProviderOptions::images`.
 
 ## Embeddings (ai.rs extra)
 
@@ -949,11 +987,14 @@ Beyond this:
 The port keeps Pi's behavior; these are the deliberate or Rust-forced
 differences. Each is also documented on the module or item involved.
 
-- **API shape.** Rust kept the 0.7 entry points: provider handles
-  (`openai::builder()`, `anthropic::from_env()`, `handle.model(id).build()`)
-  and `stream_simple`/`complete_simple` returning `Result`, with models bound
-  to the handle's `Models` (`Model::bound_models`, not serialized). A handle
-  also serves Chat Completions and keyless custom base URLs.
+- **API shape.** `Models` is the only request entry point, as Pi intends
+  once its temporary `compat` module is gone: the global api-registry,
+  `stream`/`complete`/`stream_simple`/`complete_simple`, `generateImages`,
+  the images api-registry, `registerFauxProvider` and the `getModel`/
+  `getImageModel` aliases are not ported. Rust keeps the 0.7 provider
+  handles (`openai::builder()`, `anthropic::from_env()`,
+  `handle.model(id).build()`), each owning a `Models` (`handle.models()`);
+  a handle also serves Chat Completions and keyless custom base URLs.
 - **Types.** `ModelCompat` is one flat struct. `AgentMessage = Message`
   (no custom message roles; `Message::Custom` is gone). Pi's open records
   become `provider_options` maps; optional provider methods become `Option`
@@ -964,7 +1005,8 @@ differences. Each is also documented on the module or item involved.
   becomes `Err` or an error stream. `AgentEventStream::result()` returns `Err`
   instead of hanging, and a stream that ends without a terminal event gives
   `AgentError::StreamClosed`. The default stream function is resolved at run
-  time.
+  time; `stream_simple_fn(models)` wraps `Models::stream_simple` as a
+  `StreamFn`.
 - **HTTP.** No vendor SDKs: requests are built by hand (reqwest + SSE) the way
   the SDKs send them, minus `X-Stainless` headers. HTTP errors read
   `"<status> <body>"`. `fetch` and SDK `client` options become `http_client`.

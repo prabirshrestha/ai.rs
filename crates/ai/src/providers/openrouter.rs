@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use super::catalog::openrouter_image_models;
-use super::handle::{HandleAuth, HandleImages, bind_image, clean_key};
+use super::handle::{HandleAuth, HandleImages, clean_key};
 use super::model_builder::ImageModelBuilder;
 use crate::Result;
 use crate::api::openrouter_images::openrouter_images_api;
@@ -66,8 +66,8 @@ pub fn openrouter_provider() -> Arc<dyn Provider> {
 
 /// Pre-1.0 image handle: `openrouter::builder().api_key(Some(..)).build()?`
 /// then `handle.model("google/gemini-3.1-flash-image-preview").build_image()?`.
-/// Models it builds are bound to the handle's own [`Models`] collection, so
-/// [`generate_images`](crate::generate_images) uses the handle's key, base
+/// Requests go through the handle's own [`Models`] collection
+/// (`handle.models().generate_images(..)`), which uses the handle's key, base
 /// URL and HTTP client.
 #[derive(Clone, Debug)]
 pub struct OpenRouter {
@@ -123,7 +123,7 @@ impl OpenRouter {
                 output: vec![ModelOutput::Image],
                 ..Default::default()
             });
-        ImageModelBuilder::new(bind_image(model, &self.models))
+        ImageModelBuilder::new(model)
     }
 
     /// Alias of [`OpenRouter::model`].
@@ -227,7 +227,7 @@ mod tests {
 
     use super::*;
     use crate::api::openai_client::test_support::{MockResponse, MockServer};
-    use crate::types::{ImagesContext, ImagesStopReason, UserContent};
+    use crate::types::{ImagesContext, ImagesOptions, ImagesStopReason, UserContent};
 
     fn image_response() -> MockResponse {
         MockResponse {
@@ -262,7 +262,6 @@ mod tests {
             .build_image()
             .unwrap();
         assert_eq!(catalog.output, vec![ModelOutput::Image, ModelOutput::Text]);
-        assert!(catalog.bound_models.is_some());
         let custom = handle
             .model("vendor/new-image")
             .input(vec![ModelInput::Text, ModelInput::Image])
@@ -295,13 +294,14 @@ mod tests {
             .build_image()
             .unwrap();
         assert_eq!(model.base_url, server.url);
-        let output = crate::generate_images(
-            model,
-            ImagesContext::builder().text("Generate a logo.").build(),
-            None,
-        )
-        .await
-        .unwrap();
+        let output = handle
+            .models()
+            .generate_images(
+                &model,
+                &ImagesContext::builder().text("Generate a logo.").build(),
+                ImagesOptions::default(),
+            )
+            .await;
         assert_eq!(output.stop_reason, ImagesStopReason::Stop);
         assert!(matches!(output.output[..], [UserContent::Image(_)]));
         let request = server.last();
@@ -320,13 +320,14 @@ mod tests {
             .model("black-forest-labs/flux.2-pro")
             .build_image()
             .unwrap();
-        let output = crate::generate_images(
-            model,
-            ImagesContext::builder().text("Generate a logo.").build(),
-            None,
-        )
-        .await
-        .unwrap();
+        let output = handle
+            .models()
+            .generate_images(
+                &model,
+                &ImagesContext::builder().text("Generate a logo.").build(),
+                ImagesOptions::default(),
+            )
+            .await;
         assert_eq!(output.stop_reason, ImagesStopReason::Error);
         assert_eq!(
             output.error_message.as_deref(),

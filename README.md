@@ -17,13 +17,15 @@ See [crates/ai/README.md](crates/ai/README.md) for the full API reference.
 
 ## Choosing an API
 
-Most applications should start with `stream_simple` for streaming responses and
-`complete_simple` for one-shot responses. They take `SimpleStreamOptions`,
-which map one reasoning level, tool choice, cache retention, API keys,
-retries and cancellation onto the selected provider. Use `stream` or
-`complete` for the lower-level `StreamOptions` shape and API-specific
-`provider_options`, and the `Models` registry for credential stores and
-OAuth.
+Requests go through a `Models` registry, as in Pi 1.0. A provider handle
+owns one with its provider registered (`handle.models()`); `builtin_models`
+and `create_models` build one for credential stores and OAuth. Most
+applications should start with `Models::stream_simple` for streaming
+responses and `Models::complete_simple` for one-shot responses. They take
+`SimpleStreamOptions`, which map one reasoning level, tool choice, cache
+retention, API keys, retries and cancellation onto the selected provider.
+Use `Models::stream` or `Models::complete` for the lower-level
+`StreamOptions` shape and API-specific `provider_options`.
 
 ## Examples
 
@@ -39,17 +41,20 @@ See [examples/simple-coding-agent](examples/simple-coding-agent/README.md) for a
 ### Complete
 
 ```rust,no_run
-use ai::{Context, Message, Result, complete_simple, content_text, providers::openai};
+use ai::{Context, Message, Result, SimpleStreamOptions, content_text, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let openai = openai::from_env()?;
+    let models = openai.models();
     let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder()
         .message(Message::user_text("Write a haiku about Rust."))
         .build();
 
-    let message = complete_simple(model, context, None).await?;
+    let message = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
     println!("{}", content_text(&message.content));
     Ok(())
 }
@@ -60,7 +65,7 @@ async fn main() -> Result<()> {
 ```rust,no_run
 use futures::StreamExt;
 
-use ai::{AssistantMessageEvent, Context, Message, Result, providers::openai, stream_simple};
+use ai::{AssistantMessageEvent, Context, Message, Result, SimpleStreamOptions, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,7 +75,9 @@ async fn main() -> Result<()> {
         .message(Message::user_text("Write a haiku about Rust."))
         .build();
 
-    let mut events = stream_simple(model, context, None)?;
+    let mut events = openai
+        .models()
+        .stream_simple(&model, &context, SimpleStreamOptions::default());
     while let Some(event) = events.next().await {
         if let AssistantMessageEvent::TextDelta { delta, .. } = event {
             print!("{delta}");
@@ -141,7 +148,7 @@ fn main() -> Result<()> {
 ### Image Generation
 
 ```rust,no_run
-use ai::{ImagesContext, Result, generate_images, providers::openai};
+use ai::{ImagesContext, ImagesOptions, Result, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -151,7 +158,10 @@ async fn main() -> Result<()> {
         .text("Generate a small watercolor robot reading a book.")
         .build();
 
-    let images = generate_images(model, context, None).await?;
+    let images = openai
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
     println!("{} images", images.output.len());
     Ok(())
 }
@@ -161,7 +171,7 @@ For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use
 the OpenAI provider with the server's base URL:
 
 ```rust,no_run
-use ai::{ImagesContext, Result, generate_images, providers::openai};
+use ai::{ImagesContext, ImagesOptions, Result, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -172,7 +182,10 @@ async fn main() -> Result<()> {
     let model = ollama.image_model("x/z-image-turbo").build_image()?;
     let context = ImagesContext::builder().text("Generate a robot.").build();
 
-    let images = generate_images(model, context, None).await?;
+    let images = ollama
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
     println!("{:?}", images.stop_reason);
     Ok(())
 }
@@ -200,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = Agent::new(
         AgentOptions::builder(model)
             .system_prompt("You are a concise coding assistant.")
-            .stream_fn(stream_simple_fn())
+            .stream_fn(stream_simple_fn(anthropic.models().clone()))
             .build(),
     );
 
@@ -258,7 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context,
         AgentLoopConfig::new(model),
         None,
-        Some(stream_simple_fn()),
+        Some(stream_simple_fn(anthropic.models().clone())),
     );
 
     while let Some(event) = events.next().await {

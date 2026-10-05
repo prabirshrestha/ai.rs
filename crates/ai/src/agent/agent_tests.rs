@@ -1405,16 +1405,41 @@ async fn stamps_the_requested_thinking_level_on_assistant_messages() {
 }
 
 /// Port of `test/e2e.test.ts`: the agent against the faux provider through
-/// the compat `stream_simple` entry point.
+/// a `Models` collection's `stream_simple`.
+///
+/// Divergence: Pi registers the faux provider in the compat api-registry
+/// (`registerFauxProvider`); ai.rs has no global registry, so each test
+/// registers it in its own `Models` and passes `stream_simple_fn(models)`.
 mod faux_e2e {
     use super::*;
-    use crate::compat::{REGISTRY_TEST_LOCK, register_faux_provider};
+    use crate::models::{Models, create_models};
     use crate::providers::faux::{
-        FauxMessageOptions, FauxModelDefinition, FauxProviderRegistration, FauxResponseStep,
-        FauxTokenSize, RegisterFauxProviderOptions, faux_assistant_message, faux_text,
-        faux_thinking, faux_tool_call,
+        FauxMessageOptions, FauxModelDefinition, FauxProviderHandle, FauxResponseStep,
+        FauxTokenSize, RegisterFauxProviderOptions, faux_assistant_message, faux_provider,
+        faux_text, faux_thinking, faux_tool_call,
     };
     use crate::stream_simple_fn;
+
+    /// A faux provider registered in its own `Models` collection.
+    struct Faux {
+        handle: FauxProviderHandle,
+        models: Models,
+    }
+
+    impl std::ops::Deref for Faux {
+        type Target = FauxProviderHandle;
+
+        fn deref(&self) -> &FauxProviderHandle {
+            &self.handle
+        }
+    }
+
+    fn register_faux_provider(options: RegisterFauxProviderOptions) -> Faux {
+        let handle = faux_provider(options);
+        let models = create_models(Default::default());
+        models.set_provider(handle.provider.clone());
+        Faux { handle, models }
+    }
 
     /// `test/utils/calculate.ts`: evaluates `a <op> b`.
     fn calculate(expression: &str) -> crate::agent::AgentResult<AgentToolResult> {
@@ -1487,11 +1512,7 @@ mod faux_e2e {
             .join("\n")
     }
 
-    fn faux_agent(
-        faux: &FauxProviderRegistration,
-        system_prompt: &str,
-        tools: Vec<DynAgentTool>,
-    ) -> Agent {
+    fn faux_agent(faux: &Faux, system_prompt: &str, tools: Vec<DynAgentTool>) -> Agent {
         Agent::new(AgentOptions {
             initial_state: AgentInitialState {
                 system_prompt: Some(system_prompt.to_string()),
@@ -1500,7 +1521,7 @@ mod faux_e2e {
                 tools,
                 ..Default::default()
             },
-            ..options_with_stream(stream_simple_fn())
+            ..options_with_stream(stream_simple_fn(faux.models.clone()))
         })
     }
 
@@ -1510,7 +1531,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn handles_a_basic_text_prompt() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         faux.set_responses([message("4")]);
         let agent = faux_agent(
@@ -1523,7 +1543,6 @@ mod faux_e2e {
             .prompt_text("What is 2+2? Answer with just the number.", Vec::new())
             .await
             .unwrap();
-        faux.unregister();
 
         assert!(!agent.state().is_streaming);
         let messages = agent.messages();
@@ -1536,7 +1555,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn executes_tools_and_tracks_pending_tool_calls() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         faux.set_responses([
             faux_assistant_message(
@@ -1582,7 +1600,6 @@ mod faux_e2e {
             .prompt_text("Calculate 123 * 456 using the calculator tool.", Vec::new())
             .await
             .unwrap();
-        faux.unregister();
 
         let state = agent.state();
         assert!(!state.is_streaming);
@@ -1612,7 +1629,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn handles_abort_during_streaming() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             tokens_per_second: Some(20.0),
             token_size: Some(FauxTokenSize {
@@ -1635,7 +1651,6 @@ mod faux_e2e {
             .prompt_text("Count slowly from 1 to 20.", Vec::new())
             .await
             .unwrap();
-        faux.unregister();
 
         let state = agent.state();
         assert!(!state.is_streaming);
@@ -1650,7 +1665,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn emits_lifecycle_updates_while_streaming() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             token_size: Some(FauxTokenSize {
                 min: Some(1),
@@ -1673,7 +1687,6 @@ mod faux_e2e {
             .prompt_text("Count from 1 to 5.", Vec::new())
             .await
             .unwrap();
-        faux.unregister();
 
         let events = events.lock();
         for expected in [
@@ -1698,7 +1711,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn maintains_context_across_multiple_turns() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         faux.set_responses([
             message("Nice to meet you, Alice."),
@@ -1733,7 +1745,6 @@ mod faux_e2e {
             .prompt_text("What is my name?", Vec::new())
             .await
             .unwrap();
-        faux.unregister();
         let messages = agent.messages();
         assert_eq!(messages.len(), 5);
         let Message::Assistant(last_message) = &messages[4] else {
@@ -1748,7 +1759,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn preserves_thinking_content_blocks() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(RegisterFauxProviderOptions {
             models: vec![FauxModelDefinition {
                 reasoning: Some(true),
@@ -1765,7 +1775,6 @@ mod faux_e2e {
         agent.set_thinking_level(ModelThinkingLevel::Low);
 
         agent.prompt_text("What is 2+2?", Vec::new()).await.unwrap();
-        faux.unregister();
 
         let Some(Message::Assistant(assistant)) = agent.messages().get(2).cloned() else {
             panic!("Expected assistant message");
@@ -1778,7 +1787,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn continue_throws_when_no_messages_in_context() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         let agent = Agent::new(AgentOptions {
             initial_state: AgentInitialState {
@@ -1786,17 +1794,15 @@ mod faux_e2e {
                 model: Some(faux.get_model()),
                 ..Default::default()
             },
-            ..options_with_stream(stream_simple_fn())
+            ..options_with_stream(stream_simple_fn(faux.models.clone()))
         });
 
         let error = agent.continue_run().await.unwrap_err();
-        faux.unregister();
         assert_eq!(error.to_string(), "No messages to continue from");
     }
 
     #[tokio::test]
     async fn continue_throws_when_last_message_is_assistant() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         let model = faux.get_model();
         let agent = Agent::new(AgentOptions {
@@ -1805,14 +1811,13 @@ mod faux_e2e {
                 model: Some(model.clone()),
                 ..Default::default()
             },
-            ..options_with_stream(stream_simple_fn())
+            ..options_with_stream(stream_simple_fn(faux.models.clone()))
         });
         let mut assistant_message = AssistantMessage::empty_for(&model);
         assistant_message.content = vec![text("Hello")];
         agent.set_messages(vec![Message::Assistant(assistant_message)]);
 
         let error = agent.continue_run().await.unwrap_err();
-        faux.unregister();
         assert_eq!(
             error.to_string(),
             "Cannot continue from message role: assistant"
@@ -1821,7 +1826,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn continues_and_gets_a_response_when_last_message_is_user() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         faux.set_responses([message("HELLO WORLD")]);
         let agent = faux_agent(
@@ -1837,7 +1841,6 @@ mod faux_e2e {
         })]);
 
         agent.continue_run().await.unwrap();
-        faux.unregister();
 
         assert!(!agent.state().is_streaming);
         let messages = agent.messages();
@@ -1854,7 +1857,6 @@ mod faux_e2e {
 
     #[tokio::test]
     async fn continues_and_processes_tool_results() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let faux = register_faux_provider(Default::default());
         let model = faux.get_model();
         faux.set_responses([message("The answer is 8.")]);
@@ -1890,7 +1892,6 @@ mod faux_e2e {
         ]);
 
         agent.continue_run().await.unwrap();
-        faux.unregister();
 
         assert!(!agent.state().is_streaming);
         let messages = agent.messages();

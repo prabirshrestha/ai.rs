@@ -329,13 +329,6 @@ fn random_id(prefix: &str) -> String {
     format!("{prefix}:{}:{}", now_millis(), random_base36(random_u64()))
 }
 
-/// Random suffix for registration source ids (`Math.random().toString(36).slice(2, 10)`).
-pub(crate) fn random_suffix() -> String {
-    let mut suffix = random_base36(random_u64());
-    suffix.truncate(8);
-    suffix
-}
-
 fn content_to_text(content: &[UserContent]) -> String {
     content
         .iter()
@@ -589,7 +582,7 @@ struct DeferredEntry {
 }
 
 /// `createFauxCore(options)`: the scripted stream implementation shared by
-/// [`faux_provider`] and `compat::register_faux_provider`. Cheap to clone.
+/// [`faux_provider`]. Cheap to clone.
 #[derive(Clone)]
 pub struct FauxCore {
     shared: Arc<FauxShared>,
@@ -1232,72 +1225,73 @@ pub fn faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderHandle
     FauxProviderHandle { provider, core }
 }
 
-/// `FauxProviderRegistration` returned by `compat::register_faux_provider`.
-/// Derefs to [`FauxCore`].
-#[derive(Debug, Clone)]
-pub struct FauxProviderRegistration {
-    core: FauxCore,
-    source_id: String,
-}
-
-impl FauxProviderRegistration {
-    pub(crate) fn new(core: FauxCore, source_id: String) -> Self {
-        Self { core, source_id }
-    }
-
-    pub fn unregister(&self) {
-        crate::compat::unregister_api_providers(&self.source_id);
-    }
-}
-
-impl Deref for FauxProviderRegistration {
-    type Target = FauxCore;
-
-    fn deref(&self) -> &FauxCore {
-        &self.core
-    }
-}
-
 #[cfg(test)]
 mod tests {
     //! Port of `test/faux-provider.test.ts` and the `fauxProvider` block of
     //! `test/providers.test.ts`.
+    //!
+    //! Divergence: Pi's `faux-provider.test.ts` registers through the compat
+    //! `registerFauxProvider`; ai.rs has no global api-registry, so each test
+    //! registers `faux_provider(..)` in its own `Models` and requests go
+    //! through `Models::stream`. The "unregisters the provider" case has no
+    //! counterpart and is not ported.
 
     use futures::StreamExt;
     use serde_json::json;
-    use tokio::sync::MutexGuard;
 
     use super::*;
-    use crate::compat::{REGISTRY_TEST_LOCK, complete, register_faux_provider, stream};
-    use crate::models::create_models;
+    use crate::models::{Models, create_models};
     use crate::types::{Context, DeferredRequest, DeferredWindow, ImageContent, Tool, UserMessage};
 
-    /// Holds the registry lock and unregisters on drop (`afterEach`).
+    /// A faux provider registered in its own `Models` collection.
     struct Registered {
-        registration: FauxProviderRegistration,
-        _lock: MutexGuard<'static, ()>,
+        faux: FauxProviderHandle,
+        models: Models,
     }
 
     impl Deref for Registered {
-        type Target = FauxProviderRegistration;
+        type Target = FauxProviderHandle;
 
-        fn deref(&self) -> &FauxProviderRegistration {
-            &self.registration
+        fn deref(&self) -> &FauxProviderHandle {
+            &self.faux
         }
     }
 
-    impl Drop for Registered {
-        fn drop(&mut self) {
-            self.registration.unregister();
+    impl Registered {
+        fn stream(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream {
+            self.models
+                .stream(&model, &context, options.unwrap_or_default())
+        }
+
+        async fn run(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> AssistantMessage {
+            self.stream(model, context, options).result().await
+        }
+
+        async fn collect_events(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> Vec<AssistantMessageEvent> {
+            self.stream(model, context, options).collect().await
         }
     }
 
     async fn register(options: RegisterFauxProviderOptions) -> Registered {
-        let lock = REGISTRY_TEST_LOCK.lock().await;
-        Registered {
-            registration: register_faux_provider(options),
-            _lock: lock,
-        }
+        let faux = faux_provider(options);
+        let models = create_models(Default::default());
+        models.set_provider(faux.provider.clone());
+        Registered { faux, models }
     }
 
     fn message(text: &str) -> FauxResponseStep {
@@ -1306,22 +1300,6 @@ mod tests {
 
     fn hi() -> Context {
         Context::builder().message(Message::user_text("hi")).build()
-    }
-
-    async fn run(
-        model: Model,
-        context: Context,
-        options: Option<StreamOptions>,
-    ) -> AssistantMessage {
-        complete(model, context, options).await.unwrap()
-    }
-
-    async fn collect_events(
-        model: Model,
-        context: Context,
-        options: Option<StreamOptions>,
-    ) -> Vec<AssistantMessageEvent> {
-        stream(model, context, options).unwrap().collect().await
     }
 
     fn event_types(events: &[AssistantMessageEvent]) -> Vec<&'static str> {
@@ -1347,7 +1325,9 @@ mod tests {
             .system_prompt("Be concise.")
             .message(Message::user_text("hi there"))
             .build();
-        let response = run(registration.get_model(), context, None).await;
+        let response = registration
+            .run(registration.get_model(), context, None)
+            .await;
         assert_eq!(response.content, vec![faux_text("hello world")]);
         assert!(response.usage.input > 0);
         assert!(response.usage.output > 0);
@@ -1374,7 +1354,7 @@ mod tests {
         )
         .into()]);
 
-        let response = run(registration.get_model(), hi(), None).await;
+        let response = registration.run(registration.get_model(), hi(), None).await;
         assert_eq!(response.content.len(), 3);
         assert_eq!(response.content[0], faux_thinking("think"));
         let AssistantContent::ToolCall(tool_call) = &response.content[1] else {
@@ -1432,18 +1412,20 @@ mod tests {
                 .reasoning
         );
 
-        let fast = run(
-            registration.get_model_by_id("faux-fast").unwrap(),
-            hi(),
-            None,
-        )
-        .await;
-        let thinker = run(
-            registration.get_model_by_id("faux-thinker").unwrap(),
-            hi(),
-            None,
-        )
-        .await;
+        let fast = registration
+            .run(
+                registration.get_model_by_id("faux-fast").unwrap(),
+                hi(),
+                None,
+            )
+            .await;
+        let thinker = registration
+            .run(
+                registration.get_model_by_id("faux-thinker").unwrap(),
+                hi(),
+                None,
+            )
+            .await;
         assert_eq!(fast.content, vec![faux_text("faux-fast:false")]);
         assert_eq!(thinker.content, vec![faux_text("faux-thinker:true")]);
     }
@@ -1459,7 +1441,7 @@ mod tests {
         .await;
         registration.set_responses([message("hello")]);
 
-        let response = run(registration.get_model(), hi(), None).await;
+        let response = registration.run(registration.get_model(), hi(), None).await;
         assert_eq!(response.api, "faux:test");
         assert_eq!(response.provider, "faux-provider");
         assert_eq!(response.model, "faux-model");
@@ -1470,9 +1452,9 @@ mod tests {
         let registration = register(Default::default()).await;
         registration.set_responses([message("first"), message("second")]);
 
-        let first = run(registration.get_model(), hi(), None).await;
-        let second = run(registration.get_model(), hi(), None).await;
-        let exhausted = run(registration.get_model(), hi(), None).await;
+        let first = registration.run(registration.get_model(), hi(), None).await;
+        let second = registration.run(registration.get_model(), hi(), None).await;
+        let exhausted = registration.run(registration.get_model(), hi(), None).await;
 
         assert_eq!(first.content, vec![faux_text("first")]);
         assert_eq!(second.content, vec![faux_text("second")]);
@@ -1492,7 +1474,7 @@ mod tests {
         let text = |response: AssistantMessage| response.content;
 
         assert_eq!(
-            text(run(registration.get_model(), hi(), None).await),
+            text(registration.run(registration.get_model(), hi(), None).await),
             vec![faux_text("first")]
         );
         assert_eq!(registration.get_pending_response_count(), 0);
@@ -1500,18 +1482,18 @@ mod tests {
         registration.set_responses([message("second")]);
         assert_eq!(registration.get_pending_response_count(), 1);
         assert_eq!(
-            text(run(registration.get_model(), hi(), None).await),
+            text(registration.run(registration.get_model(), hi(), None).await),
             vec![faux_text("second")]
         );
 
         registration.append_responses([message("third"), message("fourth")]);
         assert_eq!(registration.get_pending_response_count(), 2);
         assert_eq!(
-            text(run(registration.get_model(), hi(), None).await),
+            text(registration.run(registration.get_model(), hi(), None).await),
             vec![faux_text("third")]
         );
         assert_eq!(
-            text(run(registration.get_model(), hi(), None).await),
+            text(registration.run(registration.get_model(), hi(), None).await),
             vec![faux_text("fourth")]
         );
         assert_eq!(registration.get_pending_response_count(), 0);
@@ -1529,7 +1511,7 @@ mod tests {
             },
         )]);
 
-        let response = run(registration.get_model(), hi(), None).await;
+        let response = registration.run(registration.get_model(), hi(), None).await;
         assert_eq!(response.content, vec![faux_text("1:1")]);
     }
 
@@ -1540,7 +1522,9 @@ mod tests {
             Err(Error::message("boom"))
         })]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         assert_eq!(events.len(), 1);
         let (_, error) = terminal_error(&events[0]);
         assert_eq!(error.stop_reason, StopReason::Error);
@@ -1555,7 +1539,9 @@ mod tests {
             panic!("factory panicked")
         })]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         assert_eq!(events.len(), 1);
         let (_, error) = terminal_error(&events[0]);
         assert_eq!(error.stop_reason, StopReason::Error);
@@ -1574,7 +1560,9 @@ mod tests {
         )
         .into()]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         assert!(!event_types(&events).contains(&"done"));
         let (_, error) = terminal_error(events.last().unwrap());
         assert_eq!(error.stop_reason, StopReason::Error);
@@ -1628,7 +1616,9 @@ mod tests {
             .tool(tool.clone())
             .build();
 
-        let response = run(registration.get_model(), context, None).await;
+        let response = registration
+            .run(registration.get_model(), context, None)
+            .await;
         // Pi's test lists the tools as a trailing `tools:` entry; the
         // implementation serializes them on the leading system message.
         let prompt_text = [
@@ -1670,26 +1660,30 @@ mod tests {
         let mut context = Context::builder()
             .message(Message::user_text("hello"))
             .build();
-        let first = run(
-            registration.get_model(),
-            context.clone(),
-            session("session-1", CacheRetention::Short),
-        )
-        .await;
+        let first = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
         assert!(first.usage.cache_write > 0);
         context.messages.push(Message::Assistant(first));
         context.messages.push(Message::user_text("follow up"));
 
-        let second = run(
-            registration.get_model(),
-            context.clone(),
-            session("session-2", CacheRetention::Short),
-        )
-        .await;
+        let second = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-2", CacheRetention::Short),
+            )
+            .await;
         assert_eq!(second.usage.cache_read, 0);
         assert!(second.usage.cache_write > 0);
 
-        let third = run(registration.get_model(), context, None).await;
+        let third = registration
+            .run(registration.get_model(), context, None)
+            .await;
         assert_eq!(third.usage.cache_read, 0);
         assert_eq!(third.usage.cache_write, 0);
     }
@@ -1703,23 +1697,25 @@ mod tests {
             .system_prompt("Be concise.")
             .message(Message::user_text("hello"))
             .build();
-        let first = run(
-            registration.get_model(),
-            context.clone(),
-            session("session-1", CacheRetention::Short),
-        )
-        .await;
+        let first = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
         assert_eq!(first.usage.cache_read, 0);
         assert!(first.usage.cache_write > 0);
 
         context.messages.push(Message::Assistant(first));
         context.messages.push(Message::user_text("follow up"));
-        let second = run(
-            registration.get_model(),
-            context,
-            session("session-1", CacheRetention::Short),
-        )
-        .await;
+        let second = registration
+            .run(
+                registration.get_model(),
+                context,
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
         assert!(second.usage.cache_read > 0);
     }
 
@@ -1731,12 +1727,13 @@ mod tests {
         let mut context = Context::builder()
             .message(Message::user_text("hello"))
             .build();
-        run(
-            registration.get_model(),
-            context.clone(),
-            session("session-1", CacheRetention::None),
-        )
-        .await;
+        registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::None),
+            )
+            .await;
         context
             .messages
             .push(Message::Assistant(faux_assistant_message(
@@ -1744,12 +1741,13 @@ mod tests {
                 FauxMessageOptions::default(),
             )));
         context.messages.push(Message::user_text("follow up"));
-        let second = run(
-            registration.get_model(),
-            context,
-            session("session-1", CacheRetention::None),
-        )
-        .await;
+        let second = registration
+            .run(
+                registration.get_model(),
+                context,
+                session("session-1", CacheRetention::None),
+            )
+            .await;
         assert_eq!(second.usage.cache_read, 0);
         assert_eq!(second.usage.cache_write, 0);
     }
@@ -1774,7 +1772,9 @@ mod tests {
             faux_tool_call("echo", json!({ "text": "hi", "count": 12 }), Some("tool-1")),
         ])]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         let types = event_types(&events);
         for expected in [
             "thinking_start",
@@ -1815,7 +1815,9 @@ mod tests {
             faux_tool_call("echo", json!({}), Some("tool-1")),
         ])]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         let AssistantMessageEvent::Start { partial } = &events[0] else {
             panic!("expected start");
         };
@@ -1846,7 +1848,9 @@ mod tests {
             faux_tool_call("echo", json!({ "text": "two" }), Some("tool-2")),
         ])]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         let types = event_types(&events);
         assert_eq!(
             types
@@ -1880,7 +1884,9 @@ mod tests {
         )
         .into()]);
 
-        let events = collect_events(registration.get_model(), hi(), None).await;
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
         assert_eq!(
             event_types(&events),
             vec!["start", "text_start", "text_delta", "text_end", "error"]
@@ -1926,7 +1932,17 @@ mod tests {
 
         let controller = CancellationToken::new();
         controller.cancel();
-        let events = collect_events(registration.get_model(), hi(), with_signal(&controller)).await;
+        // Straight to the provider: `Models` auth resolution already stops
+        // on an aborted signal, before the faux stream starts.
+        let events: Vec<_> = registration
+            .provider
+            .stream(
+                registration.get_model(),
+                crate::utils::transcript::normalize_context(&hi()),
+                with_signal(&controller).unwrap(),
+            )
+            .collect()
+            .await;
         assert_eq!(events.len(), 1);
         let (reason, error) = terminal_error(&events[0]);
         assert_eq!(reason, StopReason::Aborted);
@@ -1946,7 +1962,7 @@ mod tests {
         let controller = CancellationToken::new();
         let mut events = Vec::new();
         let mut delta_count = 0;
-        let mut s = stream(registration.get_model(), hi(), with_signal(&controller)).unwrap();
+        let mut s = registration.stream(registration.get_model(), hi(), with_signal(&controller));
         while let Some(event) = s.next().await {
             events.push(event.event_type());
             if event.event_type() == delta_type {
@@ -2006,20 +2022,6 @@ mod tests {
             "toolcall_end",
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn unregisters_the_provider() {
-        let _lock = REGISTRY_TEST_LOCK.lock().await;
-        let registration = register_faux_provider(Default::default());
-        registration.set_responses([message("hello")]);
-        registration.unregister();
-
-        let error = stream(registration.get_model(), hi(), None).err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            format!("No API provider registered for api: {}", registration.api())
-        );
     }
 
     // providers.test.ts: fauxProvider

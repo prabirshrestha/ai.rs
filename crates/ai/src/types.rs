@@ -1776,8 +1776,8 @@ pub enum ModelType {
     Image,
 }
 
-/// Chat model: usable with `stream()` and friends (`Model<Api>`).
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// Chat model: usable with `Models::stream()` and friends (`Model<Api>`).
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -1808,12 +1808,6 @@ pub struct Model {
     pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ModelCompat>,
-    /// Rust addition: the [`Models`](crate::models::Models) collection a
-    /// provider handle (such as `providers::openai::builder()`) bound this
-    /// model to. The compat entry points (`stream_simple()` and friends)
-    /// dispatch through it. Not serialized and ignored by `==`.
-    #[serde(skip)]
-    pub bound_models: Option<crate::models::Models>,
 }
 
 impl fmt::Debug for Model {
@@ -1844,37 +1838,14 @@ impl fmt::Debug for Model {
     }
 }
 
-impl PartialEq for Model {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.api == other.api
-            && self.provider == other.provider
-            && self.base_url == other.base_url
-            && self.model_type == other.model_type
-            && self.reasoning == other.reasoning
-            && self.thinking_level_map == other.thinking_level_map
-            && self.prompt_cache == other.prompt_cache
-            && self.input == other.input
-            && self.input_limits == other.input_limits
-            && self.cost == other.cost
-            && self.context_window == other.context_window
-            && self.max_tokens == other.max_tokens
-            && self.headers == other.headers
-            && self.sampling_params == other.sampling_params
-            && self.sampling_params_by_thinking_level == other.sampling_params_by_thinking_level
-            && self.compat == other.compat
-    }
-}
-
 impl Model {
     pub fn compat(&self) -> ModelCompat {
         self.compat.clone().unwrap_or_default()
     }
 }
 
-/// Image-generation model: usable with `generate_images()` only.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Image-generation model: usable with `Models::generate_images()` only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageModel {
     pub id: String,
@@ -1894,27 +1865,6 @@ pub struct ImageModel {
     pub cost: ModelCost,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
-    /// Rust addition: the [`Models`](crate::models::Models) collection a
-    /// provider handle bound this model to. `generate_images()` dispatches
-    /// through it. Not serialized and ignored by `==`.
-    #[serde(skip)]
-    pub bound_models: Option<crate::models::Models>,
-}
-
-impl PartialEq for ImageModel {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.api == other.api
-            && self.provider == other.provider
-            && self.base_url == other.base_url
-            && self.model_type == other.model_type
-            && self.input == other.input
-            && self.output == other.output
-            && self.input_limits == other.input_limits
-            && self.cost == other.cost
-            && self.headers == other.headers
-    }
 }
 
 /// The `"image"` discriminator of [`ImageModel`].

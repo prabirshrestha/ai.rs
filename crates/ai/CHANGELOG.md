@@ -4,8 +4,8 @@
 
 The crate was rewritten from scratch as a 1:1 port of Pi's `pi-ai` and
 `pi-agent-core` 1.0.2 (commit `200387122ca450d6387f033949423114a270b96c`).
-The provider handles, `stream_simple`/`complete_simple` and `Agent` keep their
-0.7 shape, but most types changed.
+The provider handles and `Agent` keep their 0.7 shape, but most types
+changed, and requests go through the `Models` registry.
 
 ### Breaking changes
 
@@ -14,8 +14,20 @@ Streams and messages:
 - Stream events are no longer `Result`s: `AssistantMessageEventStream` yields
   `AssistantMessageEvent`, and failures arrive as an `Error` event and a final
   message with `stop_reason` `Error`/`Aborted`.
-- `stream()`/`stream_simple()` return `Result<AssistantMessageEventStream>`;
-  `complete()`/`complete_simple()` return `Result<AssistantMessage>`.
+- The global `stream()`/`complete()`/`stream_simple()`/`complete_simple()`
+  functions are removed. Pi 1.0 keeps them only in its temporary `compat`
+  module, which it deletes once its coding agent has migrated; ai.rs follows
+  Pi's direction instead. Call `Models::stream`/`complete`/`stream_simple`/
+  `complete_simple` (`models.complete_simple(&model, &context, options)`)
+  on a provider handle's `handle.models()` or on `create_models` /
+  `builtin_models`. They return the stream or message directly; failures,
+  including an unknown provider or missing auth, arrive as error events.
+  The api-registry (`register_api_provider`, `get_api_provider`, ...),
+  `register_faux_provider`/`FauxProviderRegistration`, the image
+  `generate_images()` function and its images api-registry, and the
+  `get_model`/`get_image_model` catalog aliases are not ported either:
+  use `faux_provider` with `Models::set_provider`,
+  `Models::generate_images` and `providers::all::get_builtin_*`.
 - The system prompt and tools are transcript messages: `Message::System`
   (`SystemMessage { content, sections, tools_added, tools_removed }`).
   `Context::system_prompt` and `Context::tools` (now `Option<Vec<Tool>>`)
@@ -60,8 +72,9 @@ Agent:
   `clear_tools`/`clear_messages`, `AgentError::ToolNotFound`.
 - `AgentOptions` takes Pi's fields (hooks, `stream_fn`, `session_id`,
   `thinking_budgets`, `transport`, ...) instead of `options:
-  SimpleStreamOptions`. Pass `stream_fn(stream_simple_fn())` or call
-  `set_default_stream_fn`; there is no implicit default.
+  SimpleStreamOptions`. Pass `stream_fn(stream_simple_fn(models))` (a
+  `StreamFn` over `Models::stream_simple`) or call `set_default_stream_fn`;
+  there is no implicit default.
 - State and queue methods are synchronous (`state()`, `set_model`,
   `set_tools`, `steer`, `follow_up`, ...); `reset()` returns `Result`.
   Error texts follow Pi.

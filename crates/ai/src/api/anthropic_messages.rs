@@ -4639,9 +4639,10 @@ mod tests {
             "messages": [{ "role": "user", "content": "Hello", "timestamp": 1 }],
         }))
         .unwrap();
-        let result = crate::compat::complete_simple(model, context, None)
-            .await
-            .unwrap();
+        let result = handle
+            .models()
+            .complete_simple(&model, &context, SimpleStreamOptions::default())
+            .await;
         assert_eq!(
             result.stop_reason,
             StopReason::Stop,

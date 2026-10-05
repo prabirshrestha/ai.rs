@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::types::StreamFn;
-use crate::api::lazy::error_stream;
+use crate::models::Models;
 use crate::types::{
     AssistantMessageEventStream, Context, Model, SimpleStreamOptions, TranscriptContext,
 };
@@ -44,20 +44,18 @@ where
     })
 }
 
-/// [`crate::compat::stream_simple`] as a [`StreamFn`], the Rust form of
-/// passing Pi's `streamSimple` as `streamFn`. A missing API implementation
-/// becomes an error stream, so the function never fails.
-pub fn stream_simple_fn() -> StreamFn {
-    stream_fn(|model, context, options| {
+/// [`Models::stream_simple`] as a [`StreamFn`] (Rust convenience), the
+/// Rust form of Pi's coding-agent passing
+/// `(model, context, options) => models.streamSimple(model, context, options)`
+/// as `streamFn`. Request failures arrive as error events.
+pub fn stream_simple_fn(models: Models) -> StreamFn {
+    stream_fn(move |model, context, options| {
         let context = Context {
             system_prompt: None,
             messages: context.messages,
             tools: None,
         };
-        match crate::compat::stream_simple(model.clone(), context, Some(options)) {
-            Ok(stream) => stream,
-            Err(error) => error_stream(&model, error),
-        }
+        models.stream_simple(&model, &context, options)
     })
 }
 

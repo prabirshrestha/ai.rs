@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use super::catalog::openai_models;
-use super::handle::{HandleAuth, HandleImages, HandleStreams, bind, bind_image, clean_key};
+use super::handle::{HandleAuth, HandleImages, HandleStreams, clean_key};
 use super::model_builder::{ImageModelBuilder, ModelBuilder};
 use crate::api::openai_completions::openai_completions_api;
 use crate::api::openai_images::openai_images_api;
@@ -76,9 +76,9 @@ impl OpenAiApi {
 }
 
 /// Pre-1.0 provider handle: `openai::builder().api_key(..).build()?` then
-/// `handle.model("gpt-5.5").build()?`. Models it builds are bound to the
-/// handle's own [`Models`] collection, so the compat entry points use the
-/// handle's key, base URL and HTTP client.
+/// `handle.model("gpt-5.5").build()?`. Requests go through the handle's own
+/// [`Models`] collection (`handle.models().complete_simple(..)`), which uses
+/// the handle's key, base URL and HTTP client.
 ///
 /// Unlike Pi's `openaiProvider()`, a handle also serves Chat Completions
 /// (`OpenAiApi::ChatCompletions`) for OpenAI-compatible servers.
@@ -137,26 +137,23 @@ impl OpenAi {
                 ..Default::default()
             },
         };
-        ModelBuilder::new(bind(model, &self.models))
+        ModelBuilder::new(model)
     }
 
     /// ai.rs extra: an OpenAI-compatible image model (`openai-images`,
     /// `/images/generations`), text input and image output by default.
     pub fn image_model(&self, id: &str) -> ImageModelBuilder {
-        ImageModelBuilder::new(bind_image(
-            ImageModel {
-                id: id.to_string(),
-                name: id.to_string(),
-                api: KnownImageApi::OpenaiImages.as_str().to_string(),
-                provider: self.provider_id.clone(),
-                base_url: self.base_url.clone(),
-                model_type: ImageModelType::Image,
-                input: vec![ModelInput::Text],
-                output: vec![ModelOutput::Image],
-                ..Default::default()
-            },
-            &self.models,
-        ))
+        ImageModelBuilder::new(ImageModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: KnownImageApi::OpenaiImages.as_str().to_string(),
+            provider: self.provider_id.clone(),
+            base_url: self.base_url.clone(),
+            model_type: ImageModelType::Image,
+            input: vec![ModelInput::Text],
+            output: vec![ModelOutput::Image],
+            ..Default::default()
+        })
     }
 
     /// ai.rs extra: an OpenAI-compatible embedding model (`/embeddings`).
@@ -429,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_builds_bound_catalog_and_custom_models() {
+    fn handle_builds_catalog_and_custom_models() {
         let handle = builder()
             .api_key(Some(" test-key "))
             .chat_completions()
@@ -440,12 +437,6 @@ mod tests {
         assert_eq!(model.provider, "openai");
         assert_eq!(model.api, "openai-completions");
         assert_eq!(model.context_window, 272_000);
-        assert!(
-            model
-                .bound_models
-                .as_ref()
-                .is_some_and(|models| models.ptr_eq(handle.models()))
-        );
 
         let custom = builder()
             .provider_id("local")
@@ -574,13 +565,14 @@ mod tests {
         assert_eq!(model.api, "openai-images");
         assert_eq!(model.input, vec![ModelInput::Text]);
         assert_eq!(model.output, vec![ModelOutput::Image]);
-        let output = crate::generate_images(
-            model,
-            ImagesContext::builder().text("A tiny robot").build(),
-            None,
-        )
-        .await
-        .unwrap();
+        let output = handle
+            .models()
+            .generate_images(
+                &model,
+                &ImagesContext::builder().text("A tiny robot").build(),
+                ImagesOptions::default(),
+            )
+            .await;
         assert_eq!(output.stop_reason, crate::types::ImagesStopReason::Stop);
         let request = server.last();
         assert_eq!(request.path, "/v1/images/generations");
@@ -604,13 +596,14 @@ mod tests {
             .build()
             .unwrap();
         let model = ollama.image_model("x/z-image-turbo").build_image().unwrap();
-        let output = crate::generate_images(
-            model,
-            ImagesContext::builder().text("Generate a cat").build(),
-            None,
-        )
-        .await
-        .unwrap();
+        let output = ollama
+            .models()
+            .generate_images(
+                &model,
+                &ImagesContext::builder().text("Generate a cat").build(),
+                ImagesOptions::default(),
+            )
+            .await;
         assert_eq!(output.stop_reason, crate::types::ImagesStopReason::Stop);
         assert_eq!(
             output.output,
