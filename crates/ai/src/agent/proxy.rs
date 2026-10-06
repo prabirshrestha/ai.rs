@@ -7,7 +7,9 @@
 //! indices past the end of the partial message are padded with empty text
 //! blocks (JavaScript arrays are sparse); the streaming JSON of a tool call
 //! is tracked beside the partial message instead of on a hidden
-//! `partialJson` field.
+//! `partialJson` field. Pi's `errorMessage` for an abort during `fetch` is
+//! fetch's own `AbortError` message; Rust has no `fetch`, so every abort
+//! reports "Request aborted by user" (the stop reason is `aborted` in both).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -98,9 +100,13 @@ pub enum ProxyAssistantMessageEvent {
         tool_call: ToolCall,
     },
     /// `reason` is `Stop`, `Length` or `ToolUse`.
+    ///
+    /// A missing `usage` reads as zero usage: Pi copies the absent field
+    /// through as `undefined`, which a Rust `Usage` cannot hold.
     #[serde(rename = "done")]
     Done {
         reason: StopReason,
+        #[serde(default)]
         usage: Usage,
         #[serde(
             rename = "providerThinkingLevel",
@@ -119,6 +125,8 @@ pub enum ProxyAssistantMessageEvent {
             skip_serializing_if = "Option::is_none"
         )]
         error_message: Option<String>,
+        /// A missing `usage` reads as zero usage (see `Done`).
+        #[serde(default)]
         usage: Usage,
         #[serde(
             rename = "providerThinkingLevel",
@@ -388,6 +396,22 @@ async fn with_signal<T>(
     }
 }
 
+/// The `type` tags of [`ProxyAssistantMessageEvent`].
+const PROXY_EVENT_TYPES: [&str; 12] = [
+    "start",
+    "text_start",
+    "text_delta",
+    "text_end",
+    "thinking_start",
+    "thinking_delta",
+    "thinking_end",
+    "toolcall_start",
+    "toolcall_delta",
+    "toolcall_end",
+    "done",
+    "error",
+];
+
 fn process_line(
     stream: &AssistantMessageEventStream,
     line: &str,
@@ -401,8 +425,15 @@ fn process_line(
     if data.is_empty() {
         return Ok(());
     }
+    let value: Value = serde_json::from_str(data).map_err(|error| error.to_string())?;
+    // Pi's `switch` warns about an unknown event type and skips the event.
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if !PROXY_EVENT_TYPES.contains(&event_type) {
+        eprintln!("Unhandled proxy event type: {event_type}");
+        return Ok(());
+    }
     let proxy_event: ProxyAssistantMessageEvent =
-        serde_json::from_str(data).map_err(|error| error.to_string())?;
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
     if let Some(event) = process_proxy_event(proxy_event, state)? {
         if matches!(
             event,
@@ -805,5 +836,44 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Connection closed by proxy server")
         );
+    }
+
+    // Rust-only: Pi's `switch` skips unknown event types with a warning, and
+    // a `done` without `usage` does not fail `JSON.parse`.
+    #[tokio::test]
+    async fn skips_unknown_event_types_and_accepts_done_without_usage() {
+        let events = [
+            json!({ "type": "start" }),
+            json!({ "type": "future_event", "contentIndex": 0 }),
+            json!({ "contentIndex": 0 }),
+            json!({ "type": "text_start", "contentIndex": 0 }),
+            json!({ "type": "text_delta", "contentIndex": 0, "delta": "hi" }),
+            json!({ "type": "text_end", "contentIndex": 0 }),
+            json!({ "type": "done", "reason": "stop" }),
+        ];
+        let body: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        let url = spawn_proxy(body).await;
+
+        let stream = stream_proxy(model(), empty_context(), options(url));
+        let events: Vec<_> = stream.clone().collect().await;
+        let result = stream.result().await;
+
+        let types: Vec<_> = events
+            .iter()
+            .map(AssistantMessageEvent::event_type)
+            .collect();
+        assert_eq!(
+            types,
+            ["start", "text_start", "text_delta", "text_end", "done"]
+        );
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.usage, Usage::default());
+        let AssistantContent::Text(text) = &result.content[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text.text, "hi");
     }
 }
