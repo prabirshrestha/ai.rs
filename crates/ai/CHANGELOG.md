@@ -89,7 +89,9 @@ Agent:
   `retry`, `uuidv7`, diagnostics.
 - Agent hooks (`before_tool_call`, `after_tool_call`, `prepare_request`,
   `prepare_next_turn`, `finish_turn`, ...), `run_tool_call`, `stream_proxy`,
-  `peek_queued_messages`.
+  `peek_queued_messages`. The hooks return `AgentResult`; an `Err` fails the
+  run like a thrown error in Pi. `ai::agent::ThinkingLevel` is Pi's agent
+  thinking level (with `off`).
 - OpenRouter image models in the builtin providers.
 - `ai::durable` (feature `durable`, on by default): Pi Durable 1.0.2, with
   `ai::chord`. Durable conversations, tasks, submissions and documents over

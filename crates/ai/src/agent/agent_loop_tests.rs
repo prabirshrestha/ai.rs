@@ -255,7 +255,7 @@ fn finish_turn(
 ) -> crate::agent::types::FinishTurnFn {
     Arc::new(move |turn, _signal| {
         let decision = decide(&turn);
-        Box::pin(async move { decision })
+        Box::pin(async move { Ok(decision) })
     })
 }
 
@@ -1186,7 +1186,7 @@ mod agent_loop_with_agent_message {
             let calls = Arc::clone(&prepare_next_turn_calls);
             config.prepare_next_turn = Some(Arc::new(move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { None })
+                Box::pin(async { Ok(None) })
             }));
         }
         {
@@ -1387,7 +1387,7 @@ mod agent_loop_with_agent_message {
                     model: Some(replacement_model.clone()),
                     thinking_level: Some(ModelThinkingLevel::High),
                 };
-                Box::pin(async move { Some(update) })
+                Box::pin(async move { Ok(Some(update)) })
             }));
         }
         let completed = Arc::clone(&completed_messages);
@@ -1454,7 +1454,7 @@ mod agent_loop_with_agent_message {
                 if preparations.fetch_add(1, Ordering::SeqCst) == 0 {
                     queued.lock().push(late_steering.clone());
                 }
-                Box::pin(async { None })
+                Box::pin(async { Ok(None) })
             }));
         }
         let included = Arc::clone(&request_included_steering);
@@ -1504,7 +1504,7 @@ mod agent_loop_with_agent_message {
                         })]),
                         ..Default::default()
                     });
-                Box::pin(async move { update })
+                Box::pin(async move { Ok(update) })
             }));
         }
         let second_turn_has_update = Arc::new(AtomicBool::new(false));
@@ -1553,7 +1553,7 @@ mod agent_loop_with_agent_message {
             let late_steering = late_steering.clone();
             config.prepare_next_turn = Some(Arc::new(move |_| {
                 queued.lock().push(late_steering.clone());
-                Box::pin(async { None })
+                Box::pin(async { Ok(None) })
             }));
         }
         {
@@ -2214,5 +2214,42 @@ async fn declared_tools_need_no_update_message() {
     assert_eq!(
         events.lock().last().map(AgentEvent::event_type),
         Some("agent_end")
+    );
+}
+
+// Rust-only: a stream that ends without `done`/`error` and without a final
+// result fails the loop with `StreamClosed` (Pi would wait forever).
+#[tokio::test]
+async fn a_stream_ending_without_a_terminal_event_fails_with_stream_closed() {
+    let stream_fn = make_stream_fn(|_, _, _| {
+        let stream = AssistantMessageEventStream::new();
+        stream.push(AssistantMessageEvent::Start {
+            partial: create_assistant_message(vec![text("")], StopReason::Stop),
+        });
+        stream.end(None);
+        stream
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    let result = run_agent_loop(
+        vec![create_user_message("hello")],
+        context(Vec::new()),
+        config(),
+        sink(Arc::clone(&events)),
+        None,
+        Some(stream_fn),
+    )
+    .await;
+
+    assert!(matches!(result, Err(AgentError::StreamClosed)));
+    assert_eq!(
+        event_types(&events.lock()),
+        [
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "message_start",
+        ]
     );
 }

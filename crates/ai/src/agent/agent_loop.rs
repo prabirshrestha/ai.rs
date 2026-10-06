@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
-use futures::future::join_all;
+use futures::future::try_join_all;
 use futures::{FutureExt, Stream, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -256,7 +256,7 @@ async fn run_loop(
             let mut prepared_messages = Vec::new();
             if let Some(turn) = &last_completed_turn {
                 let next_turn_snapshot = match &config.prepare_next_turn {
-                    Some(prepare_next_turn) => prepare_next_turn(turn.clone()).await,
+                    Some(prepare_next_turn) => prepare_next_turn(turn.clone()).await?,
                     None => None,
                 };
                 if let Some(snapshot) = next_turn_snapshot {
@@ -304,7 +304,7 @@ async fn run_loop(
                     },
                     signal.clone(),
                 )
-                .await
+                .await?
             {
                 if let Some(context) = request_update.context {
                     current_context = context;
@@ -336,7 +336,7 @@ async fn run_loop(
                     new_messages: new_messages.clone(),
                 };
                 if let Some(finish_turn) = &config.finish_turn {
-                    finish_turn(turn, signal.clone()).await;
+                    finish_turn(turn, signal.clone()).await?;
                 }
                 emit(AgentEvent::TurnEnd {
                     message: Message::Assistant(message),
@@ -384,7 +384,7 @@ async fn run_loop(
             };
             last_completed_turn = Some(turn.clone());
             let decision = match &config.finish_turn {
-                Some(finish_turn) => finish_turn(turn, signal.clone()).await,
+                Some(finish_turn) => finish_turn(turn, signal.clone()).await?,
                 None => None,
             };
             emit(AgentEvent::TurnEnd {
@@ -881,10 +881,10 @@ async fn execute_tool_calls_parallel(
         }
     }
 
-    let ordered_finalized_calls = join_all(finalized_calls)
-        .await
-        .into_iter()
-        .collect::<AgentResult<Vec<_>>>()?;
+    // `Promise.all` rejects on the first error. `try_join_all` returns it as
+    // early, but drops the calls still running, where Pi leaves them running
+    // detached.
+    let ordered_finalized_calls = try_join_all(finalized_calls).await?;
     let terminate = should_terminate_tool_batch(
         &ordered_finalized_calls
             .iter()

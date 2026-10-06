@@ -99,6 +99,9 @@ pub struct AfterToolCallResult {
 }
 
 /// Context passed to `before_tool_call`.
+///
+/// Divergence: `context` is a clone of the loop's context; Pi passes the
+/// live object, so in-place edits made here would reach the loop in Pi.
 #[derive(Clone)]
 pub struct BeforeToolCallContext {
     /// The assistant message that requested the tool call.
@@ -114,6 +117,9 @@ pub struct BeforeToolCallContext {
 }
 
 /// Context passed to `after_tool_call`.
+///
+/// Divergence: `context` is a clone of the loop's context; Pi passes the
+/// live object, so in-place edits made here would reach the loop in Pi.
 #[derive(Clone)]
 pub struct AfterToolCallContext {
     pub assistant_message: AssistantMessage,
@@ -128,6 +134,12 @@ pub struct AfterToolCallContext {
 }
 
 /// Context passed to completed-turn callbacks.
+///
+/// Divergence: Pi passes the loop's live `currentContext` (and the live
+/// `newMessages` array), so a hook that mutates `context.messages` in place
+/// changes what the loop sends next. Rust hands the hook a clone; in-place
+/// edits are lost. Return an update (`AgentRequestUpdate.context`,
+/// `AgentLoopTurnUpdate.context`) to replace the loop's context instead.
 #[derive(Clone)]
 pub struct AgentTurnContext {
     /// The assistant message that completed the turn.
@@ -156,8 +168,14 @@ pub enum AgentTurnDecision {
 /// satisfy that request and adds no extra request; otherwise the loop
 /// continues once with the current context. Error and aborted responses
 /// remain hard exits.
+///
+/// An `Err` (Pi: a thrown error) rejects the loop; `Agent` reports it with
+/// its failure lifecycle events.
 pub type FinishTurnFn = Arc<
-    dyn Fn(AgentTurnContext, Option<CancellationToken>) -> BoxFuture<Option<AgentTurnDecision>>
+    dyn Fn(
+            AgentTurnContext,
+            Option<CancellationToken>,
+        ) -> BoxFuture<AgentResult<Option<AgentTurnDecision>>>
         + Send
         + Sync,
 >;
@@ -176,6 +194,12 @@ pub struct AgentLoopTurnUpdate {
 }
 
 /// Runtime state available immediately before a conversational provider request.
+///
+/// Divergence: Pi passes the loop's live `currentContext` (and the live
+/// `newMessages` array), so a hook that mutates `context.messages` in place
+/// changes what the loop sends next. Rust hands the hook a clone; in-place
+/// edits are lost. Return an update (`AgentRequestUpdate.context`,
+/// `AgentLoopTurnUpdate.context`) to replace the loop's context instead.
 #[derive(Clone)]
 pub struct PrepareRequestContext {
     pub context: AgentContext,
@@ -194,20 +218,26 @@ pub struct AgentRequestUpdate {
 /// Called immediately before every conversational provider request,
 /// including the first. Pending messages have already been appended and
 /// emitted when this callback runs.
+///
+/// An `Err` (Pi: a thrown error) rejects the loop.
 pub type PrepareRequestFn = Arc<
     dyn Fn(
             PrepareRequestContext,
             Option<CancellationToken>,
-        ) -> BoxFuture<Option<AgentRequestUpdate>>
+        ) -> BoxFuture<AgentResult<Option<AgentRequestUpdate>>>
         + Send
         + Sync,
 >;
 
 pub type PrepareNextTurnContext = AgentTurnContext;
 
-/// `AgentLoopConfig.prepareNextTurn`.
-pub type PrepareNextTurnFn =
-    Arc<dyn Fn(PrepareNextTurnContext) -> BoxFuture<Option<AgentLoopTurnUpdate>> + Send + Sync>;
+/// `AgentLoopConfig.prepareNextTurn`. An `Err` (Pi: a thrown error) rejects
+/// the loop.
+pub type PrepareNextTurnFn = Arc<
+    dyn Fn(PrepareNextTurnContext) -> BoxFuture<AgentResult<Option<AgentLoopTurnUpdate>>>
+        + Send
+        + Sync,
+>;
 
 /// `convertToLlm`. Must not fail; return a safe fallback value instead.
 pub type ConvertToLlmFn = Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<Vec<Message>> + Send + Sync>;

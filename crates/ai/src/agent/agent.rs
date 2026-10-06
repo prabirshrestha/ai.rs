@@ -44,16 +44,21 @@ use crate::utils::transcript::{
     to_tool_declaration,
 };
 
-/// `AgentOptions.prepareNextTurn`: the legacy signal-only callback.
-pub type AgentPrepareNextTurnFn =
-    Arc<dyn Fn(Option<CancellationToken>) -> BoxFuture<Option<AgentLoopTurnUpdate>> + Send + Sync>;
+/// `AgentOptions.prepareNextTurn`: the legacy signal-only callback. An `Err`
+/// (Pi: a thrown error) fails the run.
+pub type AgentPrepareNextTurnFn = Arc<
+    dyn Fn(Option<CancellationToken>) -> BoxFuture<AgentResult<Option<AgentLoopTurnUpdate>>>
+        + Send
+        + Sync,
+>;
 
-/// `AgentOptions.prepareNextTurnWithContext`.
+/// `AgentOptions.prepareNextTurnWithContext`. An `Err` (Pi: a thrown
+/// error) fails the run.
 pub type AgentPrepareNextTurnWithContextFn = Arc<
     dyn Fn(
             PrepareNextTurnContext,
             Option<CancellationToken>,
-        ) -> BoxFuture<Option<AgentLoopTurnUpdate>>
+        ) -> BoxFuture<AgentResult<Option<AgentLoopTurnUpdate>>>
         + Send
         + Sync,
 >;
@@ -488,6 +493,12 @@ impl Agent {
     /// Listener futures are awaited in subscription order and are included
     /// in the current run's settlement. Listeners also receive the active
     /// abort signal for the current run. An `Err` fails the run.
+    ///
+    /// Divergence: Pi keeps listeners in a `Set` it iterates live, so the
+    /// same function is stored once and a listener added or removed during
+    /// dispatch is seen by that dispatch. Rust closures have no identity:
+    /// every call adds a listener, and each event goes to a snapshot of the
+    /// listeners taken when its dispatch starts.
     pub fn subscribe<F, Fut>(&self, listener: F) -> AgentSubscription
     where
         F: Fn(AgentEvent, CancellationToken) -> Fut + Send + Sync + 'static,
@@ -703,45 +714,64 @@ impl Agent {
     /// Continue from the current transcript. The last message must be a user
     /// or tool-result message.
     pub async fn continue_run(&self) -> AgentResult<()> {
-        let signal = self.start_run(CONTINUE_WHILE_PROCESSING)?;
-
-        let last_message = {
-            let state = self.inner.state.lock();
-            if state
-                .messages
-                .iter()
-                .all(|message| matches!(message, Message::System(_)))
-            {
-                None
-            } else {
-                state.messages.last().cloned()
-            }
-        };
-        let Some(last_message) = last_message else {
-            self.finish_run();
-            return Err(AgentError::NoMessagesToContinue);
-        };
-
-        if matches!(last_message, Message::Assistant(_)) {
-            let queued_steering = self.inner.steering_queue.lock().drain();
-            if !queued_steering.is_empty() {
-                return self
-                    .run_prompt_messages(queued_steering, true, signal)
-                    .await;
-            }
-
-            let queued_follow_ups = self.inner.follow_up_queue.lock().drain();
-            if !queued_follow_ups.is_empty() {
-                return self
-                    .run_prompt_messages(queued_follow_ups, false, signal)
-                    .await;
-            }
-
-            self.finish_run();
-            return Err(AgentError::CannotContinueFromAssistant);
+        // Pi validates (and drains the queues) before `runWithLifecycle`
+        // claims the run; holding the `active_run` lock keeps both steps
+        // atomic with respect to a concurrent prompt.
+        enum Continuation {
+            Prompt(Vec<AgentMessage>, bool),
+            Transcript,
         }
+        let (continuation, signal) = {
+            let mut active_run = self.inner.active_run.lock();
+            if active_run.is_some() {
+                return Err(AgentError::AlreadyProcessing(CONTINUE_WHILE_PROCESSING));
+            }
 
-        self.run_continuation(signal).await
+            let last_message = {
+                let state = self.inner.state.lock();
+                if state
+                    .messages
+                    .iter()
+                    .all(|message| matches!(message, Message::System(_)))
+                {
+                    None
+                } else {
+                    state.messages.last().cloned()
+                }
+            };
+            let Some(last_message) = last_message else {
+                return Err(AgentError::NoMessagesToContinue);
+            };
+
+            let continuation = if matches!(last_message, Message::Assistant(_)) {
+                let queued_steering = self.inner.steering_queue.lock().drain();
+                if !queued_steering.is_empty() {
+                    Continuation::Prompt(queued_steering, true)
+                } else {
+                    let queued_follow_ups = self.inner.follow_up_queue.lock().drain();
+                    if queued_follow_ups.is_empty() {
+                        return Err(AgentError::CannotContinueFromAssistant);
+                    }
+                    Continuation::Prompt(queued_follow_ups, false)
+                }
+            } else {
+                Continuation::Transcript
+            };
+
+            let abort_controller = CancellationToken::new();
+            *active_run = Some(ActiveRun {
+                abort_controller: abort_controller.clone(),
+            });
+            (continuation, abort_controller)
+        };
+
+        match continuation {
+            Continuation::Prompt(messages, skip_initial_steering_poll) => {
+                self.run_prompt_messages(messages, skip_initial_steering_poll, signal)
+                    .await
+            }
+            Continuation::Transcript => self.run_continuation(signal).await,
+        }
     }
 
     async fn run_prompt_messages(
@@ -815,17 +845,23 @@ impl Agent {
         options.transport = Some(hooks.transport);
         options.max_retry_delay_ms = hooks.max_retry_delay_ms;
 
+        // Like Pi's wrapper, the hooks are read when it is called, so a hook
+        // replaced mid-run takes effect on the next turn.
         let prepare_next_turn: Option<PrepareNextTurnFn> = if hooks
             .prepare_next_turn_with_context
             .is_some()
             || hooks.prepare_next_turn.is_some()
         {
-            let with_context = hooks.prepare_next_turn_with_context;
-            let legacy = hooks.prepare_next_turn;
+            let inner = Arc::clone(&self.inner);
             let signal = signal.clone();
             Some(Arc::new(move |context| {
-                let with_context = with_context.clone();
-                let legacy = legacy.clone();
+                let (with_context, legacy) = {
+                    let hooks = inner.hooks.lock();
+                    (
+                        hooks.prepare_next_turn_with_context.clone(),
+                        hooks.prepare_next_turn.clone(),
+                    )
+                };
                 let signal = Some(signal.clone());
                 Box::pin(async move {
                     if let Some(with_context) = with_context {
@@ -833,7 +869,7 @@ impl Agent {
                     }
                     match legacy {
                         Some(legacy) => legacy(signal).await,
-                        None => None,
+                        None => Ok(None),
                     }
                 })
             }))

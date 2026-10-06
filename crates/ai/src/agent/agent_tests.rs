@@ -1045,7 +1045,7 @@ async fn keeps_legacy_prepare_next_turn_signal_callback_behavior() {
         },
         prepare_next_turn: Some(Arc::new(move |signal| {
             saw.store(signal.is_some(), Ordering::SeqCst);
-            Box::pin(async { None })
+            Box::pin(async { Ok(None) })
         })),
         ..options_with_stream(stream)
     });
@@ -1071,7 +1071,7 @@ async fn forwards_finish_turn_through_agent_options_with_the_active_abort_signal
         finish_turn: Some(Arc::new(move |turn, signal| {
             saw.store(signal.is_some(), Ordering::SeqCst);
             *context_roles.lock() = roles(&turn.context.messages);
-            Box::pin(async { Some(AgentTurnDecision::End) })
+            Box::pin(async { Ok(Some(AgentTurnDecision::End)) })
         })),
         ..options_with_stream(stream)
     });
@@ -1253,7 +1253,7 @@ async fn keeps_queues_on_a_failed_response_even_when_finish_turn_requests_contin
     let follow_up = create_user_message("follow-up");
     let agent = agent_with(AgentOptions {
         finish_turn: Some(Arc::new(|_, _| {
-            Box::pin(async { Some(AgentTurnDecision::Continue) })
+            Box::pin(async { Ok(Some(AgentTurnDecision::Continue)) })
         })),
         ..options_with_stream(stream_fn(move |_, _, _| {
             finished_stream(AssistantMessage {
@@ -1294,7 +1294,7 @@ async fn keeps_queues_when_finish_turn_ends_the_run() {
     let follow_up = create_user_message("follow-up");
     let agent = agent_with(AgentOptions {
         finish_turn: Some(Arc::new(|_, _| {
-            Box::pin(async { Some(AgentTurnDecision::End) })
+            Box::pin(async { Ok(Some(AgentTurnDecision::End)) })
         })),
         ..options_with_stream(stream_fn(|_, _, _| text_stream("done")))
     });
@@ -1901,4 +1901,204 @@ mod faux_e2e {
         };
         assert!(text_content(&last_message.content).contains('8'));
     }
+}
+
+// Rust-only: the hooks below return `AgentResult` so they can fail the run
+// like a Pi hook that throws (the loop rejects and `handleRunFailure` emits
+// the failure lifecycle).
+async fn assert_hook_failure_fails_the_run(options: AgentOptions, prompt_tools: bool) {
+    let agent = agent_with(AgentOptions {
+        initial_state: AgentInitialState {
+            tools: if prompt_tools {
+                vec![noop_tool()]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        },
+        ..options
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&events);
+    let _subscription = agent.subscribe(move |event, _| {
+        recorded.lock().push(event.event_type());
+        async { Ok(()) }
+    });
+
+    agent.prompt_text("start", Vec::new()).await.unwrap();
+
+    let events = events.lock().clone();
+    assert_eq!(
+        &events[events.len() - 4..],
+        ["message_start", "message_end", "turn_end", "agent_end"]
+    );
+    assert_eq!(events.iter().filter(|e| **e == "agent_end").count(), 1);
+    let Some(Message::Assistant(last_message)) = agent.messages().last().cloned() else {
+        panic!("Expected assistant message");
+    };
+    assert_eq!(last_message.stop_reason, StopReason::Error);
+    assert_eq!(last_message.error_message.as_deref(), Some("hook failed"));
+    assert_eq!(agent.state().error_message.as_deref(), Some("hook failed"));
+    assert!(!agent.state().is_streaming);
+}
+
+#[tokio::test]
+async fn a_failing_finish_turn_fails_the_run_with_lifecycle_events() {
+    assert_hook_failure_fails_the_run(
+        AgentOptions {
+            finish_turn: Some(Arc::new(|_, _| {
+                Box::pin(async { Err(AgentError::message("hook failed")) })
+            })),
+            ..options_with_stream(stream_fn(|_, _, _| text_stream("done")))
+        },
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_failing_prepare_request_fails_the_run_with_lifecycle_events() {
+    assert_hook_failure_fails_the_run(
+        AgentOptions {
+            prepare_request: Some(Arc::new(|_, _| {
+                Box::pin(async { Err(AgentError::message("hook failed")) })
+            })),
+            ..options_with_stream(unused_stream_function())
+        },
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_failing_prepare_next_turn_fails_the_run_with_lifecycle_events() {
+    let (stream, request_count) = tool_use_then_text("done");
+    assert_hook_failure_fails_the_run(
+        AgentOptions {
+            prepare_next_turn: Some(Arc::new(|_| {
+                Box::pin(async { Err(AgentError::message("hook failed")) })
+            })),
+            ..options_with_stream(stream)
+        },
+        true,
+    )
+    .await;
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_failing_prepare_next_turn_with_context_fails_the_run_with_lifecycle_events() {
+    let (stream, request_count) = tool_use_then_text("done");
+    assert_hook_failure_fails_the_run(
+        AgentOptions {
+            prepare_next_turn_with_context: Some(Arc::new(|_, _| {
+                Box::pin(async { Err(AgentError::message("hook failed")) })
+            })),
+            ..options_with_stream(stream)
+        },
+        true,
+    )
+    .await;
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reads_prepare_next_turn_hooks_when_the_next_turn_starts() {
+    let (stream, request_count) = tool_use_then_text("done");
+    let replaced_called = Arc::new(AtomicBool::new(false));
+    let agent = agent_with(AgentOptions {
+        initial_state: AgentInitialState {
+            tools: vec![noop_tool()],
+            ..Default::default()
+        },
+        prepare_next_turn: Some(Arc::new(|_| {
+            Box::pin(async { panic!("replaced hook must not run") })
+        })),
+        ..options_with_stream(stream)
+    });
+    let _subscription = {
+        let agent = agent.clone();
+        let called = Arc::clone(&replaced_called);
+        agent.clone().subscribe(move |event, _| {
+            if matches!(event, AgentEvent::TurnStart) {
+                let called = Arc::clone(&called);
+                agent.set_prepare_next_turn(Some(Arc::new(move |_| {
+                    called.store(true, Ordering::SeqCst);
+                    Box::pin(async { Ok(None) })
+                })));
+            }
+            async { Ok(()) }
+        })
+    };
+
+    agent.prompt_text("start", Vec::new()).await.unwrap();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    assert!(replaced_called.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_subscriber_error_mid_run_fails_the_run_with_lifecycle_events() {
+    let agent = agent_with(options_with_stream(unused_stream_function()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let failed = Arc::new(AtomicBool::new(false));
+    let _subscription = {
+        let recorded = Arc::clone(&events);
+        let failed = Arc::clone(&failed);
+        agent.subscribe(move |event, _| {
+            recorded.lock().push(event.event_type());
+            let fail = matches!(event, AgentEvent::MessageEnd { .. })
+                && !failed.swap(true, Ordering::SeqCst);
+            async move {
+                if fail {
+                    Err(AgentError::message("listener failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+    };
+
+    agent.prompt_text("start", Vec::new()).await.unwrap();
+
+    assert_eq!(
+        events.lock().as_slice(),
+        [
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
+    assert_eq!(roles(&agent.messages()), ["user", "assistant"]);
+    assert_eq!(
+        agent.state().error_message.as_deref(),
+        Some("listener failed")
+    );
+    assert!(!agent.state().is_streaming);
+}
+
+#[tokio::test]
+async fn continue_validation_failures_leave_the_agent_idle() {
+    let agent = agent_with(options_with_stream(unused_stream_function()));
+    assert!(matches!(
+        agent.continue_run().await,
+        Err(AgentError::NoMessagesToContinue)
+    ));
+    assert!(!agent.state().is_streaming);
+    agent.push_message(Message::Assistant(create_assistant_message(
+        vec![text("done")],
+        StopReason::Stop,
+    )));
+    assert!(matches!(
+        agent.continue_run().await,
+        Err(AgentError::CannotContinueFromAssistant)
+    ));
+    tokio::time::timeout(Duration::from_secs(1), agent.wait_for_idle())
+        .await
+        .unwrap();
 }

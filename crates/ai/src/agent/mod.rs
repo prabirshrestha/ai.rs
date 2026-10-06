@@ -26,3 +26,9 @@ pub use error::{AgentError, AgentResult};
 pub use proxy::{ProxyAssistantMessageEvent, ProxyStreamOptions, stream_proxy};
 pub use stream_fn::{get_default_stream_fn, set_default_stream_fn, stream_fn, stream_simple_fn};
 pub use types::*;
+
+/// Pi's agent `ThinkingLevel` (`"off"` plus the pi-ai levels), exported from
+/// `types.ts`. It lives here rather than in [`types`] because the crate root
+/// re-exports [`types`] beside pi-ai's own `ThinkingLevel`, which has no
+/// `off`.
+pub type ThinkingLevel = crate::types::ModelThinkingLevel;

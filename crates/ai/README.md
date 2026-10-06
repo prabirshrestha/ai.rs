@@ -1020,8 +1020,13 @@ differences. Each is also documented on the module or item involved.
   `undefined` fields.
   Anthropic workload identity federation is not supported yet.
 - **Agent.** `before_tool_call` may mutate arguments
-  (`Arc<Mutex<Value>>`), tool updates after a tool settles are dropped, and
-  the proxy pads sparse content indices.
+  (`Arc<Mutex<Value>>`). Loop hooks (`prepare_request`, `finish_turn`,
+  `prepare_next_turn`, `before_tool_call`, `after_tool_call`) receive a
+  clone of the loop's context instead of Pi's live object, so in-place
+  edits do not reach the loop; return an update instead. Tool progress
+  updates go through a channel the loop drains while the tool runs. The
+  proxy pads sparse content indices, reads a missing `usage` as zero usage
+  and reports every abort as "Request aborted by user".
 - **Faux.** Text is chunked by `char`; factories return `Result` and get a
   state snapshot.
 - **chord.** No JS Proxy: change drafts are owned values diffed at prepare
