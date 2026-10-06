@@ -2,9 +2,14 @@
 //! (`openai-responses.ts`, `openai-completions.ts`) create per request. No Pi
 //! counterpart: it reproduces the SDK behaviour those modules rely on.
 //!
-//! - Headers: `Authorization: Bearer <apiKey>` first, then the client's
-//!   default headers in order, where a `None` value removes a header (the SDK
-//!   drops `null` header values), so `Authorization: null` suppresses auth.
+//! - Headers: `OpenAI-Organization` / `OpenAI-Project` from the
+//!   `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` environment variables (read when
+//!   the client is created, trimmed, skipped when empty), then
+//!   `Authorization: Bearer <apiKey>`, then the `OPENAI_CUSTOM_HEADERS` lines
+//!   (`Name: value`), then the client's default headers in order, where a
+//!   `None` value removes a header (the SDK drops `null` header values), so
+//!   `Authorization: null` suppresses auth. This is the SDK's layering for a
+//!   client created without `organization` / `project`, as Pi creates it.
 //! - URL: `baseURL + path`, joining a trailing slash like the SDK.
 //! - One attempt per call (Pi passes `maxRetries: 0`); `retryProviderRequest`
 //!   drives retries.
@@ -45,7 +50,46 @@ pub struct OpenAIClient {
     pub api_key: String,
     pub base_url: String,
     pub default_headers: ProviderHeaders,
+    /// Headers the SDK derives from the process environment.
+    env_headers: SdkEnvHeaders,
     http_client: reqwest::Client,
+}
+
+/// The headers `new OpenAI({...})` derives from the environment when no
+/// `organization`, `project` or custom headers are passed.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SdkEnvHeaders {
+    /// `OpenAI-Organization` and `OpenAI-Project`, sent before auth.
+    tenant: ProviderHeaders,
+    /// `OPENAI_CUSTOM_HEADERS`, merged before the default headers.
+    custom: ProviderHeaders,
+}
+
+impl SdkEnvHeaders {
+    /// `readEnv()` is `process.env[name]?.trim() || undefined`.
+    fn from_env(read: impl Fn(&str) -> Option<String>) -> Self {
+        let read_env = |name: &str| {
+            read(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let mut tenant = ProviderHeaders::new();
+        if let Some(organization) = read_env("OPENAI_ORG_ID") {
+            tenant.insert("OpenAI-Organization", organization);
+        }
+        if let Some(project) = read_env("OPENAI_PROJECT_ID") {
+            tenant.insert("OpenAI-Project", project);
+        }
+        let mut custom = ProviderHeaders::new();
+        if let Some(lines) = read_env("OPENAI_CUSTOM_HEADERS") {
+            for line in lines.split('\n') {
+                if let Some((name, value)) = line.split_once(':') {
+                    custom.insert(name.trim(), value.trim().to_string());
+                }
+            }
+        }
+        Self { tenant, custom }
+    }
 }
 
 impl OpenAIClient {
@@ -63,6 +107,7 @@ impl OpenAIClient {
                 base_url.to_string()
             },
             default_headers,
+            env_headers: SdkEnvHeaders::from_env(|name| std::env::var(name).ok()),
             http_client: http_client(http),
         }
     }
@@ -79,11 +124,13 @@ impl OpenAIClient {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        apply_provider_headers(&mut headers, &self.env_headers.tenant)?;
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.api_key))
                 .map_err(|error| Error::InvalidHeaderValue("authorization".to_string(), error))?,
         );
+        apply_provider_headers(&mut headers, &self.env_headers.custom)?;
         apply_provider_headers(&mut headers, &self.default_headers)?;
         Ok(headers)
     }
@@ -613,6 +660,47 @@ mod tests {
                 .to_string(),
             "Error reading response: malformed server-sent event JSON."
         );
+    }
+
+    #[test]
+    fn sends_tenant_and_custom_headers_from_the_environment_like_the_sdk() {
+        let env = |name: &str| {
+            match name {
+                "OPENAI_ORG_ID" => Some(" org-1 "),
+                "OPENAI_PROJECT_ID" => Some("   "),
+                "OPENAI_CUSTOM_HEADERS" => Some("X-One: 1\nno colon\nAuthorization : Custom x"),
+                _ => None,
+            }
+            .map(str::to_string)
+        };
+        let env_headers = SdkEnvHeaders::from_env(env);
+        assert_eq!(
+            env_headers.tenant.iter().collect::<Vec<_>>(),
+            [(
+                &"OpenAI-Organization".to_string(),
+                &Some("org-1".to_string())
+            )]
+        );
+
+        let mut defaults = ProviderHeaders::new();
+        defaults.insert("openai-organization", None::<String>);
+        defaults.insert("X-One", Some("default".to_string()));
+        let mut client = OpenAIClient::new("key", "", None, defaults);
+        client.env_headers = env_headers.clone();
+        let headers = client.build_headers().unwrap();
+        // Default headers override or remove the env-derived ones.
+        assert!(headers.get("openai-organization").is_none());
+        assert!(headers.get("openai-project").is_none());
+        assert_eq!(headers.get("x-one").unwrap(), "default");
+        // Custom headers come after auth, so they can replace it.
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Custom x");
+
+        let mut client = OpenAIClient::new("key", "", None, ProviderHeaders::new());
+        client.env_headers = env_headers;
+        let headers = client.build_headers().unwrap();
+        assert_eq!(headers.get("openai-organization").unwrap(), "org-1");
+
+        assert_eq!(SdkEnvHeaders::from_env(|_| None), SdkEnvHeaders::default());
     }
 
     #[tokio::test]
