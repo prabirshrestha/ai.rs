@@ -60,7 +60,7 @@ use crate::utils::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
-use crate::utils::text::{get_system_message_text, render_system_message_update};
+use crate::utils::text::{get_system_message_text, js_trim, render_system_message_update};
 use crate::utils::time::now_millis;
 use crate::utils::transcript::{get_current_tools, get_initial_system_message, resolve_transcript};
 use crate::{Error, Result};
@@ -1866,7 +1866,7 @@ fn convert_messages(
             }
             Message::User(message) => match &message.content {
                 UserMessageContent::Text(content) => {
-                    if !content.trim().is_empty() {
+                    if !js_trim(content).is_empty() {
                         params.push(json!({
                             "role": "user",
                             "content": sanitize_surrogates(content),
@@ -1878,7 +1878,7 @@ fn convert_messages(
                         .iter()
                         .filter_map(|item| {
                             match item {
-                            UserContent::Text(text) => (!text.text.trim().is_empty()).then(|| {
+                            UserContent::Text(text) => (!js_trim(&text.text).is_empty()).then(|| {
                                 json!({ "type": "text", "text": sanitize_surrogates(&text.text) })
                             }),
                             UserContent::Image(image) => {
@@ -1899,7 +1899,7 @@ fn convert_messages(
                 for block in &message.content {
                     match block {
                         AssistantContent::Text(text) => {
-                            if text.text.trim().is_empty() {
+                            if js_trim(&text.text).is_empty() {
                                 continue;
                             }
                             blocks.push(
@@ -1918,8 +1918,10 @@ fn convert_messages(
                             let thinking_signature = thinking
                                 .thinking_signature
                                 .as_deref()
-                                .filter(|signature| !signature.trim().is_empty());
-                            if thinking.thinking.trim().is_empty() && thinking_signature.is_none() {
+                                .filter(|signature| !js_trim(signature).is_empty());
+                            if js_trim(&thinking.thinking).is_empty()
+                                && thinking_signature.is_none()
+                            {
                                 continue;
                             }
                             // If thinking signature is missing/empty (e.g., from aborted stream),

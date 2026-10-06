@@ -12,6 +12,7 @@ use crate::types::{
     AssistantContent, AssistantMessage, Message, Model, ModelInput, StopReason, TextContent,
     ToolCall, ToolResultContent, ToolResultMessage, UserContent, UserMessageContent,
 };
+use crate::utils::text::js_trim;
 use crate::utils::time::now_millis;
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
@@ -134,7 +135,7 @@ pub fn transform_messages(
                                 continue;
                             }
                             // Skip empty thinking blocks, convert others to plain text
-                            if thinking.thinking.trim().is_empty() {
+                            if js_trim(&thinking.thinking).is_empty() {
                                 continue;
                             }
                             if is_same_model {

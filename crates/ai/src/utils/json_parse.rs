@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::Result;
+use crate::utils::text::js_trim;
 
 const VALID_JSON_ESCAPES: &[char] = &['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'];
 
@@ -112,7 +113,7 @@ pub fn parse_json_with_repair<T: DeserializeOwned>(json: &str) -> Result<T> {
 /// Attempts to parse potentially incomplete JSON during streaming. Always
 /// returns a value, `{}` when parsing fails.
 pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
-    let Some(partial_json) = partial_json.filter(|json| !json.trim().is_empty()) else {
+    let Some(partial_json) = partial_json.filter(|json| !js_trim(json).is_empty()) else {
         return Value::Object(Map::new());
     };
 
@@ -145,10 +146,10 @@ type PartialResult<T> = std::result::Result<T, PartialJsonError>;
 
 /// Port of `partial-json`'s `parse(jsonString, Allow.ALL)`.
 fn partial_parse(json_string: &str) -> PartialResult<Value> {
-    if json_string.trim().is_empty() {
+    if js_trim(json_string).is_empty() {
         return Err(PartialJsonError);
     }
-    let chars: Vec<char> = json_string.trim().chars().collect();
+    let chars: Vec<char> = js_trim(json_string).chars().collect();
     PartialJsonParser {
         chars: &chars,
         index: 0,

@@ -50,7 +50,7 @@ use crate::utils::json_parse::parse_streaming_json;
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_retry::{ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
-use crate::utils::text::{get_system_message_text, render_system_message_update};
+use crate::utils::text::{get_system_message_text, js_trim, render_system_message_update};
 use crate::utils::time::now_millis;
 use crate::utils::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools};
 use crate::{Error, Result};
@@ -1747,7 +1747,7 @@ pub fn convert_messages(
                     .content
                     .iter()
                     .filter_map(|block| match block {
-                        AssistantContent::Text(text) if !text.text.trim().is_empty() => {
+                        AssistantContent::Text(text) if !js_trim(&text.text).is_empty() => {
                             Some(json!({
                                 "type": "text",
                                 "text": sanitize_surrogates(&text.text),
@@ -1792,7 +1792,7 @@ pub fn convert_messages(
 
                 let non_empty_thinking_blocks: Vec<&&ThinkingContent> = thinking_blocks
                     .iter()
-                    .filter(|block| !block.thinking.trim().is_empty())
+                    .filter(|block| !js_trim(&block.thinking).is_empty())
                     .collect();
                 if !non_empty_thinking_blocks.is_empty() {
                     if compat.requires_thinking_as_text {

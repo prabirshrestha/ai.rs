@@ -47,13 +47,12 @@ pub fn provider_headers_to_record(
     (!merged.is_empty()).then(|| merged.into_values().collect())
 }
 
-#[allow(dead_code)] // used by the provider modules from commit 2 on
 pub(crate) fn has_non_empty_header(headers: &ProviderHeaders, expected: &str) -> bool {
     headers.iter().any(|(name, value)| {
         name.eq_ignore_ascii_case(expected)
             && value
                 .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_some_and(|value| !crate::utils::text::js_trim(value).is_empty())
     })
 }
 

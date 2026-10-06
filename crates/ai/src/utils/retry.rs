@@ -119,6 +119,8 @@ pub struct RetryPolicy {
 pub const DEFAULT_MAX_AGENT_RETRY_DELAY_MS: u64 = 60_000;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
+/// `retryDelayMs()`. Mechanical adaptation: Pi's options object becomes
+/// positional arguments; the behaviour is the same.
 pub fn retry_delay_ms(base_delay_ms: u64, max_agent_delay_ms: Option<u64>, attempt: u32) -> u64 {
     let exponent = attempt.saturating_sub(1);
     let delay = 2u64

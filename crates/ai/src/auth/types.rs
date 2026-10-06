@@ -197,11 +197,14 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<Option<Credential>>;
 
     /// List stored credential metadata without resolving or exposing secrets.
+    /// Implementations must not execute configured API-key commands while
+    /// listing.
     async fn list(&self, options: AuthOperationOptions) -> Result<Vec<CredentialInfo>>;
 
     /// Serialized write — the only write path. `modifier` sees the current
     /// credential; return the new credential, or `None` to leave the entry
-    /// unchanged. Mutual exclusion per provider id. Resolves with the
+    /// unchanged. Mutual exclusion per provider id, cross-process too where
+    /// the backing store supports it (e.g. a file lock). Resolves with the
     /// post-write credential. Errors from `modifier` propagate.
     async fn modify(
         &self,

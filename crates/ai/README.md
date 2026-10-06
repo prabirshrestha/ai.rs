@@ -1003,7 +1003,8 @@ differences. Each is also documented on the module or item involved.
   goes through `known_models_from_values`.
 - **Runtime.** Abort signals are `CancellationToken`s, producers run on
   `tokio::spawn`, and abandoned operations are dropped. A synchronous throw
-  becomes `Err` or an error stream. `AgentEventStream::result()` returns `Err`
+  becomes `Err` or an error stream. The `partial` of an
+  `AssistantMessageEvent` is a snapshot, not a live reference. `AgentEventStream::result()` returns `Err`
   instead of hanging, and a stream that ends without a terminal event gives
   `AgentError::StreamClosed`. The default stream function is resolved at run
   time; `stream_simple_fn(models)` wraps `Models::stream_simple` as a
@@ -1041,7 +1042,9 @@ differences. Each is also documented on the module or item involved.
   `durable-testing`) runs a tool outside a Harness for tests.
 - **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot and
   OpenRouter images; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses;
-  classifiers; telemetry contexts.
+  classifiers; telemetry contexts; `session-resources`; the TypeBox
+  `StringEnum` helper (tool parameters are plain JSON Schema, so an enum is
+  `{"type": "string", "enum": [...]}`).
 - **ai.rs extras.** `embeddings`, the `openai-images` API, the provider
   handles, `github_copilot::get_oauth_api_key`, and `AgentToolBuilder` /
   `AgentOptions::builder` conveniences. `Debug` output of credentials,

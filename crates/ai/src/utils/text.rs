@@ -140,11 +140,26 @@ pub fn render_system_message_update(message: &SystemMessage) -> String {
     parts.join("\n\n")
 }
 
+/// JavaScript `String.prototype.trim()`: strips JS WhiteSpace and
+/// LineTerminator characters. Unlike `str::trim`, this includes U+FEFF (BOM)
+/// and excludes U+0085 (NEL), so emptiness checks ported from Pi's `.trim()`
+/// treat those characters the same way.
+pub fn js_trim(text: &str) -> &str {
+    text.trim_matches(|ch: char| (ch.is_whitespace() && ch != '\u{85}') || ch == '\u{FEFF}')
+}
+
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
 
     use super::*;
+
+    #[test]
+    fn js_trim_strips_the_bom_but_not_nel() {
+        assert_eq!(js_trim("\u{FEFF} \t text \u{2028}\u{FEFF}"), "text");
+        assert!(js_trim("\u{FEFF}\u{FEFF}").is_empty());
+        assert_eq!(js_trim("\u{85}x\u{85}"), "\u{85}x\u{85}");
+    }
     use crate::types::{ImageContent, TextContent, ThinkingContent, ToolCall};
 
     fn content() -> Vec<AssistantContent> {

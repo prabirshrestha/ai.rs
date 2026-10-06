@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::types::{
     ConstrainedSampling, ConstrainedSamplingConfig, ConstrainedSamplingStrict, Tool,
 };
+use crate::utils::text::js_trim;
 use crate::{Error, Result};
 
 /// `UnsupportedStrictJsonSchemaError`: the schema cannot be converted to
@@ -404,11 +405,11 @@ pub fn resolve_grammar_constrained_sampling(
     let lark_definition = variants
         .openai_lark
         .as_deref()
-        .filter(|definition| !definition.trim().is_empty());
+        .filter(|definition| !js_trim(definition).is_empty());
     let regex_definition = variants
         .openai_regex
         .as_deref()
-        .filter(|definition| !definition.trim().is_empty());
+        .filter(|definition| !js_trim(definition).is_empty());
     let (format, definition) = match (lark_definition, regex_definition) {
         (Some(definition), _) => (GrammarSyntax::Lark, definition),
         (None, Some(definition)) => (GrammarSyntax::Regex, definition),
