@@ -710,7 +710,8 @@ mod tests {
     use super::*;
     use crate::api::openai_client::test_support::{
         MockResponse, MockServer, capture_payload, collect, collect_aborting, context,
-        copilot_model, gpt5_mini, model, openai_model, serve_stalled_sse, stream_event_hook,
+        copilot_model, gpt5_mini, model, names, openai_model, serve_stalled_sse, stream_event_hook,
+        tool_addition_context, tool_change_context, tool_change_model,
     };
     use crate::types::{AssistantMessageEvent, ModelCompat};
 
@@ -1166,6 +1167,104 @@ mod tests {
             result.error_message.as_deref(),
             Some("OpenAI Responses stream ended before a terminal response event")
         );
+    }
+
+    // transcript-tool-changes.test.ts (OpenAI Responses)
+
+    async fn tool_change_payload(compat: Value, id: &str, ctx: TranscriptContext) -> Value {
+        let model = tool_change_model(id, "openai-responses", "openai", compat);
+        capture_payload(move |hook| {
+            let mut options = SimpleStreamOptions::default();
+            options.api_key = Some("test-key".to_string());
+            options.on_payload = Some(hook);
+            stream_simple_openai_responses(model, ctx, options).unwrap()
+        })
+        .await
+    }
+
+    fn input_items<'a>(payload: &'a Value, kind: &str) -> Vec<&'a Value> {
+        payload["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == kind)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn anchors_openai_additions_at_their_developer_message() {
+        let payload = tool_change_payload(
+            json!({ "supportsMidConvoSystemMessages": true, "supportsAdditionalTools": true }),
+            "gpt-5.4",
+            tool_addition_context(),
+        )
+        .await;
+        assert_eq!(names(&payload["tools"], "/name"), ["base_tool"]);
+        let additional = input_items(&payload, "additional_tools");
+        assert_eq!(names(&additional[0]["tools"], "/name"), ["late_tool"]);
+        let developer: Vec<_> = payload["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["role"] == "developer" && item.get("type").is_none())
+            .map(|item| item["content"].clone())
+            .collect();
+        assert_eq!(developer, [json!("base prompt"), json!("updated guidance")]);
+    }
+
+    #[tokio::test]
+    async fn maps_system_message_additions_into_synthetic_tool_search() {
+        let payload = tool_change_payload(
+            json!({ "supportsMidConvoSystemMessages": true, "supportsToolSearch": true }),
+            "gpt-5.4",
+            tool_addition_context(),
+        )
+        .await;
+        assert_eq!(names(&payload["tools"], "/name"), ["base_tool"]);
+        assert!(!input_items(&payload, "tool_search_call").is_empty());
+        let output = input_items(&payload, "tool_search_output");
+        assert_eq!(names(&output[0]["tools"], "/name"), ["late_tool"]);
+    }
+
+    #[tokio::test]
+    async fn folds_openai_updates_into_the_leading_developer_message_without_native_support() {
+        let payload = tool_change_payload(
+            json!({ "supportsAdditionalTools": true }),
+            "gpt-4.1",
+            tool_change_context(),
+        )
+        .await;
+        assert_eq!(names(&payload["tools"], "/name"), ["late_tool"]);
+        let kinds: Vec<_> = payload["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.get("type").unwrap_or(&item["role"]).clone())
+            .collect();
+        assert_eq!(kinds, [json!("developer"), json!("user")]);
+        assert_eq!(
+            payload["input"][0]["content"],
+            "base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>"
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_complete_current_tool_state_when_removals_are_unsupported() {
+        let payload = tool_change_payload(
+            json!({ "supportsMidConvoSystemMessages": true, "supportsAdditionalTools": true }),
+            "gpt-5.4",
+            tool_change_context(),
+        )
+        .await;
+        assert_eq!(names(&payload["tools"], "/name"), ["late_tool"]);
+        assert!(input_items(&payload, "additional_tools").is_empty());
+        let developer = payload["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["role"] == "developer")
+            .count();
+        assert_eq!(developer, 2);
     }
 
     #[tokio::test]

@@ -550,8 +550,9 @@ impl AssistantMessageFrameEncoder {
     }
 }
 
-/// `string.slice(start)` in UTF-16 code units (a split surrogate pair keeps
-/// the whole character).
+/// `string.slice(start)` in UTF-16 code units. A character whose surrogate
+/// pair straddles `start` is skipped (JS would keep its lone low surrogate):
+/// the result starts at the first character boundary at or after `start`.
 fn js_slice_from(text: &str, start: usize) -> String {
     let mut units = 0;
     for (index, ch) in text.char_indices() {
@@ -1055,6 +1056,50 @@ mod tests {
                 )
             })
         );
+    }
+
+    #[test]
+    fn reconciles_queued_text_events_against_one_advanced_live_partial_without_duplicate_content() {
+        // Pi queues events that share one live partial, which has advanced to
+        // the final text by the time they are encoded. Rust partials are
+        // snapshots, so every event carries that advanced snapshot.
+        let mut advanced = seed();
+        advanced.content.push(text("Hello world"));
+        let mut events = vec![
+            AssistantMessageEvent::Start {
+                partial: advanced.clone(),
+            },
+            AssistantMessageEvent::TextStart {
+                content_index: 0,
+                partial: advanced.clone(),
+            },
+        ];
+        for delta in ["Hel", "lo", " ", "world"] {
+            events.push(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: delta.to_string(),
+                partial: advanced.clone(),
+            });
+        }
+
+        let mut encoder = AssistantMessageFrameEncoder::new();
+        let frames: Vec<_> = events
+            .iter()
+            .filter_map(|event| encoder.encode(event).unwrap())
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .map(AssistantMessageFrame::frame_type)
+                .collect::<Vec<_>>(),
+            ["start", "text_start"]
+        );
+        let AssistantMessageFrame::Start { partial } = &frames[0] else {
+            panic!("expected a start frame");
+        };
+        assert!(partial.content.is_empty());
+        assert_eq!(partial.stop_reason, StopReason::Pending);
+        assert_eq!(reduce(&frames).unwrap().content, vec![text("Hello world")]);
     }
 
     #[test]

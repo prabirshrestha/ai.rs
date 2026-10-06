@@ -2359,7 +2359,8 @@ mod tests {
     use super::*;
     use crate::api::openai_client::test_support::{
         CapturedRequest, MockResponse, MockServer, capture_payload, collect, collect_aborting,
-        context, model, openai_model, serve_stalled_sse, stream_event_hook,
+        context, model, names, openai_model, serve_stalled_sse, stream_event_hook,
+        tool_addition_context, tool_change_context, tool_change_model,
     };
     use crate::types::ToolChoice;
 
@@ -2512,6 +2513,96 @@ mod tests {
         let server = MockServer::start(vec![MockResponse::sse(chunks)]).await;
         model.base_url = server.url.clone();
         collect(stream_simple_openai_completions(model, ctx, options).unwrap()).await
+    }
+
+    // transcript-tool-changes.test.ts (Kimi and OpenAI-compatible)
+
+    async fn tool_change_payload(model: Model, ctx: TranscriptContext) -> Value {
+        simple_payload(&model, ctx, simple(None)).await
+    }
+
+    fn system_contents(payload: &Value) -> Vec<Value> {
+        payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message.get("content").cloned().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn anchors_kimi_additions_in_tool_bearing_system_messages() {
+        let model = tool_change_model(
+            "kimi-k3",
+            "openai-completions",
+            "moonshotai",
+            json!({ "supportsMidConvoSystemMessages": true, "supportsMidConvoToolAdditions": true }),
+        );
+        let payload = tool_change_payload(model, tool_addition_context()).await;
+        assert_eq!(names(&payload["tools"], "/function/name"), ["base_tool"]);
+        let with_tools = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message.get("tools").is_some())
+            .unwrap();
+        assert_eq!(names(&with_tools["tools"], "/function/name"), ["late_tool"]);
+        assert!(with_tools.get("content").is_none());
+        assert_eq!(
+            system_contents(&payload),
+            [json!("base prompt"), Value::Null, json!("updated guidance")]
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_kimi_k2_system_text_inline_without_dynamic_tool_messages() {
+        let model = tool_change_model(
+            "kimi-k2.7-code",
+            "openai-completions",
+            "moonshotai",
+            json!({ "supportsMidConvoSystemMessages": true }),
+        );
+        let payload = tool_change_payload(model, tool_addition_context()).await;
+        assert_eq!(
+            names(&payload["tools"], "/function/name"),
+            ["base_tool", "late_tool"]
+        );
+        assert!(
+            payload["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message.get("tools").is_none())
+        );
+        assert_eq!(
+            system_contents(&payload),
+            [json!("base prompt"), json!("updated guidance")]
+        );
+    }
+
+    #[tokio::test]
+    async fn folds_openai_compatible_updates_into_the_system_prompt_without_native_support() {
+        let mut model = tool_change_model(
+            "custom-model",
+            "openai-completions",
+            "custom-provider",
+            Value::Null,
+        );
+        model.reasoning = false;
+        let payload = tool_change_payload(model, tool_change_context()).await;
+        assert_eq!(names(&payload["tools"], "/function/name"), ["late_tool"]);
+        let roles: Vec<_> = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].clone())
+            .collect();
+        assert_eq!(roles, [json!("system"), json!("user")]);
+        assert_eq!(
+            payload["messages"][0]["content"],
+            "base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>"
+        );
     }
 
     #[tokio::test]

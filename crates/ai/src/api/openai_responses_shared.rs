@@ -1330,6 +1330,56 @@ mod tests {
         (result, output, events)
     }
 
+    // assistant-message-frame.test.ts: "round-trips OpenAI Responses content
+    // supplied only by authoritative end events" (here because it drives
+    // processResponsesStream).
+    #[tokio::test]
+    async fn frames_round_trip_responses_content_supplied_only_by_authoritative_end_events() {
+        use crate::utils::assistant_message_frame::{
+            AssistantMessageFrameEncoder, reduce_assistant_message_frames,
+        };
+
+        let model = gpt5_mini("openai-responses");
+        let (result, output, events) = process(
+            vec![
+                json!({ "type": "response.output_item.added", "sequence_number": 0, "output_index": 0,
+                    "item": { "type": "message", "id": "msg", "role": "assistant", "status": "in_progress", "content": [] } }),
+                json!({ "type": "response.output_item.done", "sequence_number": 1, "output_index": 0,
+                    "item": { "type": "message", "id": "msg", "role": "assistant", "status": "completed",
+                        "content": [{ "type": "output_text", "text": "final text", "annotations": [] }] } }),
+                json!({ "type": "response.output_item.added", "sequence_number": 2, "output_index": 1,
+                    "item": { "type": "function_call", "id": "fc", "call_id": "call", "name": "lookup", "arguments": "" } }),
+                json!({ "type": "response.output_item.done", "sequence_number": 3, "output_index": 1,
+                    "item": { "type": "function_call", "id": "fc", "call_id": "call", "name": "lookup",
+                        "arguments": "{\"query\":\"pi\"}" } }),
+                json!({ "type": "response.completed", "sequence_number": 4,
+                    "response": { "id": "response", "status": "completed", "output": [] } }),
+            ],
+            &model,
+            None,
+        )
+        .await;
+        result.unwrap();
+
+        let mut encoder = AssistantMessageFrameEncoder::new();
+        let mut frames = vec![
+            encoder
+                .encode(&AssistantMessageEvent::Start {
+                    partial: pending_output(&model),
+                })
+                .unwrap()
+                .unwrap(),
+        ];
+        for event in &events {
+            if let Some(frame) = encoder.encode(event).unwrap() {
+                frames.push(frame);
+            }
+        }
+        let reduced = reduce_assistant_message_frames(&frames).unwrap().unwrap();
+        assert!(!output.content.is_empty());
+        assert_eq!(reduced.content, output.content);
+    }
+
     fn grammar_options(name: &str, property: &str) -> OpenAIResponsesStreamOptions {
         OpenAIResponsesStreamOptions {
             grammar_tool_input_properties: Some([(name.to_string(), property.to_string())].into()),

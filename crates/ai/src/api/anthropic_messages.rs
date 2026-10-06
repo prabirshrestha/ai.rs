@@ -4598,7 +4598,124 @@ mod tests {
         assert_eq!(payload["messages"][2]["content"][0]["type"], "tool_result");
     }
 
+    // anthropic-adaptive-thinking-models.test.ts (in-scope providers only)
+
+    #[test]
+    fn marks_built_in_anthropic_messages_models_that_use_adaptive_thinking() {
+        let mut flagged: Vec<String> = crate::providers::all::get_builtin_providers()
+            .into_iter()
+            .flat_map(crate::providers::all::get_builtin_models)
+            .filter(|model| model.api == "anthropic-messages")
+            .filter(|model| {
+                model
+                    .compat
+                    .as_ref()
+                    .and_then(|compat| compat.force_adaptive_thinking)
+                    == Some(true)
+            })
+            .map(|model| format!("{}/{}", model.provider, model.id))
+            .collect();
+        flagged.sort();
+        for expected in [
+            "anthropic/claude-fable-5",
+            "anthropic/claude-opus-4-8",
+            "anthropic/claude-opus-5",
+            "anthropic/claude-sonnet-5",
+        ] {
+            assert!(
+                flagged.iter().any(|id| id == expected),
+                "{expected} in {flagged:?}"
+            );
+        }
+        // /(opus[-.](4[-.][678]|5)|sonnet[-.]4[-.]6|sonnet[-.]5|fable[-.]5|kimi-coding\/)/
+        let mut patterns = Vec::new();
+        for a in ['-', '.'] {
+            patterns.push(format!("opus{a}5"));
+            patterns.push(format!("sonnet{a}5"));
+            patterns.push(format!("fable{a}5"));
+            for b in ['-', '.'] {
+                for minor in ['6', '7', '8'] {
+                    patterns.push(format!("opus{a}4{b}{minor}"));
+                }
+                patterns.push(format!("sonnet{a}4{b}6"));
+            }
+        }
+        patterns.push("kimi-coding/".to_string());
+        for id in &flagged {
+            assert!(
+                patterns.iter().any(|pattern| id.contains(pattern.as_str())),
+                "{id} is flagged but not an adaptive-thinking model"
+            );
+        }
+    }
+
     // github-copilot-anthropic.test.ts
+
+    #[test]
+    fn applies_copilot_specific_adaptive_thinking_effort_overrides() {
+        use crate::models::get_supported_thinking_levels;
+        use crate::types::ModelThinkingLevel as Level;
+
+        let map_contains = |model: &Model, entries: &[(Level, &str)]| {
+            let map = model
+                .thinking_level_map
+                .as_ref()
+                .expect("thinking level map");
+            for (level, effort) in entries {
+                assert_eq!(
+                    map.get(level).cloned().flatten().as_deref(),
+                    Some(*effort),
+                    "{} {level:?}",
+                    model.id
+                );
+            }
+        };
+
+        let opus47 = builtin("github-copilot", "claude-opus-4.7");
+        map_contains(
+            &opus47,
+            &[
+                (Level::Minimal, "low"),
+                (Level::Xhigh, "xhigh"),
+                (Level::Max, "max"),
+            ],
+        );
+        assert!(get_supported_thinking_levels(&opus47).contains(&Level::Xhigh));
+        assert!(get_supported_thinking_levels(&opus47).contains(&Level::Max));
+
+        let opus5 = builtin("github-copilot", "claude-opus-5");
+        assert_eq!(opus5.api, "anthropic-messages");
+        assert_eq!(opus5.context_window, 1_000_000);
+        map_contains(
+            &opus5,
+            &[
+                (Level::Minimal, "low"),
+                (Level::Xhigh, "xhigh"),
+                (Level::Max, "max"),
+            ],
+        );
+        assert!(get_supported_thinking_levels(&opus5).contains(&Level::Xhigh));
+        assert!(get_supported_thinking_levels(&opus5).contains(&Level::Max));
+
+        let opus55 = builtin("github-copilot", "claude-opus-5.5");
+        assert_eq!(opus55.api, "anthropic-messages");
+        assert_eq!(opus55.context_window, 1_000_000);
+        assert_eq!(
+            get_supported_thinking_levels(&opus55),
+            [
+                Level::Low,
+                Level::Medium,
+                Level::High,
+                Level::Xhigh,
+                Level::Max
+            ]
+        );
+
+        let sonnet46 = builtin("github-copilot", "claude-sonnet-4.6");
+        map_contains(&sonnet46, &[(Level::Minimal, "low"), (Level::Max, "max")]);
+        assert!(get_supported_thinking_levels(&sonnet46).contains(&Level::Max));
+        assert!(!get_supported_thinking_levels(&sonnet46).contains(&Level::Xhigh));
+    }
 
     #[tokio::test]
     async fn uses_bearer_auth_copilot_headers_and_a_valid_messages_payload() {

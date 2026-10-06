@@ -388,6 +388,85 @@ pub(crate) mod test_support {
         payload.unwrap_or_else(|| panic!("no payload captured: {:?}", result.error_message))
     }
 
+    // transcript-tool-changes.test.ts fixtures (shared by the OpenAI and Kimi
+    // halves; the Anthropic half lives in `anthropic_messages`).
+
+    fn empty_tool(name: &str) -> Value {
+        json!({ "name": name, "description": format!("{name} tool"), "parameters": { "type": "object", "properties": {} } })
+    }
+
+    /// Pi's `context`: section updates, a removal and an addition.
+    pub fn tool_change_context() -> TranscriptContext {
+        context(json!({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "base prompt",
+                    "sections": { "rules": "<rules>\nold rules\n</rules>", "docs": "<docs>\nread docs\n</docs>" },
+                    "toolsAdded": [empty_tool("base_tool")],
+                    "timestamp": 0,
+                },
+                { "role": "user", "content": "before", "timestamp": 1 },
+                {
+                    "role": "system",
+                    "content": "updated guidance",
+                    "sections": { "rules": "<rules>\nnew rules\n</rules>", "docs": null },
+                    "toolsRemoved": [{ "name": "base_tool" }],
+                    "toolsAdded": [empty_tool("late_tool")],
+                    "timestamp": 2,
+                },
+            ],
+        }))
+    }
+
+    /// Pi's `additionContext`: one late addition, no removals.
+    pub fn tool_addition_context() -> TranscriptContext {
+        context(json!({
+            "messages": [
+                { "role": "system", "content": "base prompt", "toolsAdded": [empty_tool("base_tool")], "timestamp": 0 },
+                { "role": "user", "content": "before", "timestamp": 1 },
+                { "role": "system", "content": "updated guidance", "toolsAdded": [empty_tool("late_tool")], "timestamp": 2 },
+            ],
+        }))
+    }
+
+    /// `{ ...modelBase, id, name, api, provider, compat }`.
+    pub fn tool_change_model(id: &str, api: &str, provider: &str, compat: Value) -> Model {
+        let mut value = json!({
+            "id": id,
+            "name": id,
+            "api": api,
+            "provider": provider,
+            "baseUrl": "http://127.0.0.1:9",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 100000,
+            "maxTokens": 1000,
+        });
+        if !compat.is_null() {
+            value["compat"] = compat;
+        }
+        model(value)
+    }
+
+    /// The names of a payload list's entries, read at `pointer` in each.
+    pub fn names(list: &Value, pointer: &str) -> Vec<String> {
+        list.as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.pointer(pointer)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Drain a stream, cancelling `signal` once an event of type `abort_at`
     /// (e.g. `"text_delta"`) arrives.
     pub async fn collect_aborting(
