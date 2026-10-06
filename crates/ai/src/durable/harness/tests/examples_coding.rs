@@ -36,8 +36,7 @@ use crate::durable::storage::memory::MemoryStorage;
 use crate::durable::storage::test_support::TempDir;
 use crate::durable::tools::{BashToolOptions, CODING_TOOLS, create_bash_tool, create_read_tool};
 use crate::durable::types::{
-    LatestConversation, LatestFork, RewindableConversation, RewindableFork, Storage,
-    SubmissionStatus,
+    LatestConversation, LatestFork, RewindableConversation, RewindableFork, SubmissionStatus,
 };
 use crate::models::{Models, create_models};
 use crate::providers::faux::{
@@ -1062,7 +1061,7 @@ async fn example_31_reload_and_restart() {
     let (_dir, directory) = temp_dir("pi-durable-reload-");
     let path = format!("{directory}/session.sqlite");
     let open = async |registry: &Registry| {
-        let storage: Arc<dyn Storage> = Arc::new(
+        let storage: Arc<dyn crate::durable::types::Storage> = Arc::new(
             open_local_sqlite_storage(&path, Default::default())
                 .await
                 .unwrap(),
