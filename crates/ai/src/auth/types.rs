@@ -64,9 +64,39 @@ pub struct OAuthCredential {
     pub refresh: String,
     pub access: String,
     /// Expiry as Unix milliseconds.
+    ///
+    /// Pi's `expires` is a JS `number`. Any JSON number is accepted, so
+    /// entries written by Pi (or by OAuth flows computing
+    /// `Date.now() + expires_in * 1000` from fractional values, or written as
+    /// `1.7e12`) load: fractions are truncated and negative values become 0,
+    /// which keeps every expiry comparison unchanged. It serializes as an
+    /// integer, which Pi reads as the same number.
+    #[serde(deserialize_with = "deserialize_expires")]
     pub expires: u64,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+fn deserialize_expires<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Number(number) => Ok(number
+            .as_u64()
+            .unwrap_or_else(|| js_millis_to_u64(number.as_f64().unwrap_or(0.0)))),
+        other => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Other(&other.to_string()),
+            &"a number",
+        )),
+    }
+}
+
+/// A JS millisecond `number` as `u64`: fractions are truncated, negative
+/// values (and NaN) become 0, and values past `u64::MAX` saturate.
+pub(crate) fn js_millis_to_u64(value: f64) -> u64 {
+    // `as` saturates and maps NaN to 0.
+    value as u64
 }
 
 /// OAuth token data returned by extension compatibility flows.
@@ -503,5 +533,36 @@ mod tests {
             json!(["m"])
         );
         assert!(!format!("{credential:?}").contains("\"a\""));
+    }
+
+    #[test]
+    fn oauth_expires_accepts_any_json_number_and_serializes_as_an_integer() {
+        let expires = |value: Value| {
+            let credential: Credential = serde_json::from_value(json!({
+                "type": "oauth", "access": "a", "refresh": "r", "expires": value,
+            }))
+            .unwrap();
+            let Credential::OAuth(credential) = credential else {
+                panic!("expected oauth");
+            };
+            credential.expires
+        };
+        assert_eq!(expires(json!(1_730_000_000_000u64)), 1_730_000_000_000);
+        assert_eq!(expires(json!(1_730_000_000_000.75)), 1_730_000_000_000);
+        assert_eq!(expires(json!(1.7e12)), 1_700_000_000_000);
+        assert_eq!(expires(json!(-5)), 0);
+        let wrong: std::result::Result<Credential, _> = serde_json::from_value(json!({
+            "type": "oauth", "access": "a", "refresh": "r", "expires": "soon",
+        }));
+        assert!(wrong.is_err());
+
+        let credential = OAuthCredential {
+            expires: 1_730_000_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&credential).unwrap()["expires"],
+            json!(1_730_000_000_000u64)
+        );
     }
 }

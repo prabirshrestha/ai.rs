@@ -25,7 +25,7 @@ use super::fetch::{FetchRequest, OAuthFetch, default_oauth_fetch, fetch_with_tim
 use super::pkce::generate_pkce;
 use crate::auth::types::{
     AuthEvent, AuthPrompt, AuthPromptKind, AuthSelectOption, LoginOptions, ModelAuth, OAuthAuth,
-    OAuthCredential, ProviderAuthInteraction,
+    OAuthCredential, ProviderAuthInteraction, js_millis_to_u64,
 };
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::time::now_millis;
@@ -150,6 +150,15 @@ async fn post_json(
     Ok(response.body)
 }
 
+/// The credential of a token response: `expires` is
+/// `Date.now() + expires_in * 1000 - 5 min` with `expires_in` any JSON number
+/// (fractional values included), like Pi.
+///
+/// Divergence: Pi `JSON.parse`s the body without checking it, so a response
+/// missing `access_token`, `refresh_token` or a numeric `expires_in` yields a
+/// credential with `undefined` fields that fails later. Rust needs those
+/// fields for the typed credential and reports such a body as invalid JSON
+/// right away (on refresh, the stored credential is kept).
 fn token_credential(
     response_body: &str,
 ) -> std::result::Result<OAuthCredential, serde_json::Error> {
@@ -157,13 +166,15 @@ fn token_credential(
     struct TokenData {
         access_token: String,
         refresh_token: String,
-        expires_in: u64,
+        expires_in: f64,
     }
     let data: TokenData = serde_json::from_str(response_body)?;
     Ok(OAuthCredential {
         refresh: data.refresh_token,
         access: data.access_token,
-        expires: (now_millis() + data.expires_in * 1000).saturating_sub(EXPIRY_SKEW_MS),
+        expires: js_millis_to_u64(
+            now_millis() as f64 + data.expires_in * 1000.0 - EXPIRY_SKEW_MS as f64,
+        ),
         extra: Map::new(),
     })
 }
@@ -495,6 +506,19 @@ mod tests {
     static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Requests = Arc<Mutex<Vec<FetchRequest>>>;
+
+    #[test]
+    fn token_responses_accept_fractional_expires_in() {
+        let before = now_millis();
+        let credential = token_credential(
+            r#"{"access_token":"a","refresh_token":"r","expires_in":3600.5,"scope":"x"}"#,
+        )
+        .unwrap();
+        let after = now_millis();
+        assert!(credential.expires >= before + 3_600_500 - EXPIRY_SKEW_MS);
+        assert!(credential.expires <= after + 3_600_500 - EXPIRY_SKEW_MS);
+        assert!(token_credential(r#"{"access_token":"a","refresh_token":"r"}"#).is_err());
+    }
 
     fn token_fetch(requests: Requests, access: &'static str) -> OAuthFetch {
         Arc::new(move |request, _| {

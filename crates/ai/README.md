@@ -1014,6 +1014,9 @@ differences. Each is also documented on the module or item involved.
 - **Auth.** OAuth flows take an injectable `OAuthFetch`, deadlines use the
   Tokio clock, `PI_OAUTH_CALLBACK_HOST` is read per login, and a failed lazy
   OAuth load is retried. GitHub Copilot keeps the `ghr_` refresh-token grant.
+  An Anthropic token response without `access_token`, `refresh_token` or a
+  numeric `expires_in` is rejected at once instead of stored with
+  `undefined` fields.
   Anthropic workload identity federation is not supported yet.
 - **Agent.** `before_tool_call` may mutate arguments
   (`Arc<Mutex<Value>>`), tool updates after a tool settles are dropped, and
