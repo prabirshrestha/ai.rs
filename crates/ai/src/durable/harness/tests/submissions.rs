@@ -1,8 +1,7 @@
 //! Port of `test/harness-submissions.test.ts`.
 //!
-//! Divergences: the reopened SQLite file is `ControlledStorage::persistent()`. Skipped: "rejects a wait whose
-//! submission read spans the start of close", which subclasses the storage to hold one read; Rust storages are not
-//! subclassable and the seal ordering is covered by the lifecycle suite.
+//! Divergences: the reopened SQLite file is `ControlledStorage::persistent()`; the TS storage subclass that holds a
+//! submission read is `ControlledStorage::hold_submission_reads()`.
 
 use std::sync::Arc;
 
@@ -302,6 +301,26 @@ async fn cancels_only_a_wait_and_rejects_pending_waits_on_close() {
     harness.close(&context()).await.unwrap();
     let error = pending.await.unwrap().unwrap_err();
     assert!(error.to_string().contains("Harness is closed"), "{error}");
+}
+
+#[tokio::test]
+async fn rejects_a_wait_whose_submission_read_spans_the_start_of_close() {
+    let storage = Arc::new(ControlledStorage::new());
+    let setup = chat_setup();
+    setup.faux.set_responses([unanswered().0]);
+    let (harness, root) = open_chat(storage.clone(), &setup).await;
+    let submission = root
+        .submit(SubmissionDraft::input("hi"), &context())
+        .await
+        .unwrap();
+    let held = storage.hold_submission_reads();
+    let waiting = tokio::spawn(async move { submission.wait(&context()).await });
+    held.entered().await;
+    let closing = harness.close(&context());
+    held.release();
+    let error = waiting.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("Harness is closed"), "{error}");
+    closing.await.unwrap();
 }
 
 #[tokio::test]

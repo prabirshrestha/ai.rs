@@ -1,5 +1,5 @@
-//! Port of the `ownership` block of `test/harness-ownership.test.ts`. The "owned conversations from tools and
-//! supervisors" block runs a faux chat and is ported with the generation milestone. SQLite reopen cases use
+//! Port of `test/harness-ownership.test.ts`: the `ownership` block, and the "owned conversations from tools and
+//! supervisors" block in [`from_tools_and_supervisors`], which runs a faux chat. SQLite reopen cases use
 //! `ControlledStorage::persistent()`; the subclassed rejecting storages use `ControlledStorage::filter_commits()`.
 
 use std::collections::HashMap;
@@ -1214,4 +1214,797 @@ async fn retries_a_cascade_whose_commit_the_storage_rejected() {
     assert_eq!(outcome_status(&harness, tree.owner).await, "failed");
     settle_spawned().await;
     harness.close(&context()).await.unwrap();
+}
+
+// ─── Owned conversations from tools and supervisors ──────────────────────────
+
+mod from_tools_and_supervisors {
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value as JsonValue, json};
+
+    use super::super::chat::{chat_setup, faux_model, open_chat, unanswered};
+    use super::super::support::{aborted, add_task, add_tool, context, to_json};
+    use super::{Phase, World, aborted_outcome, hold_input, hold_task, in_conversation, phase};
+    use crate::chord::Context;
+    use crate::durable::documents::define_doc;
+    use crate::durable::errors::{Error, Result};
+    use crate::durable::harness::agent::configure;
+    use crate::durable::harness::live::LIVE_DOC;
+    use crate::durable::harness::tool::ToolExecutionApi;
+    use crate::durable::harness::types::{
+        AgentChange, Replay, SubmissionDraft, ToolExecutionResult,
+    };
+    use crate::durable::harness::{ConversationHandle, Submission, define_tool};
+    use crate::durable::ids::{ConversationId, TaskId};
+    use crate::durable::session::tests::support::{ControlledStorage, Deferred, flush};
+    use crate::durable::storage::memory::MemoryStorage;
+    use crate::durable::tasks::{NextTaskState, TaskDefinition, define_task};
+    use crate::durable::types::{
+        ConversationOwnership, ConversationQuery, DocDefinition, EntryRecord, LatestConversation,
+        LatestFork, SubmissionStatus, SubmissionType, TaskQuery,
+    };
+    use crate::providers::faux::{
+        FauxMessageOptions, FauxResponseStep, faux_assistant_message, faux_tool_call,
+    };
+    use crate::types::{Message, StopReason};
+
+    fn empty_parameters() -> JsonValue {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn call(name: &str, args: JsonValue, id: &str) -> FauxResponseStep {
+        faux_assistant_message(
+            vec![faux_tool_call(name, args, Some(id))],
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..FauxMessageOptions::default()
+            },
+        )
+        .into()
+    }
+
+    fn text(text: &str) -> FauxResponseStep {
+        faux_assistant_message(text, FauxMessageOptions::default()).into()
+    }
+
+    fn status_text(status: SubmissionStatus) -> String {
+        to_json(&status).as_str().unwrap().to_string()
+    }
+
+    /// Create a conversation owned by the tool's task, configured with the faux model when `model` is set.
+    async fn create_child(
+        api: &ToolExecutionApi,
+        context: &Context,
+        model: bool,
+    ) -> Result<ConversationId> {
+        let task_id = api.task_id();
+        api.commit(
+            move |tx| async move {
+                let created = tx
+                    .create_conversation(ConversationOwnership::Task { task_id })
+                    .await?;
+                if model {
+                    configure(&tx, created.id, &AgentChange::default().model(faux_model())).await?;
+                }
+                Ok(created.id)
+            },
+            context,
+        )
+        .await
+    }
+
+    async fn entries_of(
+        harness: &crate::durable::harness::Harness,
+        id: ConversationId,
+    ) -> Vec<EntryRecord> {
+        harness
+            .conversation(id, &context())
+            .await
+            .unwrap()
+            .unwrap()
+            .entries(None, None, 100, None, &context())
+            .await
+            .unwrap()
+            .items
+    }
+
+    fn user_entries(entries: &[EntryRecord]) -> usize {
+        entries
+            .iter()
+            .filter(|entry| entry.kind == "pi.user")
+            .count()
+    }
+
+    fn assert_ended<T: std::fmt::Debug>(result: Result<T>) {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("invocation has ended"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable_after_the_call_ends()
+     {
+        let setup = chat_setup();
+        let handle: Arc<Mutex<Option<ConversationHandle>>> = Arc::default();
+        let missing: Arc<Mutex<Option<bool>>> = Arc::default();
+        let submission: Arc<Mutex<Option<Submission>>> = Arc::default();
+        {
+            let (handle, missing, submission) =
+                (handle.clone(), missing.clone(), submission.clone());
+            add_tool(
+                &setup.registry,
+                define_tool(
+                    "delegate",
+                    "Delegates",
+                    empty_parameters(),
+                    move |_, api, call_context| {
+                        let (handle, missing, submission) =
+                            (handle.clone(), missing.clone(), submission.clone());
+                        async move {
+                            let child = create_child(&api, &call_context, true).await?;
+                            *missing.lock() = Some(
+                                api.conversation(ConversationId(99_999), &call_context)
+                                    .await?
+                                    .is_none(),
+                            );
+                            let bound = api.conversation(child, &call_context).await?.unwrap();
+                            *handle.lock() = Some(bound.clone());
+                            let submitted = bound
+                                .submit(
+                                    SubmissionDraft::input("child task").with_request_id("child"),
+                                    &call_context,
+                                )
+                                .await?;
+                            *submission.lock() = Some(submitted.clone());
+                            let settled = submitted.wait(&call_context).await?;
+                            Ok(ToolExecutionResult::text(status_text(settled.status)))
+                        }
+                    },
+                ),
+            );
+        }
+        setup.faux.set_responses([
+            call("delegate", json!({}), "c1"),
+            text("child answer"),
+            text("done"),
+        ]);
+        let (harness, root) = open_chat(Arc::new(MemoryStorage::new()), &setup).await;
+        root.submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap()
+            .wait(&context())
+            .await
+            .unwrap();
+        assert_eq!(*missing.lock(), Some(true));
+        let handle = handle.lock().clone().unwrap();
+        let submission = submission.lock().clone().unwrap();
+        // The call ended: the handle and its submission reject, while the submission record remains.
+        assert_ended(
+            handle
+                .submit(SubmissionDraft::input("again"), &context())
+                .await,
+        );
+        assert_ended(handle.wait_for_idle(&context()).await);
+        assert_ended(handle.abort(&context(), Default::default()).await);
+        assert_ended(submission.wait(&context()).await);
+        // Nothing was admitted or marked after the call ended.
+        assert_eq!(user_entries(&entries_of(&harness, handle.id).await), 1);
+        let inspection = harness.inspect(&context()).await.unwrap();
+        assert!(
+            inspection
+                .tasks
+                .iter()
+                .all(|task| task.record.conversation_id != handle.id)
+        );
+        let stored = harness
+            .submission(submission.id, &context())
+            .await
+            .unwrap()
+            .unwrap()
+            .status(&context())
+            .await
+            .unwrap();
+        assert_eq!(stored.status, SubmissionStatus::Done);
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_a_handle_operation_queued_on_the_line_when_the_invocation_ends_before_it_runs()
+    {
+        type Submitting = tokio::task::JoinHandle<Result<Submission>>;
+        let setup = chat_setup();
+        let ready: Arc<Mutex<Option<(ConversationId, TaskId)>>> = Arc::default();
+        let (ready_signal, go, queued_signal) = (
+            Deferred::default(),
+            Deferred::default(),
+            Deferred::default(),
+        );
+        let queued: Arc<Mutex<Option<Submitting>>> = Arc::default();
+        {
+            let (ready, ready_signal, go, queued, queued_signal) = (
+                ready.clone(),
+                ready_signal.clone(),
+                go.clone(),
+                queued.clone(),
+                queued_signal.clone(),
+            );
+            add_tool(
+                &setup.registry,
+                define_tool(
+                    "delegate",
+                    "Delegates late",
+                    empty_parameters(),
+                    move |_, api, call_context| {
+                        let (ready, ready_signal, go, queued, queued_signal) = (
+                            ready.clone(),
+                            ready_signal.clone(),
+                            go.clone(),
+                            queued.clone(),
+                            queued_signal.clone(),
+                        );
+                        async move {
+                            let child = create_child(&api, &call_context, false).await?;
+                            let handle = api.conversation(child, &call_context).await?.unwrap();
+                            *ready.lock() = Some((child, api.task_id()));
+                            ready_signal.resolve();
+                            go.wait().await;
+                            // Called while the invocation is alive, with a context that is not the call's: the
+                            // handle binds it to the invocation. It reaches the line only after the abort mark.
+                            // One poll runs the call up to the line, as the TS call does synchronously.
+                            let mut submitting = Box::pin(async move {
+                                handle
+                                    .submit(SubmissionDraft::input("late"), &context())
+                                    .await
+                            });
+                            let _ = futures::poll!(&mut submitting);
+                            *queued.lock() = Some(tokio::spawn(submitting));
+                            queued_signal.resolve();
+                            aborted(call_context.abort_signal().unwrap().clone())
+                                .await
+                                .map(|()| ToolExecutionResult::text(""))
+                        }
+                    },
+                ),
+            );
+        }
+        setup
+            .faux
+            .set_responses([call("delegate", json!({}), "c1")]);
+        let (harness, root) = open_chat(Arc::new(MemoryStorage::new()), &setup).await;
+        root.submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap();
+        ready_signal.wait().await;
+        let (child, task_id) = ready.lock().unwrap();
+        // Hold the Session line, queue the abort mark behind it, then let the tool queue its submit.
+        let release = Deferred::default();
+        let holding = {
+            let (root, release) = (root.clone(), release.clone());
+            tokio::spawn(async move {
+                root.commit(
+                    move |_| async move {
+                        release.wait().await;
+                        Ok(())
+                    },
+                    &context(),
+                )
+                .await
+            })
+        };
+        flush().await;
+        let aborting = {
+            let harness = harness.clone();
+            tokio::spawn(async move { harness.abort_task(task_id, &context()).await })
+        };
+        flush().await;
+        go.resolve();
+        queued_signal.wait().await;
+        let submitting = queued.lock().take().unwrap();
+        release.resolve();
+        holding.await.unwrap().unwrap();
+        aborting.await.unwrap().unwrap();
+        assert!(submitting.await.unwrap().is_err());
+        assert!(entries_of(&harness, child).await.is_empty());
+        let inspection = harness.inspect(&context()).await.unwrap();
+        assert!(
+            inspection
+                .submissions
+                .iter()
+                .all(|record| record.conversation_id != child)
+        );
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborts_a_subagent_run_with_its_parents_conversation_rejecting_the_waiting_tool() {
+        let setup = chat_setup();
+        let child: Arc<Mutex<Option<ConversationId>>> = Arc::default();
+        let tool_wait: Arc<Mutex<Option<String>>> = Arc::default();
+        let tool_waited = Deferred::default();
+        {
+            let (child, tool_wait, tool_waited) =
+                (child.clone(), tool_wait.clone(), tool_waited.clone());
+            add_tool(
+                &setup.registry,
+                define_tool(
+                    "delegate",
+                    "Delegates",
+                    empty_parameters(),
+                    move |_, api, call_context| {
+                        let (child, tool_wait, tool_waited) =
+                            (child.clone(), tool_wait.clone(), tool_waited.clone());
+                        async move {
+                            let id = create_child(&api, &call_context, true).await?;
+                            *child.lock() = Some(id);
+                            let submission = api
+                                .conversation(id, &call_context)
+                                .await?
+                                .unwrap()
+                                .submit(SubmissionDraft::input("child task"), &call_context)
+                                .await?;
+                            match submission.wait(&call_context).await {
+                                Ok(settled) => {
+                                    Ok(ToolExecutionResult::text(status_text(settled.status)))
+                                }
+                                Err(error) => {
+                                    *tool_wait.lock() = Some(error.to_string());
+                                    tool_waited.resolve();
+                                    Err(error)
+                                }
+                            }
+                        }
+                    },
+                ),
+            );
+        }
+        let (child_run, reached) = unanswered();
+        setup
+            .faux
+            .set_responses([call("delegate", json!({}), "c1"), child_run]);
+        let (harness, root) = open_chat(Arc::new(MemoryStorage::new()), &setup).await;
+        let input = root
+            .submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap();
+        reached.wait().await;
+        root.abort(&context(), Default::default()).await.unwrap();
+        let settled = input.wait(&context()).await.unwrap();
+        assert_eq!(settled.status, SubmissionStatus::Unanswered);
+        assert_eq!(settled.reason.as_deref(), Some("aborted"));
+        tool_waited.wait().await;
+        assert!(!tool_wait.lock().clone().unwrap().is_empty());
+        let child = child.lock().unwrap();
+        harness
+            .conversation(child, &context())
+            .await
+            .unwrap()
+            .unwrap()
+            .wait_for_idle(&context())
+            .await
+            .unwrap();
+        assert_eq!(
+            harness
+                .snapshot(&*LIVE_DOC, child, &context())
+                .await
+                .unwrap(),
+            Some(Default::default())
+        );
+        let inspection = harness.inspect(&context()).await.unwrap();
+        assert!(
+            inspection
+                .submissions
+                .iter()
+                .all(|record| record.conversation_id != child)
+        );
+        harness.wait_for_idle(&context()).await.unwrap();
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lets_a_running_tool_abort_its_owned_child_and_continue() {
+        let setup = chat_setup();
+        let (child_run, reached) = unanswered();
+        add_tool(
+            &setup.registry,
+            define_tool(
+                "delegate",
+                "Delegates and cancels",
+                empty_parameters(),
+                move |_, api, call_context| {
+                    let reached = reached.clone();
+                    async move {
+                        let id = create_child(&api, &call_context, true).await?;
+                        let handle = api.conversation(id, &call_context).await?.unwrap();
+                        let submission = handle
+                            .submit(SubmissionDraft::input("child task"), &call_context)
+                            .await?;
+                        reached.wait().await;
+                        handle.abort(&call_context, Default::default()).await?;
+                        let settled = submission.wait(&call_context).await?;
+                        Ok(ToolExecutionResult::text(format!(
+                            "child {}",
+                            status_text(settled.status)
+                        )))
+                    }
+                },
+            ),
+        );
+        setup
+            .faux
+            .set_responses([call("delegate", json!({}), "c1"), child_run, text("done")]);
+        let (harness, root) = open_chat(Arc::new(MemoryStorage::new()), &setup).await;
+        let settled = root
+            .submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap()
+            .wait(&context())
+            .await
+            .unwrap();
+        assert_eq!(settled.status, SubmissionStatus::Done);
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborts_the_children_of_a_tool_call_that_throws_or_is_interrupted_while_the_run_continues()
+     {
+        let storage = Arc::new(ControlledStorage::persistent());
+        let children: Arc<Mutex<Vec<TaskId>>> = Arc::default();
+        let tool_running = Deferred::default();
+        let setup = chat_setup();
+        let world = Arc::new(World::default());
+        let hold = hold_task(&world);
+        add_task(&setup.registry, hold.any());
+        {
+            let (children, tool_running) = (children.clone(), tool_running.clone());
+            add_tool(
+                &setup.registry,
+                define_tool(
+                    "spawn",
+                    "Starts owned work, then throws or hangs",
+                    json!({
+                        "type": "object",
+                        "properties": { "mode": { "type": "string" } },
+                        "required": ["mode"],
+                    }),
+                    move |args, api, call_context| {
+                        let (children, tool_running, hold) =
+                            (children.clone(), tool_running.clone(), hold.clone());
+                        async move {
+                            let task_id = api.task_id();
+                            let name = format!("child.{}", api.call_id());
+                            let child = api
+                                .commit(
+                                    move |tx| async move {
+                                        let created = tx
+                                            .create_conversation(ConversationOwnership::Task {
+                                                task_id,
+                                            })
+                                            .await?;
+                                        Ok(tx
+                                            .create_task(
+                                                &hold,
+                                                hold_input(&name, false),
+                                                in_conversation(Some(created.id), false),
+                                            )
+                                            .await?
+                                            .erase())
+                                    },
+                                    &call_context,
+                                )
+                                .await?;
+                            children.lock().push(child);
+                            if args["mode"] == "throw" {
+                                return Err(Error::message("spawn failed"));
+                            }
+                            tool_running.resolve();
+                            aborted(call_context.abort_signal().unwrap().clone())
+                                .await
+                                .map(|()| ToolExecutionResult::text(""))
+                        }
+                    },
+                ),
+            );
+        }
+        setup.faux.set_responses([
+            call("spawn", json!({ "mode": "throw" }), "c1"),
+            text("after throw"),
+            call("spawn", json!({ "mode": "hang" }), "c2"),
+        ]);
+        let (harness, root) = open_chat(storage.clone(), &setup).await;
+        let one = root
+            .submit(SubmissionDraft::input("one"), &context())
+            .await
+            .unwrap()
+            .wait(&context())
+            .await
+            .unwrap();
+        assert_eq!(one.status, SubmissionStatus::Done);
+        let first = children.lock()[0];
+        assert_eq!(super::outcome_status(&harness, first).await, "aborted");
+
+        // The second call hangs until the process stops; on reopen it is interrupted.
+        let second = root
+            .submit(SubmissionDraft::input("two"), &context())
+            .await
+            .unwrap()
+            .id;
+        tool_running.wait().await;
+        harness.close(&context()).await.unwrap();
+        setup.faux.set_responses([text("after interrupt")]);
+        let (harness, _) = open_chat(storage.clone(), &setup).await;
+        harness.resume().unwrap();
+        let interrupted = children.lock()[1];
+        assert_eq!(
+            super::outcome_status(&harness, interrupted).await,
+            "aborted"
+        );
+        let settled = harness
+            .submission(second, &context())
+            .await
+            .unwrap()
+            .unwrap()
+            .wait(&context())
+            .await
+            .unwrap();
+        assert_eq!(settled.status, SubmissionStatus::Done);
+        let tools = harness
+            .commit(
+                |tx| async move {
+                    let query = TaskQuery {
+                        kind: Some("pi.tool".into()),
+                        ..TaskQuery::default()
+                    };
+                    Ok(tx.scan_tasks(query, 10, None).await?.items)
+                },
+                &context(),
+            )
+            .await
+            .unwrap();
+        let outcomes: Vec<JsonValue> = tools
+            .iter()
+            .map(|task| to_json(&task.state)["outcome"]["status"].clone())
+            .collect();
+        assert_eq!(outcomes, [json!("failed"), json!("failed")]);
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reruns_a_replay_safe_subagent_tool_after_a_restart_with_the_same_child_and_submission()
+    {
+        let storage = Arc::new(ControlledStorage::persistent());
+        let children: Arc<Mutex<Vec<ConversationId>>> = Arc::default();
+        let setup = chat_setup();
+        {
+            let children = children.clone();
+            let mut tool = define_tool(
+                "subagent",
+                "Delegates",
+                empty_parameters(),
+                move |_, api, call_context| {
+                    let children = children.clone();
+                    async move {
+                        let task_id = api.task_id();
+                        let child = api
+                            .commit(
+                                move |tx| async move {
+                                    let query = ConversationQuery {
+                                        owner_task_id: Some(task_id),
+                                        ..ConversationQuery::default()
+                                    };
+                                    let existing = tx.scan_conversations(query, 1, None).await?;
+                                    if let Some(existing) = existing.items.first() {
+                                        return Ok(existing.id);
+                                    }
+                                    let created = tx
+                                        .create_conversation(ConversationOwnership::Task {
+                                            task_id,
+                                        })
+                                        .await?;
+                                    configure(
+                                        &tx,
+                                        created.id,
+                                        &AgentChange::default().model(faux_model()),
+                                    )
+                                    .await?;
+                                    Ok(created.id)
+                                },
+                                &call_context,
+                            )
+                            .await?;
+                        children.lock().push(child);
+                        let request = SubmissionDraft::input("child task")
+                            .with_request_id(format!("subagent:{}", task_id.0));
+                        let submission = api
+                            .conversation(child, &call_context)
+                            .await?
+                            .unwrap()
+                            .submit(request, &call_context)
+                            .await?;
+                        let settled = submission.wait(&call_context).await?;
+                        Ok(ToolExecutionResult::text(status_text(settled.status)))
+                    }
+                },
+            );
+            tool.replay = Some(Replay::Safe);
+            add_tool(&setup.registry, tool);
+        }
+        let (child_run, reached) = unanswered();
+        setup
+            .faux
+            .set_responses([call("subagent", json!({}), "c1"), child_run]);
+        let (harness, root) = open_chat(storage.clone(), &setup).await;
+        let input = root
+            .submit(SubmissionDraft::input("go"), &context())
+            .await
+            .unwrap()
+            .id;
+        reached.wait().await;
+        harness.close(&context()).await.unwrap();
+
+        setup
+            .faux
+            .set_responses([text("child answer"), text("done")]);
+        let (harness, root) = open_chat(storage.clone(), &setup).await;
+        let settled = harness
+            .submission(input, &context())
+            .await
+            .unwrap()
+            .unwrap()
+            .wait(&context())
+            .await
+            .unwrap();
+        assert_eq!(settled.status, SubmissionStatus::Done);
+        let children = children.lock().clone();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1], children[0]);
+        assert_eq!(user_entries(&entries_of(&harness, children[0]).await), 1);
+        let results: Vec<bool> = root
+            .context(&context())
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.is_error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [false]);
+        harness.close(&context()).await.unwrap();
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    struct Children {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<ConversationId>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct SupervisorInput {
+        parent: ConversationId,
+    }
+
+    #[tokio::test]
+    async fn lets_a_background_supervisor_resubmit_after_a_restart_without_submitting_twice() {
+        let storage = Arc::new(ControlledStorage::persistent());
+        let children_doc = define_doc(DocDefinition::new(
+            "test.children",
+            1,
+            LatestConversation {
+                fork: LatestFork::Initial,
+            },
+            Children::default,
+        ))
+        .unwrap();
+        let supervisor = {
+            let children_doc = children_doc.clone();
+            define_task(
+                TaskDefinition::<SupervisorInput, Phase, JsonValue>::new(
+                    "test.supervisor",
+                    1,
+                    |_| phase("run"),
+                )
+                .phase("run", move |task, runtime, ctx| {
+                    let children_doc = children_doc.clone();
+                    async move {
+                        let id = runtime
+                            .snapshot(&children_doc, task.input.parent, &ctx)
+                            .await?
+                            .unwrap()
+                            .child
+                            .unwrap();
+                        let child = runtime.conversation(id, &ctx).await?.unwrap();
+                        let submission = child
+                            .submit(
+                                SubmissionDraft::input("work").with_request_id("stable"),
+                                &ctx,
+                            )
+                            .await?;
+                        let settled = submission.wait(&ctx).await?;
+                        if settled.status != SubmissionStatus::Done
+                            || settled.type_ != SubmissionType::Input
+                        {
+                            return Err(Error::message(status_text(settled.status)));
+                        }
+                        let answer = settled.answer;
+                        runtime
+                            .commit(
+                                move |_, _| async move {
+                                    Ok(Some(NextTaskState::completed(json!({ "answer": answer }))))
+                                },
+                                &ctx,
+                            )
+                            .await
+                    }
+                })
+                .abort(|_, runtime, ctx| async move {
+                    runtime
+                        .commit(
+                            |_, _| async {
+                                Ok(Some(NextTaskState::Terminal {
+                                    outcome: aborted_outcome(),
+                                }))
+                            },
+                            &ctx,
+                        )
+                        .await
+                }),
+            )
+        };
+        let setup = chat_setup();
+        add_task(&setup.registry, supervisor.any());
+        let (first, reached) = unanswered();
+        setup.faux.set_responses([first, text("answer")]);
+        let (harness, root) = open_chat(storage.clone(), &setup).await;
+        let root_id = root.id;
+        let (supervisor_id, child) = {
+            let (supervisor, children_doc) = (supervisor.clone(), children_doc.clone());
+            root.commit(
+                move |tx| async move {
+                    let supervisor = tx
+                        .create_task(
+                            &supervisor,
+                            SupervisorInput { parent: root_id },
+                            in_conversation(None, true),
+                        )
+                        .await?
+                        .erase();
+                    let created = tx
+                        .create_conversation(ConversationOwnership::Task {
+                            task_id: supervisor,
+                        })
+                        .await?;
+                    configure(&tx, created.id, &AgentChange::default().model(faux_model())).await?;
+                    tx.doc(&children_doc, root_id)
+                        .await?
+                        .edit(|children| children.child = Some(created.id))?;
+                    Ok((supervisor, created.id))
+                },
+                &context(),
+            )
+            .await
+            .unwrap()
+        };
+        harness.resume().unwrap();
+        // The submission is admitted and its generation requested; then the process stops.
+        reached.wait().await;
+        harness.close(&context()).await.unwrap();
+
+        let (harness, root) = open_chat(storage.clone(), &setup).await;
+        harness.resume().unwrap();
+        let done = harness
+            .wait_for_task(supervisor_id, &context())
+            .await
+            .unwrap();
+        assert_eq!(to_json(&done.state)["outcome"]["status"], "completed");
+        assert_eq!(user_entries(&entries_of(&harness, child).await), 1);
+        // The root never waited for the background supervisor.
+        root.wait_for_idle(&context()).await.unwrap();
+        harness.close(&context()).await.unwrap();
+    }
 }

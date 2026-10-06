@@ -86,6 +86,7 @@ pub struct ControlledStorage {
     pub document_read_count: AtomicUsize,
     commit_gate: Arc<Mutex<Option<Arc<Held>>>>,
     find_gate: Arc<Mutex<Option<Arc<Held>>>>,
+    submission_gate: Arc<Mutex<Option<Arc<Held>>>>,
     commit_failure: Mutex<Option<Error>>,
     close_failure: Mutex<Option<Error>>,
     persistent: std::sync::atomic::AtomicBool,
@@ -115,6 +116,17 @@ impl ControlledStorage {
         Gate {
             held,
             slot: self.find_gate.clone(),
+        }
+    }
+
+    /// Hold `submission()` reads until released.
+    #[allow(dead_code)] // Used by the Harness submissions suite.
+    pub fn hold_submission_reads(&self) -> Gate {
+        let held = Held::new();
+        *self.submission_gate.lock() = Some(held.clone());
+        Gate {
+            held,
+            slot: self.submission_gate.clone(),
         }
     }
 
@@ -266,6 +278,10 @@ impl Storage for ControlledStorage {
         id: SubmissionId,
         context: &Context,
     ) -> Result<Option<SubmissionRecord>> {
+        let held = self.submission_gate.lock().clone();
+        if let Some(held) = held {
+            held.hold().await;
+        }
         self.inner.submission(id, context).await
     }
 

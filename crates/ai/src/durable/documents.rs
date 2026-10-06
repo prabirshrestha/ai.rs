@@ -593,6 +593,14 @@ pub fn materialize_document_value(
 
 #[cfg(test)]
 mod tests {
+    //! Port of `test/session-definitions.test.ts`. "types every owner, key,
+    //! and seed overload" and "types historical reads, states, watches, and
+    //! typed entries" are `expectTypeOf`/`@ts-expect-error` checks: each Rust
+    //! token takes one typed address (`()` for Session documents, an ID, a
+    //! key or a seed tuple), so the rejected overloads do not compile, and
+    //! the accepted ones run in the session documents, states, watches and
+    //! entries suites.
+
     use super::*;
     use crate::durable::types::{LatestFork, RewindableFork};
     use serde::Deserialize;
