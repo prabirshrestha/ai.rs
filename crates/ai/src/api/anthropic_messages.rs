@@ -12,8 +12,9 @@
 //!   `Model::base_url` and `http_client` at another endpoint instead.
 //! - Workload identity federation (the SDK's `config` credential exchange) is
 //!   deferred: a request that would use it fails with an explicit error.
-//! - SSE decoding uses the shared [`crate::utils::sse`] decoder, which
-//!   implements the same line rules as Pi's inline decoder.
+//! - SSE decoding uses the shared [`crate::utils::sse::events`] decoder in
+//!   its Pi mode, which follows the line rules of Pi's inline decoder
+//!   (`consumeLine`, `decodeSseLine`).
 //! - Provider-specific options travel in `StreamOptions::provider_options`
 //!   under Pi's field names; [`AnthropicOptions`] reads and writes them.
 //!   Values of the wrong type are ignored.
