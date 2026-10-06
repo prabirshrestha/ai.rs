@@ -15,6 +15,14 @@
 //! - `Tx`, `Session`, `DocumentObserver` and `WatchHandle` are concrete types in
 //!   [`super::session`]; their overloads are expressed through
 //!   [`super::documents::DocAccess`].
+//! - Rust has no `undefined`. Pi writes records through
+//!   `copyJson(.., { omitUndefinedProperties })`, so a void task input,
+//!   checkpoint or completed result has no key at all, while a `null` one is
+//!   written. Those `JsonValue` fields read a missing key as `null`; Rust
+//!   writes `null` (a Rust `()` serializes to `null`), never an omitted key,
+//!   so a void value written from Rust reads back in TS as `null`. Omitting
+//!   `null` instead would lose the `null` inputs and results Pi's own
+//!   records carry.
 //! - `Storage.entry(conversationId, id)` is [`Storage::entry_in`]; `mintId<I>()`
 //!   returns the raw number, branded by the caller with
 //!   [`super::ids::id_from_number`].
@@ -610,6 +618,8 @@ pub struct TaskOutcomeError {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum TaskOutcome {
     Completed {
+        /// A missing key (Pi's `undefined`, a void result) reads as `null`.
+        #[serde(default)]
         result: JsonValue,
     },
     /// Expected task or domain failure explicitly committed by its implementation.
@@ -634,13 +644,9 @@ pub enum TaskOutcome {
         result: Option<JsonValue>,
     },
     /// Task that cannot resume because its definition or migration is unavailable.
-    Orphaned {
-        reason: String,
-    },
+    Orphaned { reason: String },
     /// Runtime-detected contract failure, such as an uncaught throw or no durable progress.
-    Faulted {
-        error: TaskOutcomeError,
-    },
+    Faulted { error: TaskOutcomeError },
 }
 
 /// How a waiting task treats the tasks it waits on.
@@ -693,11 +699,19 @@ impl fmt::Display for TaskStatus {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum TaskState {
     /// Eligible for scheduling.
-    Pending { checkpoint: JsonValue },
+    Pending {
+        /// A missing key (Pi's `undefined`) reads as `null`.
+        #[serde(default)]
+        checkpoint: JsonValue,
+    },
     /// Reserved by one in-memory task invocation.
-    Running { checkpoint: JsonValue },
+    Running {
+        #[serde(default)]
+        checkpoint: JsonValue,
+    },
     /// Parked until every task in `on` is terminal; then resumes at `checkpoint`.
     Waiting {
+        #[serde(default)]
         checkpoint: JsonValue,
         on: Vec<TaskId>,
         policy: JoinPolicy,
@@ -748,6 +762,8 @@ pub struct TaskRecord {
     /// Definition version used to migrate live input and checkpoints.
     pub version: u32,
     /// Original task input retained while the task is live or terminal.
+    /// A missing key (Pi's `undefined`, a void input) reads as `null`.
+    #[serde(default)]
     pub input: JsonValue,
     /// Owning task of a child task; absent for a task its conversation owns. Immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1327,4 +1343,102 @@ pub trait Storage: Send + Sync {
 
     /// Release backend resources; all later operations must reject.
     async fn close(&self, context: &Context) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    //! JSON shapes of the stored records. Pi's `types.test.ts` checks the
+    //! discriminated shapes at the type level (`expectTypeOf`, the
+    //! `@ts-expect-error` cases have no Rust counterpart); here each shape
+    //! must round-trip byte for byte, which pins the on-disk format.
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+    use serde_json::json;
+
+    use super::*;
+
+    fn round_trip<T: Serialize + DeserializeOwned>(text: &str) -> T {
+        let value: T = serde_json::from_str(text).unwrap();
+        assert_eq!(serde_json::to_string(&value).unwrap(), text);
+        value
+    }
+
+    // Port of "encodes discriminator-dependent fields" (runtime half).
+    #[test]
+    fn encodes_discriminator_dependent_fields() {
+        let omit: ContextEdit = round_trip(r#"{"target":2,"action":"omit"}"#);
+        assert_eq!(omit.action, ContextEditAction::Omit);
+        let replace: ContextEdit = round_trip(r#"{"target":2,"action":"replace","messages":[]}"#);
+        assert!(matches!(replace.action, ContextEditAction::Replace { .. }));
+
+        let pending: TaskState =
+            round_trip(r#"{"status":"pending","checkpoint":{"phase":"ready"}}"#);
+        assert_eq!(pending.status(), TaskStatus::Pending);
+        let terminal: TaskState = round_trip(
+            r#"{"status":"terminal","outcome":{"status":"completed","result":{"value":1}}}"#,
+        );
+        assert_eq!(
+            terminal.outcome(),
+            Some(&TaskOutcome::Completed {
+                result: json!({ "value": 1 })
+            })
+        );
+
+        let completed_input: SubmissionRecord = round_trip(
+            r#"{"id":5,"conversationId":1,"type":"input","status":"done","entry":2,"answer":3}"#,
+        );
+        assert_eq!(completed_input.type_, SubmissionType::Input);
+        let completed_write: SubmissionRecord =
+            round_trip(r#"{"id":5,"conversationId":1,"type":"write","status":"done","entry":2}"#);
+        assert_eq!(completed_write.answer, None);
+        let queued_write: SubmissionCreate =
+            round_trip(r#"{"conversationId":1,"type":"write","status":"queued"}"#);
+        assert_eq!(queued_write.status, SubmissionStatus::Queued);
+
+        let base: DocumentContent =
+            round_trip(r#"{"kind":"base","version":1,"value":{"count":1}}"#);
+        assert!(matches!(base, DocumentContent::Base { .. }));
+        let delta: DocumentContent =
+            round_trip(r#"{"kind":"delta","version":1,"ops":[["s",["count"],2]]}"#);
+        assert!(matches!(delta, DocumentContent::Delta { .. }));
+        let conversation_document: DocumentCreate = round_trip(
+            r#"{"id":6,"kind":"test","scope":{"kind":"conversation","conversationId":1},"history":"rewindable","fork":"asOf"}"#,
+        );
+        assert_eq!(conversation_document.fork, Some(ForkPolicy::AsOf));
+    }
+
+    // TS writes records through `copyJson(.., { omitUndefinedProperties })`,
+    // so a void task input, checkpoint or result has no key. These lines are
+    // the output of chord's `copyJson` on void task records (Pi 1.0.2).
+    #[test]
+    fn reads_ts_task_records_that_omit_void_fields() {
+        let records = [
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"background":false,"abortRequested":false,"state":{"status":"pending"}}"#,
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"background":false,"abortRequested":false,"state":{"status":"running"}}"#,
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"background":false,"abortRequested":false,"state":{"status":"waiting","on":[6],"policy":"failFast"}}"#,
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"background":false,"abortRequested":false,"state":{"status":"terminal","outcome":{"status":"completed"}}}"#,
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"owner":4,"background":true,"abortRequested":true,"state":{"status":"completing","outcome":{"status":"aborted"}}}"#,
+        ];
+        for text in records {
+            let record: TaskRecord = serde_json::from_str(text).unwrap();
+            assert_eq!(record.input, JsonValue::Null);
+            if let Some(checkpoint) = record.state.checkpoint() {
+                assert_eq!(checkpoint, &JsonValue::Null);
+            }
+        }
+        let record: TaskRecord = serde_json::from_str(records[3]).unwrap();
+        assert_eq!(
+            record.state.outcome(),
+            Some(&TaskOutcome::Completed {
+                result: JsonValue::Null
+            })
+        );
+        // Rust has no `undefined`: the record is written back with `null`s,
+        // which TS reads as the `null` input and result its own tests use.
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            r#"{"id":5,"conversationId":1,"kind":"void.task","version":1,"input":null,"background":false,"abortRequested":false,"state":{"status":"terminal","outcome":{"status":"completed","result":null}}}"#
+        );
+    }
 }

@@ -1032,7 +1032,9 @@ differences. Each is also documented on the module or item involved.
 - **chord.** No JS Proxy: change drafts are owned values diffed at prepare
   time; diffs use deep equality.
 - **Durable.** Records serialize to Pi's JSON shapes, so stores stay
-  compatible with the TS backends. Documents are typed tokens with one
+  compatible with the TS backends. Rust has no `undefined`: a void task
+  input, checkpoint or result that TS omits reads as `null`, and Rust
+  writes it as `null`. Documents are typed tokens with one
   address argument, transaction drafts are `DocDraft` handles
   (`get`/`edit`), and Pi's eager promises are spawned Tokio tasks.
   Callbacks are `Arc` closures returning `Result`; a panicking phase handler

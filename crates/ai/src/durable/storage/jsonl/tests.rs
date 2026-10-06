@@ -1605,3 +1605,48 @@ async fn rejects_use_after_close() {
         "JsonlStorage is closed",
     );
 }
+
+// Rust-only: TS writes records through `copyJson(.., { omitUndefinedProperties })`,
+// so a void task's sidecar line has no `input` or `checkpoint` key. Such a
+// store must load (the keys read as `null`).
+#[tokio::test]
+async fn reads_ts_task_sidecar_lines_that_omit_void_fields() {
+    fn strip_null_void_fields(value: &mut JsonValue) {
+        match value {
+            JsonValue::Object(map) => {
+                for key in ["input", "checkpoint", "result"] {
+                    if map.get(key) == Some(&JsonValue::Null) {
+                        map.remove(key);
+                    }
+                }
+                map.values_mut().for_each(strip_null_void_fields);
+            }
+            JsonValue::Array(items) => items.iter_mut().for_each(strip_null_void_fields),
+            _ => {}
+        }
+    }
+
+    let directory = TempDir::new("pi-durable-jsonl-");
+    let dir = dir_path(&directory);
+    let storage = open_default(&dir).await;
+    create_root(&storage).await;
+    let task_id = mint(&storage).await;
+    let mut task = pending_task(task_id, "unused");
+    task["state"]["checkpoint"] = JsonValue::Null;
+    commit(&storage, json!([task_write(task.clone())]))
+        .await
+        .unwrap();
+    drop(storage);
+
+    let path = format!("{dir}/task-{task_id}.jsonl");
+    let lines = read_lines(&path);
+    assert_eq!(lines.len(), 1);
+    let mut line: JsonValue = serde_json::from_str(&lines[0]).unwrap();
+    strip_null_void_fields(&mut line);
+    let ts_line = line.to_string();
+    assert!(!ts_line.contains("\"input\"") && !ts_line.contains("\"checkpoint\""));
+    std::fs::write(&path, format!("{ts_line}\n")).unwrap();
+
+    let reopened = open_default(&dir).await;
+    assert_eq!(task_json(&reopened, task_id).await, Some(task));
+}
