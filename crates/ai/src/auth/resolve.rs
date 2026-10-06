@@ -1,5 +1,6 @@
 //! Port of `auth/resolve.ts`.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use super::types::{
     ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthContext, AuthOperationOptions, AuthResult,
     Credential, CredentialStore, OAuthAuth, OAuthCredential, ProviderAuth, models_error,
-    models_error_with_cause, throw_if_aborted,
+    models_error_with_cause, redacted_env, throw_if_aborted,
 };
 use crate::types::ProviderEnv;
 use crate::utils::abort::{operation_signal, race_with_abort_signal};
@@ -18,13 +19,24 @@ use crate::{Error, Result};
 
 pub use crate::utils::models_error::{ModelsError, ModelsErrorCode};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AuthResolutionOverrides {
     pub api_key: Option<String>,
     pub env: Option<ProviderEnv>,
     /// Require this much remaining OAuth-token validity; defaults to five minutes.
     pub min_oauth_validity_ms: Option<u64>,
     pub signal: Option<CancellationToken>,
+}
+
+impl fmt::Debug for AuthResolutionOverrides {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthResolutionOverrides")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("env", &self.env.as_ref().map(redacted_env))
+            .field("min_oauth_validity_ms", &self.min_oauth_validity_ms)
+            .field("signal", &self.signal)
+            .finish()
+    }
 }
 
 /// Auth resolution shared by all operations in a `Models` collection.

@@ -2124,7 +2124,13 @@ impl fmt::Debug for ImagesOptions {
         f.debug_struct("ImagesOptions")
             .field("signal", &self.signal)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("headers", &self.headers)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
             .field("timeout_ms", &self.timeout_ms)
             .field("provider_options", &self.provider_options)
             .finish_non_exhaustive()

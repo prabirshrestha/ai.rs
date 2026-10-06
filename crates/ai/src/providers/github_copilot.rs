@@ -91,10 +91,19 @@ pub fn oauth() -> Arc<dyn OAuthAuth> {
 
 /// The request token for a stored credential, plus the credential to persist
 /// (refreshed when it had expired).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OAuthApiKey {
     pub new_credentials: OAuthCredential,
     pub api_key: String,
+}
+
+impl std::fmt::Debug for OAuthApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthApiKey")
+            .field("new_credentials", &self.new_credentials)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Pre-1.0 helper (not in Pi, where `Models.getAuth` refreshes under the

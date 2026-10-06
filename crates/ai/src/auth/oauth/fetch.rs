@@ -6,25 +6,47 @@
 //! that need a proxy-aware client) inject their own.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::types::BoxFuture;
+use crate::utils::headers::redact_header;
 use crate::{Error, Result};
 
 /// The message of a DOM `TimeoutError` (`AbortSignal.timeout()`).
 pub(crate) const TIMEOUT_MESSAGE: &str = "The operation was aborted due to timeout";
 
-/// One HTTP request (`fetch(url, init)`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One HTTP request (`fetch(url, init)`). `Debug` redacts credential
+/// headers and the body (token grants carry codes, verifiers and refresh
+/// tokens).
+#[derive(Clone, PartialEq, Eq)]
 pub struct FetchRequest {
     pub method: String,
     pub url: String,
     /// Header names keep the casing the flow uses.
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
+}
+
+impl fmt::Debug for FetchRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FetchRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, value)| redact_header(name, value))
+                    .collect::<Vec<_>>(),
+            )
+            .field("body", &self.body.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl FetchRequest {
@@ -63,14 +85,33 @@ impl FetchRequest {
     }
 }
 
-/// A fully read HTTP response.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A fully read HTTP response. `Debug` redacts credential headers and the
+/// body (token responses carry access and refresh tokens).
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct FetchResponse {
     pub status: u16,
     pub status_text: String,
     /// Lower-cased header names.
     pub headers: HashMap<String, String>,
     pub body: String,
+}
+
+impl fmt::Debug for FetchResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FetchResponse")
+            .field("status", &self.status)
+            .field("status_text", &self.status_text)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, value)| redact_header(name, value))
+                    .collect::<Vec<_>>(),
+            )
+            .field("body", &"<redacted>")
+            .finish()
+    }
 }
 
 impl FetchResponse {
@@ -190,6 +231,40 @@ pub(crate) fn url_search_params(fields: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_redacts_credentials() {
+        let request = FetchRequest::post("https://example.test/token")
+            .header("Authorization", "Bearer secret-access")
+            .header("Content-Type", "application/json")
+            .body(r#"{"refresh_token":"secret-refresh"}"#);
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"), "{debug}");
+        assert!(debug.contains("application/json"), "{debug}");
+
+        let response = FetchResponse {
+            status: 200,
+            headers: [("set-cookie".to_string(), "secret-cookie".to_string())].into(),
+            body: r#"{"access_token":"secret-access"}"#.to_string(),
+            ..Default::default()
+        };
+        assert!(!format!("{response:?}").contains("secret"));
+
+        let pkce = crate::auth::oauth::pkce::generate_pkce().unwrap();
+        assert!(!format!("{pkce:?}").contains(&pkce.verifier));
+
+        let mut env = crate::types::ProviderEnv::new();
+        env.insert("API_TOKEN".to_string(), "secret-env".to_string());
+        let result = crate::auth::AuthResult {
+            env: Some(env),
+            ..Default::default()
+        };
+        let debug = format!("{result:?}");
+        assert!(
+            !debug.contains("secret") && debug.contains("API_TOKEN"),
+            "{debug}"
+        );
+    }
 
     #[test]
     fn encodes_search_params_like_url_search_params() {

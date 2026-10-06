@@ -80,11 +80,24 @@ struct DeviceCodeResponse {
 
 /// A GitHub user access token from the device flow (or the refresh grant),
 /// plus the refresh token and lifetime GitHub returns for expiring tokens.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct GitHubUserToken {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
+}
+
+impl std::fmt::Debug for GitHubUserToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubUserToken")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Retry policy of [`fetch_with_rate_limit_retry`].

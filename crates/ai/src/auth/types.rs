@@ -222,14 +222,35 @@ pub trait AuthContext: Send + Sync {
     async fn file_exists(&self, path: &str) -> bool;
 }
 
-/// Result of resolving auth for a model.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Result of resolving auth for a model. `Debug` shows only the names of
+/// the `env` values.
+#[derive(Clone, Default, PartialEq)]
 pub struct AuthResult {
     pub auth: ModelAuth,
     /// Provider-scoped environment/config values resolved from credentials and ambient context.
     pub env: Option<ProviderEnv>,
     /// Human-readable label for status UI: "ANTHROPIC_API_KEY", "OAuth", "~/.aws/credentials".
     pub source: Option<String>,
+}
+
+impl fmt::Debug for AuthResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthResult")
+            .field("auth", &self.auth)
+            .field("env", &self.env.as_ref().map(redacted_env))
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Env values for `Debug` output: names only (sorted), values redacted.
+pub(crate) fn redacted_env(env: &ProviderEnv) -> Vec<(&str, &str)> {
+    let mut names: Vec<_> = env
+        .keys()
+        .map(|name| (name.as_str(), "<redacted>"))
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -57,6 +57,41 @@ pub(crate) fn has_non_empty_header(headers: &ProviderHeaders, expected: &str) ->
     })
 }
 
+/// Whether a header carries a credential and must not appear in `Debug`
+/// output (an ai.rs safety measure; Pi has no `Debug`).
+pub(crate) fn is_sensitive_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    ) || ["key", "token", "secret", "session"]
+        .iter()
+        .any(|part| name.contains(part))
+}
+
+/// A header for `Debug` output: credential values become `<redacted>`.
+pub(crate) fn redact_header<'a>(name: &'a str, value: &'a str) -> (&'a str, &'a str) {
+    if is_sensitive_header(name) {
+        (name, "<redacted>")
+    } else {
+        (name, value)
+    }
+}
+
+/// [`ProviderHeaders`] for `Debug` output, with credential values redacted.
+pub(crate) fn redacted_provider_headers(headers: &ProviderHeaders) -> Vec<(&str, Option<&str>)> {
+    headers
+        .iter()
+        .map(|(name, value)| match value {
+            Some(value) => {
+                let (name, value) = redact_header(name, value);
+                (name, Some(value))
+            }
+            None => (name.as_str(), None),
+        })
+        .collect()
+}
+
 /// Applies per-request provider header overrides after provider defaults.
 /// A `None` value removes an existing header. `HeaderMap` names are
 /// case-insensitive, so replacement and suppression are too.

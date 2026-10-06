@@ -1044,7 +1044,9 @@ differences. Each is also documented on the module or item involved.
   classifiers; telemetry contexts.
 - **ai.rs extras.** `embeddings`, the `openai-images` API, the provider
   handles, `github_copilot::get_oauth_api_key`, and `AgentToolBuilder` /
-  `AgentOptions::builder` conveniences.
+  `AgentOptions::builder` conveniences. `Debug` output of credentials,
+  options, OAuth requests and responses, PKCE pairs and clients redacts
+  secrets.
 
 ## License
 

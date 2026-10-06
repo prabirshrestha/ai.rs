@@ -7,11 +7,21 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::{Error, Result};
 
-/// A PKCE code verifier and its S256 challenge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A PKCE code verifier and its S256 challenge. `Debug` redacts the
+/// verifier.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"<redacted>")
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 /// Encode bytes as a base64url string without padding.

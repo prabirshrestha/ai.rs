@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::types::ProviderHeaders;
-use crate::utils::headers::apply_provider_headers;
+use crate::utils::headers::{apply_provider_headers, redacted_provider_headers};
 use crate::utils::http::{http_client, send_checked_with_timeout};
 use crate::utils::provider_retry::ProviderHttpError;
 use crate::utils::sse;
@@ -44,8 +44,9 @@ pub struct OpenAIRequestOptions {
     pub timeout_ms: Option<u64>,
 }
 
-/// `new OpenAI({ apiKey, baseURL, fetch, defaultHeaders })`.
-#[derive(Debug, Clone)]
+/// `new OpenAI({ apiKey, baseURL, fetch, defaultHeaders })`. `Debug`
+/// redacts the API key and credential headers.
+#[derive(Clone)]
 pub struct OpenAIClient {
     pub api_key: String,
     pub base_url: String,
@@ -89,6 +90,19 @@ impl SdkEnvHeaders {
             }
         }
         Self { tenant, custom }
+    }
+}
+
+impl std::fmt::Debug for OpenAIClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIClient")
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field(
+                "default_headers",
+                &redacted_provider_headers(&self.default_headers),
+            )
+            .finish_non_exhaustive()
     }
 }
 
