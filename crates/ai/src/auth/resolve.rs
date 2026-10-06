@@ -199,15 +199,35 @@ async fn resolve_stored_oauth(
                         if !expires_soon(&current) {
                             return Ok(None); // another process/request refreshed
                         }
+                        // `AbortSignal.any([signal, AbortSignal.timeout(15s)])`: the
+                        // timeout only aborts the refresh signal; the refresh decides
+                        // when to stop, so one that ignores its signal keeps running.
                         let refresh_signal = refresh_parent.child_token();
-                        let refresh = oauth_for_refresh.refresh(current, refresh_signal.clone());
-                        let refreshed = tokio::select! {
-                            result = refresh => result,
-                            _ = tokio::time::sleep(Duration::from_millis(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS)) => {
+                        let timer = tokio::spawn({
+                            let refresh_signal = refresh_signal.clone();
+                            async move {
+                                tokio::time::sleep(Duration::from_millis(
+                                    DEFAULT_OAUTH_REFRESH_TIMEOUT_MS,
+                                ))
+                                .await;
                                 refresh_signal.cancel();
-                                Err(Error::Aborted(TIMEOUT_MESSAGE.to_string()))
                             }
-                        };
+                        });
+                        let refreshed = oauth_for_refresh
+                            .refresh(current, refresh_signal.clone())
+                            .await;
+                        timer.abort();
+                        let timed_out =
+                            refresh_signal.is_cancelled() && !refresh_parent.is_cancelled();
+                        // An abort caused by the timeout carries the timeout reason,
+                        // like a fetch aborted by `AbortSignal.timeout()`.
+                        let refreshed = refreshed.map_err(|error| {
+                            if timed_out && error.is_abort() {
+                                Error::Aborted(TIMEOUT_MESSAGE.to_string())
+                            } else {
+                                error
+                            }
+                        });
                         match refreshed {
                             Ok(refreshed) => Ok(Some(Credential::OAuth(refreshed))),
                             Err(error) => Err(models_error_with_cause(

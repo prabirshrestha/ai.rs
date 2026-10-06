@@ -1159,15 +1159,35 @@ impl Models {
             }
         };
         let stored = credential.clone();
-        let mutation = self
-            .inner
-            .credentials
-            .modify(
-                provider_id,
-                Box::new(move |_| Box::pin(async move { Ok(Some(stored)) })),
-                AuthOperationOptions::with_signal(&signal),
-            )
-            .await;
+        // Pi races the store mutation against the signal only until the
+        // modifier starts: a store that ignores the signal while the mutation
+        // is queued (e.g. waiting on a file lock) cannot hold up an aborted
+        // login, but a started write is awaited.
+        let mutation_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = mutation_started.clone();
+        let mutation = self.inner.credentials.modify(
+            provider_id,
+            Box::new(move |_| {
+                Box::pin(async move {
+                    started.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Some(stored))
+                })
+            }),
+            AuthOperationOptions::with_signal(&signal),
+        );
+        let mut mutation = std::pin::pin!(mutation);
+        let mutation = tokio::select! {
+            result = &mut mutation => result,
+            _ = signal.cancelled() => {
+                if mutation_started.load(std::sync::atomic::Ordering::SeqCst) {
+                    mutation.await
+                } else {
+                    // The queued mutation is dropped (abandoned operations are
+                    // dropped, not left running).
+                    throw_if_aborted(&signal).map(|()| None)
+                }
+            }
+        };
         if let Err(error) = mutation {
             throw_if_aborted(&signal)?;
             return Err(models_error_with_cause(
@@ -3374,6 +3394,60 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn oauth_refresh_timeout_only_aborts_the_refresh_signal() {
+        // `AbortSignal.timeout(15s)` aborts the refresh signal; a refresh that
+        // ignores it still completes, one that honors it fails with the
+        // timeout reason.
+        for honors_signal in [false, true] {
+            let credentials = Arc::new(InMemoryCredentialStore::new());
+            store_credential(
+                credentials.as_ref(),
+                "p1",
+                oauth_credential("old", "old-refresh", 0),
+            )
+            .await;
+            let models = models_with_credentials(&credentials);
+            models.set_provider(
+                TestProvider::new("p1")
+                    .auth(ProviderAuth {
+                        api_key: None,
+                        oauth: Some(test_oauth(Some(Arc::new(move |_, signal| {
+                            Box::pin(async move {
+                                if honors_signal {
+                                    signal.cancelled().await;
+                                    return Err(Error::aborted());
+                                }
+                                tokio::time::sleep(Duration::from_secs(20)).await;
+                                assert!(signal.is_cancelled());
+                                Ok(OAuthCredential {
+                                    access: "new".to_string(),
+                                    refresh: "new-refresh".to_string(),
+                                    expires: now_millis() + 60 * 60_000,
+                                    extra: Default::default(),
+                                })
+                            })
+                        })))),
+                    })
+                    .arc(),
+            );
+
+            let result = models.get_auth("p1", Default::default()).await;
+            if honors_signal {
+                let error = result.unwrap_err().to_string();
+                assert_eq!(
+                    error,
+                    "OAuth refresh failed for p1: The operation was aborted due to timeout"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().unwrap().auth.api_key.as_deref(),
+                    Some("new")
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn resolves_auth_stored_credential_owns_the_provider_ambient_only_when_nothing_stored() {
         let credentials = Arc::new(InMemoryCredentialStore::new());
@@ -3571,6 +3645,125 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "p1 does not support oauth login");
+    }
+
+    /// A store whose `modify` ignores its signal: it waits for `release`,
+    /// optionally after running the modifier.
+    struct StalledStore {
+        base: InMemoryCredentialStore,
+        run_modifier_first: bool,
+        modifier_ran: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl CredentialStore for StalledStore {
+        async fn read(
+            &self,
+            provider_id: &str,
+            options: AuthOperationOptions,
+        ) -> Result<Option<Credential>> {
+            self.base.read(provider_id, options).await
+        }
+
+        async fn list(&self, options: AuthOperationOptions) -> Result<Vec<CredentialInfo>> {
+            self.base.list(options).await
+        }
+
+        async fn modify(
+            &self,
+            _provider_id: &str,
+            modifier: crate::auth::CredentialModifier,
+            _options: AuthOperationOptions,
+        ) -> Result<Option<Credential>> {
+            let next = if self.run_modifier_first {
+                let next = modifier(None).await?;
+                self.modifier_ran.notify_one();
+                next
+            } else {
+                None
+            };
+            self.release.notified().await;
+            Ok(next)
+        }
+
+        async fn delete(&self, provider_id: &str, options: AuthOperationOptions) -> Result<()> {
+            self.base.delete(provider_id, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn login_abort_does_not_wait_for_a_queued_non_cooperative_store_mutation() {
+        for run_modifier_first in [false, true] {
+            let store = Arc::new(StalledStore {
+                base: InMemoryCredentialStore::new(),
+                run_modifier_first,
+                modifier_ran: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+            });
+            let logged_in = Arc::new(Notify::new());
+            let marker = logged_in.clone();
+            let mut auth = env_key_auth(None);
+            auth.login = Some(Arc::new(move |_| {
+                let marker = marker.clone();
+                Box::pin(async move {
+                    marker.notify_one();
+                    Ok(ApiKeyCredential {
+                        key: Some("logged-in".to_string()),
+                        env: None,
+                    })
+                })
+            }));
+            let models = create_models(CreateModelsOptions {
+                credentials: Some(store.clone()),
+                ..Default::default()
+            });
+            models.set_provider(
+                TestProvider::new("p1")
+                    .auth(api_key_provider_auth(auth))
+                    .arc(),
+            );
+            let controller = CancellationToken::new();
+            let login = tokio::spawn({
+                let models = models.clone();
+                let signal = controller.clone();
+                async move {
+                    models
+                        .login(
+                            "p1",
+                            AuthType::ApiKey,
+                            Arc::new(TestInteraction {
+                                signal: Some(signal),
+                            }),
+                            LoginOptions::default(),
+                        )
+                        .await
+                }
+            });
+            logged_in.notified().await;
+            if run_modifier_first {
+                store.modifier_ran.notified().await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+            controller.cancel();
+
+            if run_modifier_first {
+                // The write started, so login waits for it and succeeds.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                assert!(!login.is_finished());
+                store.release.notify_one();
+                assert_eq!(
+                    login.await.unwrap().unwrap(),
+                    api_key_credential("logged-in")
+                );
+            } else {
+                let result = tokio::time::timeout(Duration::from_secs(5), login)
+                    .await
+                    .expect("an aborted login does not wait for the store");
+                assert!(result.unwrap().unwrap_err().is_abort());
+            }
+        }
     }
 
     #[tokio::test]
