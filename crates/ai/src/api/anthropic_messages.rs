@@ -54,7 +54,7 @@ use crate::types::{
 use crate::utils::diagnostics::{AssistantMessageDiagnostic, append_assistant_message_diagnostic};
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::{apply_provider_headers, has_non_empty_header, headers_to_record};
-use crate::utils::http::{http_client, request_timeout, send_with_retries};
+use crate::utils::http::{http_client, send_with_retries};
 use crate::utils::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::utils::pi_user_agent::get_pi_user_agent;
 use crate::utils::provider_env::get_provider_env_value;
@@ -1331,12 +1331,12 @@ impl AnthropicClient {
             "{}/v1/messages?beta=true",
             self.base_url.trim_end_matches('/')
         );
-        let timeout = request_timeout(options.timeout_ms);
+        // The SDK `timeout` (`fetchWithTimeout`) only runs until the response
+        // headers arrive; `send_with_retries` applies it the same way.
         send_with_retries(&options.request_options(), || {
             self.http_client
                 .post(&url)
                 .headers(headers.clone())
-                .timeout(timeout)
                 .body(body.clone())
         })
         .await
@@ -2535,6 +2535,93 @@ mod tests {
         let message = stream_anthropic(model, context, options).result().await;
         let request = requests.lock().unwrap().first().cloned();
         (message, request)
+    }
+
+    /// A server that sends the response headers and the first `split` SSE
+    /// events, waits `delay`, then sends the rest. With `headers_delay`, it
+    /// waits before sending anything. Counts the requests it accepted.
+    async fn serve_slow_sse(
+        events: Vec<Value>,
+        split: usize,
+        headers_delay: Option<std::time::Duration>,
+        delay: std::time::Duration,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (head, tail) = events.split_at(split);
+                let (head, tail) = (sse(head), sse(tail));
+                tokio::spawn(async move {
+                    let mut chunk = [0u8; 8192];
+                    let _ = socket.read(&mut chunk).await;
+                    if let Some(headers_delay) = headers_delay {
+                        tokio::time::sleep(headers_delay).await;
+                    }
+                    let _ = socket
+                        .write_all(
+                            format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{head}")
+                                .as_bytes(),
+                        )
+                        .await;
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(delay).await;
+                    let _ = socket.write_all(tail.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{address}"), attempts)
+    }
+
+    #[tokio::test]
+    async fn timeout_only_bounds_the_wait_for_response_headers() {
+        let mut model = builtin("anthropic", "claude-haiku-4-5");
+        let (base_url, attempts) = serve_slow_sse(
+            minimal_events(),
+            2,
+            None,
+            std::time::Duration::from_millis(400),
+        )
+        .await;
+        model.base_url = base_url;
+        let mut options = api_key("test-key");
+        options.timeout_ms = Some(100);
+        let result = stream_anthropic(model, hello(), options).result().await;
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Stop,
+            "{:?}",
+            result.error_message
+        );
+        assert_eq!(
+            result.content,
+            vec![AssistantContent::Text(TextContent::new("Hello"))]
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn header_timeouts_read_like_the_sdk_and_are_retried() {
+        let mut model = builtin("anthropic", "claude-haiku-4-5");
+        let (base_url, attempts) = serve_slow_sse(
+            minimal_events(),
+            0,
+            Some(std::time::Duration::from_secs(5)),
+            std::time::Duration::ZERO,
+        )
+        .await;
+        model.base_url = base_url;
+        let mut options = api_key("test-key");
+        options.timeout_ms = Some(50);
+        options.max_retries = Some(1);
+        let result = stream_anthropic(model, hello(), options).result().await;
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some("Request timed out."));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     // anthropic-sse-parsing.test.ts

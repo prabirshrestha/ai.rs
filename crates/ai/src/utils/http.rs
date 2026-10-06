@@ -31,8 +31,46 @@ pub async fn send_checked(
     request: RequestBuilder,
     signal: Option<&CancellationToken>,
 ) -> Result<Response> {
+    send_checked_inner(request, signal, None).await
+}
+
+/// The SDK's `APIConnectionTimeoutError`: `"Request timed out."` with no
+/// status and no headers, which `retryProviderRequest` treats as retryable.
+pub fn request_timed_out_error() -> Error {
+    ProviderHttpError {
+        status: None,
+        headers: Default::default(),
+        body: None,
+        message: "Request timed out.".to_string(),
+    }
+    .into()
+}
+
+/// [`send_checked`] with the SDK request `timeout`. Like the SDK's
+/// `fetchWithTimeout`, the timer only runs until `fetch` resolves, which is
+/// when the response headers arrive: reading the body (a stream that runs
+/// for longer than the timeout, or an error body) is not bounded. Expiry
+/// gives [`request_timed_out_error`].
+pub async fn send_checked_with_timeout(
+    request: RequestBuilder,
+    signal: Option<&CancellationToken>,
+    timeout_ms: Option<u64>,
+) -> Result<Response> {
+    send_checked_inner(request, signal, Some(request_timeout(timeout_ms))).await
+}
+
+async fn send_checked_inner(
+    request: RequestBuilder,
+    signal: Option<&CancellationToken>,
+    timeout: Option<Duration>,
+) -> Result<Response> {
     let send = async {
-        let response = request.send().await?;
+        let response = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, request.send())
+                .await
+                .map_err(|_| request_timed_out_error())??,
+            None => request.send().await?,
+        };
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -55,8 +93,8 @@ pub async fn send_checked(
     }
 }
 
-/// [`send_checked`] wrapped in [`retry_provider_request`] with the request
-/// options' retry settings.
+/// [`send_checked_with_timeout`] wrapped in [`retry_provider_request`] with
+/// the request options' timeout and retry settings.
 pub async fn send_with_retries<F>(
     options: &ProviderRequestOptions,
     mut build: F,
@@ -70,11 +108,12 @@ where
         signal: options.signal.clone(),
     };
     let signal = options.signal.clone();
+    let timeout_ms = options.timeout_ms;
     retry_provider_request(
         || {
             let request = build();
             let signal = signal.clone();
-            async move { send_checked(request, signal.as_ref()).await }
+            async move { send_checked_with_timeout(request, signal.as_ref(), timeout_ms).await }
         },
         &retry_options,
     )

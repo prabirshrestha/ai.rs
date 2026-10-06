@@ -8,9 +8,9 @@
 //! - URL: `baseURL + path`, joining a trailing slash like the SDK.
 //! - One attempt per call (Pi passes `maxRetries: 0`); `retryProviderRequest`
 //!   drives retries.
-//! - The SDK `timeout` bounds the request until the response headers arrive.
-//!   Divergence: a timeout surfaces as `"Request timed out."` without the
-//!   SDK's connection-error retry classification.
+//! - The SDK `timeout` bounds the request until the response headers arrive;
+//!   expiry is the SDK's `APIConnectionTimeoutError` (`"Request timed out."`,
+//!   no status, so `retryProviderRequest` retries it).
 //! - SSE: `data: [DONE]` ends the stream, each other event is parsed as JSON,
 //!   and an event whose JSON has a truthy `error` field fails the stream like
 //!   the SDK's `APIError` (message from `error.message`), as a status-less
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::ProviderHeaders;
 use crate::utils::headers::apply_provider_headers;
-use crate::utils::http::{http_client, request_timeout, send_checked};
+use crate::utils::http::{http_client, send_checked_with_timeout};
 use crate::utils::provider_retry::ProviderHttpError;
 use crate::utils::sse;
 use crate::{Error, Result};
@@ -100,15 +100,7 @@ impl OpenAIClient {
             .post(self.build_url(path))
             .headers(self.build_headers()?)
             .json(body);
-        match tokio::time::timeout(
-            request_timeout(options.timeout_ms),
-            send_checked(request, options.signal.as_ref()),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(Error::message("Request timed out.")),
-        }
+        send_checked_with_timeout(request, options.signal.as_ref(), options.timeout_ms).await
     }
 }
 

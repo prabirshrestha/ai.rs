@@ -1010,7 +1010,6 @@ differences. Each is also documented on the module or item involved.
 - **HTTP.** No vendor SDKs: requests are built by hand (reqwest + SSE) the way
   the SDKs send them, minus `X-Stainless` headers. HTTP errors read
   `"<status> <body>"`. `fetch` and SDK `client` options become `http_client`.
-  Timeouts read "Request timed out." and are not retried.
 - **Auth.** OAuth flows take an injectable `OAuthFetch`, deadlines use the
   Tokio clock, `PI_OAUTH_CALLBACK_HOST` is read per login, and a failed lazy
   OAuth load is retried. GitHub Copilot keeps the `ghr_` refresh-token grant.
