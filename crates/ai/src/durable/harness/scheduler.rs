@@ -246,7 +246,10 @@ pub struct TaskScheduler {
     task_waiters: Arc<Waiters<TaskId, TaskRecord>>,
     /// Idle waiters by conversation; `None` waits for the whole Harness.
     idle_waiters: Arc<Waiters<Option<ConversationId>, ()>>,
-    unsubscribes: Mutex<Vec<Unsubscribe>>,
+    /// `#unsubscribeRegistry`. The commit and close subscriptions are never
+    /// removed (as in Pi): commits of invocations finishing during `join()`
+    /// are still observed.
+    unsubscribe_registry: Mutex<Option<Unsubscribe>>,
     me: Weak<TaskScheduler>,
 }
 
@@ -571,7 +574,7 @@ impl TaskScheduler {
             state: Mutex::default(),
             task_waiters: Arc::default(),
             idle_waiters: Arc::default(),
-            unsubscribes: Mutex::default(),
+            unsubscribe_registry: Mutex::default(),
             me: me.clone(),
         })
     }
@@ -595,13 +598,13 @@ impl TaskScheduler {
     /// Load live tasks and change surviving `running` tasks back to `pending`. Dispatches nothing.
     pub async fn open(&self, context: &Context) -> Result<()> {
         let weak = self.me.clone();
-        let commits = self.session().subscribe_commits(move |publication, _| {
+        let _commits = self.session().subscribe_commits(move |publication, _| {
             if let Some(scheduler) = weak.upgrade() {
                 scheduler.observe(publication);
             }
         })?;
         let weak = self.me.clone();
-        let close = self.session().subscribe_close(move || {
+        let _close = self.session().subscribe_close(move || {
             if let Some(scheduler) = weak.upgrade() {
                 scheduler.seal();
             }
@@ -612,7 +615,7 @@ impl TaskScheduler {
                 scheduler.kick();
             }
         }));
-        self.unsubscribes.lock().extend([commits, close, registry]);
+        *self.unsubscribe_registry.lock() = Some(registry);
         let me = self.arc();
         self.session()
             .commit_with(
@@ -1245,6 +1248,12 @@ impl TaskScheduler {
         Ok(())
     }
 
+    /// The live record the scheduler tracks for `id` (tests only).
+    #[cfg(test)]
+    pub(crate) fn live_task(&self, id: TaskId) -> Option<TaskRecord> {
+        self.state.lock().live.get(&id).cloned()
+    }
+
     /// Close listener: runs synchronously once admission is sealed, before `join()`.
     fn seal(&self) {
         let invocations: Vec<Arc<Invocation>> = {
@@ -1252,7 +1261,8 @@ impl TaskScheduler {
             state.closing = true;
             state.invocations.values().cloned().collect()
         };
-        for unsubscribe in self.unsubscribes.lock().drain(..) {
+        let unsubscribe = self.unsubscribe_registry.lock().take();
+        if let Some(unsubscribe) = unsubscribe {
             unsubscribe();
         }
         let error = closed_error();

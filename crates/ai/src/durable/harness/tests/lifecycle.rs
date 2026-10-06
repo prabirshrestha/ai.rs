@@ -347,6 +347,83 @@ async fn settles_durably_a_commit_whose_committer_was_cancelled_while_it_was_in_
 }
 
 #[tokio::test]
+async fn leaves_no_subscription_behind_a_watch_acquisition_cancelled_on_the_line() {
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct Notes {
+        text: String,
+    }
+    let notes = define_doc(DocDefinition::new(
+        "test.cancelled-watch",
+        1,
+        SessionScope,
+        Notes::default,
+    ))
+    .unwrap();
+    let storage = Arc::new(ControlledStorage::new());
+    let (harness, _, _) = open_tasks(storage.clone(), vec![], TaskOptions::default()).await;
+    let root = harness
+        .root(&context(), CreateOptions::default())
+        .await
+        .unwrap();
+    {
+        let notes = notes.clone();
+        harness
+            .commit(
+                move |tx| async move {
+                    tx.doc(&notes, ())
+                        .await?
+                        .edit(|notes| notes.text = "x".into())
+                },
+                &context(),
+            )
+            .await
+            .unwrap();
+    }
+    // Count commit subscriptions of document observers (Pi wraps
+    // `subscribeCommits`; Rust compares against the count before).
+    let subscriptions = harness.session().commit_listener_count();
+
+    // Cancel a document watch while its acquisition loads the document on the line.
+    harness.session().unload_documents().await;
+    let find = storage.hold_find_document();
+    let controller = AbortController::new();
+    let doc_watch = {
+        let (harness, notes, signalled) =
+            (harness.clone(), notes.clone(), with_signal(&controller));
+        tokio::spawn(async move { harness.watch_doc(&notes, (), &signalled).await.map(|_| ()) })
+    };
+    find.entered().await;
+    controller.abort(Some(AbortReason::message("cancelled")));
+    find.release();
+    let error = doc_watch.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    assert_eq!(harness.session().commit_listener_count(), subscriptions);
+
+    // Cancel a view watch while it builds its mount on the line.
+    harness.session().unload_documents().await;
+    let find = storage.hold_find_document();
+    let controller = AbortController::new();
+    let view_watch = {
+        let (root, signalled) = (root.clone(), with_signal(&controller));
+        tokio::spawn(async move { root.watch(&signalled).await.map(|_| ()) })
+    };
+    find.entered().await;
+    controller.abort(Some(AbortReason::message("cancelled")));
+    find.release();
+    let error = view_watch.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    assert_eq!(harness.session().commit_listener_count(), subscriptions);
+    // No observer kept the mount: the next observer builds a new one, and the one after that another.
+    let first = root.view_state(&context()).await.unwrap();
+    let first_value = first.value();
+    first.dispose().unwrap();
+    let second = root.view_state(&context()).await.unwrap();
+    assert!(!Arc::ptr_eq(&second.value().entries, &first_value.entries));
+    second.dispose().unwrap();
+    harness.close(&context()).await.unwrap();
+}
+
+#[tokio::test]
 async fn rejects_conversation_and_harness_operations_once_close_begins_inspect_queued_before_reports_closing()
  {
     let storage = Arc::new(ControlledStorage::new());
@@ -1009,5 +1086,39 @@ async fn publishes_no_frame_to_states_and_watches_from_a_commit_that_settles_dur
             .last_commit()
             .iter()
             .any(|write| matches!(write, StorageWrite::Entry { .. }))
+    );
+}
+
+// Rust-only: Pi's `#seal` removes only the registry subscription, so a
+// commit that settles after close begins is still observed.
+#[tokio::test]
+async fn observes_a_commit_that_settles_during_close() {
+    let storage = Arc::new(ControlledStorage::new());
+    let idle = one_step("test.close-observed", || async {});
+    let (harness, _, _) =
+        open_tasks(storage.clone(), vec![idle.any()], TaskOptions::default()).await;
+    let root = harness
+        .root(&context(), CreateOptions::default())
+        .await
+        .unwrap();
+    let held = storage.hold_commits();
+    let creating = {
+        let (root, idle) = (root.clone(), idle.clone());
+        tokio::spawn(async move { start(&root, &idle, (), false).await })
+    };
+    held.entered().await;
+    let scheduler = harness.scheduler().clone();
+    let closing = {
+        let harness = harness.clone();
+        tokio::spawn(async move { harness.close(&context()).await })
+    };
+    flush().await;
+    held.release();
+    let id = creating.await.unwrap();
+    closing.await.unwrap().unwrap();
+    // The creation published after the seal and was observed.
+    assert_eq!(
+        scheduler.live_task(id).map(|record| record.state.status()),
+        Some(crate::durable::types::TaskStatus::Pending)
     );
 }

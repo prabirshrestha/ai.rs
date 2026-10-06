@@ -801,6 +801,12 @@ impl SessionImpl {
         self.inner.subscribe_close(Arc::new(listener))
     }
 
+    /// The number of commit subscriptions (tests only).
+    #[cfg(test)]
+    pub(crate) fn commit_listener_count(&self) -> usize {
+        self.inner.commit_listeners.lock().len()
+    }
+
     /// Drop every loaded tracker on the mutation line; later access cold-loads from Storage.
     pub fn unload_documents(&self) -> BoxFuture<'static, ()> {
         let documents = self.inner.documents.clone();
