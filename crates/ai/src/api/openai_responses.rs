@@ -709,8 +709,8 @@ mod tests {
 
     use super::*;
     use crate::api::openai_client::test_support::{
-        MockResponse, MockServer, capture_payload, collect, context, copilot_model, gpt5_mini,
-        model, openai_model, stream_event_hook,
+        MockResponse, MockServer, capture_payload, collect, collect_aborting, context,
+        copilot_model, gpt5_mini, model, openai_model, serve_stalled_sse, stream_event_hook,
     };
     use crate::types::{AssistantMessageEvent, ModelCompat};
 
@@ -1166,6 +1166,72 @@ mod tests {
             result.error_message.as_deref(),
             Some("OpenAI Responses stream ended before a terminal response event")
         );
+    }
+
+    #[tokio::test]
+    async fn abort_mid_stream_fails_like_an_early_end_of_stream() {
+        // The SDK swallows the abort and ends the stream, so Pi's
+        // processResponsesStream reports the missing terminal event.
+        let head: String = [
+            json!({ "type": "response.created", "response": { "id": "resp_1" } }),
+            json!({ "type": "response.output_item.added", "output_index": 0,
+                "item": { "type": "message", "id": "msg_1", "role": "assistant", "content": [] } }),
+            json!({ "type": "response.output_text.delta", "output_index": 0, "delta": "Hel" }),
+        ]
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
+        let mut model = gpt5_mini("openai-responses");
+        model.base_url = serve_stalled_sse(head).await;
+        let signal = tokio_util::sync::CancellationToken::new();
+        let mut options = with_key("test");
+        options.signal = Some(signal.clone());
+        let (events, result) = collect_aborting(
+            stream_openai_responses(model, hi(), options),
+            signal,
+            "text_delta",
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type())
+                .collect::<Vec<_>>(),
+            ["start", "text_start", "text_delta", "error"]
+        );
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("OpenAI Responses stream ended before a terminal response event")
+        );
+    }
+
+    #[tokio::test]
+    async fn named_error_frames_fail_with_the_payload_message() {
+        // OpenAI SDK `core/streaming.js`: `event: error` throws
+        // `APIError(undefined, data?.error ?? data)`, so the message is the
+        // payload's, not processResponsesStream's "Error Code ..." text.
+        let body: String = [
+            json!({ "type": "response.created", "response": { "id": "resp_1" } }),
+            json!({ "type": "error", "code": "server_error", "message": "boom", "param": null, "sequence_number": 1 }),
+        ]
+        .iter()
+        .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()))
+        .collect();
+        let (_, result) = request_with(
+            gpt5_mini("openai-responses"),
+            hi(),
+            with_key("test"),
+            MockResponse::sse_raw(body),
+        )
+        .await;
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert_eq!(result.error_message.as_deref(), Some("boom"));
     }
 
     #[tokio::test]

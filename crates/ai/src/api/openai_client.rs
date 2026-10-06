@@ -11,10 +11,11 @@
 //! - The SDK `timeout` bounds the request until the response headers arrive;
 //!   expiry is the SDK's `APIConnectionTimeoutError` (`"Request timed out."`,
 //!   no status, so `retryProviderRequest` retries it).
-//! - SSE: `data: [DONE]` ends the stream, each other event is parsed as JSON,
-//!   and an event whose JSON has a truthy `error` field fails the stream like
-//!   the SDK's `APIError` (message from `error.message`), as a status-less
-//!   `ProviderHttpError`.
+//! - SSE (see [`sse_json_events`]): `data: [DONE]` ends the stream, each
+//!   other event is parsed as JSON, and an `event: error` frame or an event
+//!   whose JSON has a truthy `error` field fails the stream like the SDK's
+//!   `APIError` (message from `error.message`), as a status-less
+//!   `ProviderHttpError`. An abort ends the stream quietly, like the SDK.
 
 use futures::{Stream, StreamExt};
 use reqwest::Response;
@@ -105,39 +106,59 @@ impl OpenAIClient {
 }
 
 /// The SDK's `Stream.fromSSEResponse()`: parsed JSON events until `[DONE]`.
+///
+/// Like the SDK, the stream ends at a `data: [DONE]` frame, a frame named
+/// `event: error` fails with `APIError(data.error ?? data)`, any other frame
+/// whose JSON has a truthy `error` fails with `APIError(data.error)`, and
+/// malformed JSON fails with the SDK's message. An abort ends the stream
+/// without an error (the SDK swallows it), so callers see a normal end of
+/// stream and check the signal themselves.
 pub fn sse_json_events(
     response: Response,
     signal: Option<CancellationToken>,
 ) -> impl Stream<Item = Result<Value>> + Send + 'static {
-    let mut done = false;
-    sse::events(response, signal).filter_map(move |event| {
-        let item = match event {
-            Err(error) => Some(Err(error)),
-            Ok(_) if done => None,
-            Ok(event) if event.data.starts_with("[DONE]") => {
-                done = true;
-                None
-            }
-            Ok(event) => Some(parse_sse_data(&event.data)),
-        };
-        futures::future::ready(item)
-    })
+    sse::sdk_events(response, signal)
+        .map(|event| {
+            event.map(|event| {
+                if event.data == "[DONE]" {
+                    None
+                } else {
+                    Some(parse_sse_event(&event))
+                }
+            })
+        })
+        .take_while(|item| futures::future::ready(!matches!(item, Ok(None))))
+        .filter_map(|item| futures::future::ready(item.transpose()))
+        .map(Result::flatten)
 }
 
-fn parse_sse_data(data: &str) -> Result<Value> {
-    let value: Value = serde_json::from_str(data)?;
+fn parse_sse_event(event: &sse::SseEvent) -> Result<Value> {
+    let value: Value = serde_json::from_str(&event.data)
+        .map_err(|_| Error::message("Error reading response: malformed server-sent event JSON."))?;
+    if event.event.as_deref() == Some("error") {
+        let error = match value.get("error") {
+            Some(error) if !error.is_null() => error.clone(),
+            _ => value,
+        };
+        return Err(api_error(&error));
+    }
     if let Some(error) = value.get("error").filter(|error| is_truthy(error)) {
-        // Keep the error object as the body (wrapped like an HTTP error body,
-        // `{ "error": ... }`) so callers can read fields such as
-        // `error.metadata.raw`, like the SDK's `APIError.error`.
-        return Err(Error::ProviderHttp(Box::new(ProviderHttpError {
-            status: None,
-            headers: Default::default(),
-            body: Some(serde_json::json!({ "error": error }).to_string()),
-            message: api_error_message(error),
-        })));
+        return Err(api_error(error));
     }
     Ok(value)
+}
+
+/// `new APIError(undefined, error, undefined, headers)`: a status-less
+/// `ProviderHttpError`. The error object is kept as the body (wrapped like
+/// an HTTP error body, `{ "error": ... }`) so callers can read fields such
+/// as `error.metadata.raw`, like the SDK's `APIError.error`.
+fn api_error(error: &Value) -> Error {
+    Error::ProviderHttp(Box::new(ProviderHttpError {
+        status: None,
+        headers: Default::default(),
+        body: Some(serde_json::json!({ "error": error }).to_string()),
+        message: api_error_message(error),
+    }))
 }
 
 /// `APIError.makeMessage(undefined, error, undefined)`.
@@ -145,7 +166,8 @@ fn api_error_message(error: &Value) -> String {
     match error.get("message") {
         Some(Value::String(message)) if !message.is_empty() => message.clone(),
         Some(message) if is_truthy(message) => message.to_string(),
-        _ => error.to_string(),
+        _ if is_truthy(error) => error.to_string(),
+        _ => "(no status code or body)".to_string(),
     }
 }
 
@@ -303,6 +325,48 @@ pub(crate) mod test_support {
         let (_, result) = collect(run(hook)).await;
         let payload = payloads.lock().first().cloned();
         payload.unwrap_or_else(|| panic!("no payload captured: {:?}", result.error_message))
+    }
+
+    /// Drain a stream, cancelling `signal` once an event of type `abort_at`
+    /// (e.g. `"text_delta"`) arrives.
+    pub async fn collect_aborting(
+        stream: AssistantMessageEventStream,
+        signal: tokio_util::sync::CancellationToken,
+        abort_at: &str,
+    ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
+        let mut events = Vec::new();
+        let mut live = stream.clone();
+        while let Some(event) = live.next().await {
+            if event.event_type() == abort_at {
+                signal.cancel();
+            }
+            events.push(event);
+        }
+        (events, stream.result().await)
+    }
+
+    /// Serve SSE responses whose body is `head` and then stalls with the
+    /// connection open, for mid-stream abort tests. Returns the base URL.
+    pub async fn serve_stalled_sse(head: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let head = head.clone();
+                tokio::spawn(async move {
+                    if read_request(&mut socket).await.is_none() {
+                        return;
+                    }
+                    let raw = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{head}"
+                    );
+                    let _ = socket.write_all(raw.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                });
+            }
+        });
+        format!("http://{addr}/v1")
     }
 
     #[derive(Debug, Clone)]
@@ -501,18 +565,94 @@ mod tests {
         );
     }
 
+    fn frame(event: Option<&str>, data: &str) -> sse::SseEvent {
+        sse::SseEvent {
+            event: event.map(str::to_string),
+            data: data.to_string(),
+            raw: Vec::new(),
+        }
+    }
+
     #[test]
     fn sse_error_payloads_fail_like_api_errors() {
         assert_eq!(
-            parse_sse_data(r#"{"error":{"message":"boom"}}"#)
+            parse_sse_event(&frame(None, r#"{"error":{"message":"boom"}}"#))
                 .unwrap_err()
                 .to_string(),
             "boom"
         );
         assert_eq!(
-            parse_sse_data(r#"{"type":"error","error":null}"#).unwrap(),
+            parse_sse_event(&frame(None, r#"{"type":"error","error":null}"#)).unwrap(),
             json!({ "type": "error", "error": null })
         );
+        // `event: error` frames: `APIError(undefined, data?.error ?? data)`.
+        assert_eq!(
+            parse_sse_event(&frame(
+                Some("error"),
+                r#"{"type":"error","code":"server_error","message":"boom"}"#
+            ))
+            .unwrap_err()
+            .to_string(),
+            "boom"
+        );
+        assert_eq!(
+            parse_sse_event(&frame(Some("error"), r#"{"error":{"message":"nested"}}"#))
+                .unwrap_err()
+                .to_string(),
+            "nested"
+        );
+        assert_eq!(
+            parse_sse_event(&frame(Some("error"), r#"{"code":1}"#))
+                .unwrap_err()
+                .to_string(),
+            r#"{"code":1}"#
+        );
+        assert_eq!(
+            parse_sse_event(&frame(None, "{not json"))
+                .unwrap_err()
+                .to_string(),
+            "Error reading response: malformed server-sent event JSON."
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_streams_stop_at_done_and_fail_on_error_frames() {
+        use futures::StreamExt;
+
+        use super::test_support::{MockResponse, MockServer};
+
+        let server = MockServer::start(vec![
+            MockResponse::sse_raw(
+                "data: {\"a\":1}\n\ndata: [DONE]\n\ndata: {\"error\":{\"message\":\"after done\"}}\n\n",
+            ),
+            MockResponse::sse_raw(
+                "event: response.created\ndata: {\"a\":1}\n\nevent: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"boom\"}\n\n",
+            ),
+        ])
+        .await;
+        let client = OpenAIClient::new("key", &server.url, None, ProviderHeaders::new());
+        let options = OpenAIRequestOptions::default();
+
+        let response = client
+            .post("/responses", &json!({}), &options)
+            .await
+            .unwrap();
+        let items: Vec<_> = sse_json_events(response, None).collect().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].as_ref().unwrap(), &json!({ "a": 1 }));
+
+        let response = client
+            .post("/responses", &json!({}), &options)
+            .await
+            .unwrap();
+        let items: Vec<_> = sse_json_events(response, None).collect().await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_ref().unwrap(), &json!({ "a": 1 }));
+        let Err(Error::ProviderHttp(error)) = &items[1] else {
+            panic!("expected an APIError, got {:?}", items[1]);
+        };
+        assert_eq!(error.message, "boom");
+        assert_eq!(error.status, None);
     }
 
     #[test]

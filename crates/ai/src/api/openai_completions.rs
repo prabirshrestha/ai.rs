@@ -2358,8 +2358,8 @@ mod tests {
 
     use super::*;
     use crate::api::openai_client::test_support::{
-        CapturedRequest, MockResponse, MockServer, capture_payload, collect, context, model,
-        openai_model, stream_event_hook,
+        CapturedRequest, MockResponse, MockServer, capture_payload, collect, collect_aborting,
+        context, model, openai_model, serve_stalled_sse, stream_event_hook,
     };
     use crate::types::ToolChoice;
 
@@ -2512,6 +2512,40 @@ mod tests {
         let server = MockServer::start(vec![MockResponse::sse(chunks)]).await;
         model.base_url = server.url.clone();
         collect(stream_simple_openai_completions(model, ctx, options).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn abort_mid_stream_ends_open_blocks_then_fails_as_aborted() {
+        // The SDK swallows the abort and ends the stream, so Pi finishes the
+        // open blocks before "Request was aborted".
+        let head = format!(
+            "data: {}\n\n",
+            json!({ "id": "chatcmpl-1", "choices": [{ "delta": { "content": "Hel" } }] })
+        );
+        let mut model = completions_model(json!({}));
+        model.base_url = serve_stalled_sse(head).await;
+        let signal = tokio_util::sync::CancellationToken::new();
+        let mut options = with_key("test");
+        options.signal = Some(signal.clone());
+        let (events, result) = collect_aborting(
+            stream_openai_completions(model, hi(), options),
+            signal,
+            "text_delta",
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type())
+                .collect::<Vec<_>>(),
+            ["start", "text_start", "text_delta", "text_end", "error"]
+        );
+        assert_eq!(result.stop_reason, StopReason::Aborted);
+        assert_eq!(result.error_message.as_deref(), Some("Request was aborted"));
+        assert_eq!(
+            content_json(&result),
+            json!([{ "type": "text", "text": "Hel" }])
+        );
     }
 
     fn content_json(message: &AssistantMessage) -> Value {
