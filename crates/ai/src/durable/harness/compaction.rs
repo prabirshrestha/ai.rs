@@ -299,7 +299,8 @@ async fn summarize_phase(task: Current, runtime: Runtime, context: Context) -> R
         .entries
         .iter()
         .position(|entry| entry.id == request.first_kept)
-        .unwrap_or(view.entries.len());
+        // Pi's `findIndex` gives -1, and `slice(0, -1)` drops the last contribution.
+        .unwrap_or(view.contributions.len().saturating_sub(1));
     let now = runtime.now()?;
     let messages = vec![
         Message::System(SystemMessage {
@@ -599,6 +600,8 @@ pub fn estimate_context(view: &ContextView, extra: &[Message]) -> u64 {
     }
     let (from, mut tokens) = match measured {
         None => (0, 0u64),
+        // Pi's `lastIndexOf` finds the measured object by identity; Rust compares by value, which differs only when
+        // a deep-equal assistant message follows it.
         Some(measured) => (
             view.messages
                 .iter()
@@ -764,7 +767,9 @@ fn content_text(content: &[UserContent]) -> String {
         .join("\n")
 }
 
-/// Truncate to `max_chars` UTF-16 code units (TS string length).
+/// Truncate to `max_chars` UTF-16 code units (TS string length). Divergence: when a surrogate pair straddles
+/// `max_chars`, Pi's `slice` keeps the lone high surrogate; a Rust `String` cannot hold one, so the pair is dropped
+/// whole (the reported count is the same).
 fn truncate(text: &str, max_chars: usize) -> String {
     let length: usize = text.chars().map(char::len_utf16).sum();
     if length <= max_chars {

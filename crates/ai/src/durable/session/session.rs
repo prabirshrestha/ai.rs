@@ -109,6 +109,8 @@ struct SessionInner {
     next_listener: Mutex<u64>,
     tail: Mutex<Option<oneshot::Receiver<()>>>,
     closing: Mutex<Option<Shared<BoxFuture<'static, Result<()>>>>>,
+    /// Starts the close task once the close listeners ran.
+    close_start: Mutex<Option<oneshot::Sender<()>>>,
     poison: Mutex<Option<Error>>,
 }
 
@@ -395,6 +397,7 @@ impl SessionImpl {
                 next_listener: Mutex::new(0),
                 tail: Mutex::new(None),
                 closing: Mutex::new(None),
+                close_start: Mutex::new(None),
                 poison: Mutex::new(None),
             }),
         }
@@ -753,8 +756,12 @@ impl SessionImpl {
                     let cleanup = without_abort_signal(context);
                     let inner = self.inner.clone();
                     // Seal admission before anything else runs, then stop observers; admitted work settles before
-                    // Storage closes.
+                    // Storage closes. As in TS, where `beforeClose()` runs in a later microtask, the close listeners
+                    // below run before it starts.
+                    let (start, started) = oneshot::channel::<()>();
+                    *self.inner.close_start.lock() = Some(start);
                     let handle = tokio::spawn(async move {
+                        let _ = started.await;
                         inner.hooks.before_close().await;
                         let line = inner.clone();
                         inner
@@ -779,6 +786,9 @@ impl SessionImpl {
                     .collect();
             for listener in listeners {
                 listener();
+            }
+            if let Some(start) = self.inner.close_start.lock().take() {
+                let _ = start.send(());
             }
         }
         let context = context.clone();

@@ -765,6 +765,8 @@ fn publish_progress(
                 .get(previous.diagnostics..)
                 .unwrap_or_default()
                 .to_vec();
+            // Pi compares the details object by identity; Rust by value, so deep-equal details re-emitted as a new
+            // object are not counted or rewritten again (byte accounting only).
             let details_changed = details != previous.details;
             // What the commit writes, as the diff stores the string: an append, a trim plus an append of what follows
             // the shared part, or the whole window when its bounded overlap search finds nothing.

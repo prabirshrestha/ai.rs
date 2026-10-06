@@ -1650,3 +1650,29 @@ async fn reads_ts_task_sidecar_lines_that_omit_void_fields() {
     let reopened = open_default(&dir).await;
     assert_eq!(task_json(&reopened, task_id).await, Some(task));
 }
+
+// Rust-only: TS decodes each line with `TextDecoder`, which drops a leading
+// byte order mark, so a BOM-prefixed line parses.
+#[tokio::test]
+async fn reads_a_line_with_a_leading_byte_order_mark() {
+    let directory = TempDir::new("pi-durable-jsonl-");
+    let dir = dir_path(&directory);
+    let storage = open_default(&dir).await;
+    create_root(&storage).await;
+    let task_id = mint(&storage).await;
+    commit(&storage, json!([task_write(pending_task(task_id, "bom"))]))
+        .await
+        .unwrap();
+    drop(storage);
+
+    let path = format!("{dir}/task-{task_id}.jsonl");
+    let lines = read_lines(&path);
+    assert_eq!(lines.len(), 1);
+    std::fs::write(&path, format!("\u{FEFF}{}\n", lines[0])).unwrap();
+
+    let reopened = open_default(&dir).await;
+    assert_eq!(
+        task_json(&reopened, task_id).await,
+        Some(pending_task(task_id, "bom"))
+    );
+}

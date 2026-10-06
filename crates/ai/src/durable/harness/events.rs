@@ -257,7 +257,8 @@ impl ObservedValue for EventBatch {
 
 /// Serialized stream of one conversation's event batches, one per commit.
 pub struct AgentEventStream {
-    /// The `snapshot` event at attachment.
+    /// The `snapshot` event at attachment. Divergence: Pi's is an `AgentEvent` with `type: "snapshot"`; this is the
+    /// variant's payload, which serializes without the tag (wrap it in `AgentEvent::Snapshot` for Pi's JSON).
     pub snapshot: SnapshotEvent,
     watch: CommittedWatch<EventBatch>,
 }

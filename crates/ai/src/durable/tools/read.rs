@@ -153,7 +153,9 @@ async fn execute(
     let mut output_text = truncation.content.clone();
     let mut details: Option<JsonValue> = None;
     if truncation.first_line_exceeds_limit {
-        // Show the start of the line, cut at the byte limit on a character boundary.
+        // Show the start of the line, cut at the byte limit on a character boundary. Pi indexes
+        // `allLines[startLine]` with the unclamped offset, which is `undefined` for a fractional one; Rust uses the
+        // integer slice index (malformed input only).
         let line_bytes = all_lines[start].as_bytes();
         let end = character_end(line_bytes, DEFAULT_MAX_BYTES).min(line_bytes.len());
         output_text = String::from_utf8_lossy(&line_bytes[..end]).into_owned();

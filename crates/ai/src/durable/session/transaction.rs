@@ -12,7 +12,9 @@
 //! - Drafts are [`DocDraft`] handles instead of proxies: typed values are read
 //!   with [`DocDraft::get`] and changed with [`DocDraft::edit`]; Chord diffs the
 //!   draft at preparation. A settled draft fails with "Cannot use a settled
-//!   overlay".
+//!   overlay". An edit that replaces the root with a non-object fails with
+//!   "Document values must be JSON objects" (Rust-only: a TS proxy draft
+//!   cannot replace its root).
 //! - Storage writes own their JSON, so a written base is a copy of the adopted
 //!   revision rather than the same object, and delta ops are a copy of the
 //!   published `Arc<[Op]>`.

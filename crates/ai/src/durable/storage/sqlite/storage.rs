@@ -115,10 +115,7 @@ fn cursor_id(cursor: Option<&Cursor>) -> Result<Option<u64>> {
     let Some(after) = cursor.and_then(|cursor| cursor.get("after")) else {
         return Ok(None);
     };
-    match after.as_u64() {
-        Some(after) if after <= MAX_SAFE_INTEGER => Ok(Some(after)),
-        _ => Err(Error::type_error("Invalid storage cursor")),
-    }
+    crate::durable::storage::cursor_after(after)
 }
 
 /// `cursorId(cursor) ?? -1` as a binding.
@@ -126,23 +123,26 @@ fn cursor_binding(cursor: Option<&Cursor>) -> Result<SqliteValue> {
     Ok(cursor_id(cursor)?.map_or(SqliteValue::Integer(-1), SqliteValue::from))
 }
 
-fn page<T>(mut values: Vec<T>, limit: usize, id: impl Fn(&T) -> u64) -> Page<T> {
+fn page<T>(mut values: Vec<T>, limit: usize, id: impl Fn(&T) -> u64) -> Result<Page<T>> {
     if values.len() <= limit {
-        return Page {
+        return Ok(Page {
             items: values,
             next: None,
-        };
+        });
     }
     values.truncate(limit);
-    let next = values.last().map(|last| {
-        let mut cursor = Cursor::new();
-        cursor.insert("after".into(), JsonValue::from(id(last)));
-        cursor
-    });
-    Page {
+    // Pi reads `items.at(-1)!.id`, which throws for a zero limit.
+    let Some(last) = values.last() else {
+        return Err(Error::type_error(
+            crate::durable::storage::memory::PAGE_LIMIT_ZERO,
+        ));
+    };
+    let mut cursor = Cursor::new();
+    cursor.insert("after".into(), JsonValue::from(id(last)));
+    Ok(Page {
         items: values,
-        next,
-    }
+        next: Some(cursor),
+    })
 }
 
 fn scope_columns(scope: &DocumentScope) -> ScopeColumns {
@@ -473,7 +473,7 @@ impl SqliteStorage {
                     Error::message(format!("Unknown conversation: {}", parent.conversation_id))
                 })?;
         }
-        Ok(page(values, limit, |entry| entry.id.0))
+        page(values, limit, |entry| entry.id.0)
     }
 
     fn candidate_next_id(&self, writes: &[StorageWrite]) -> u64 {
@@ -1103,7 +1103,7 @@ impl Storage for SqliteStorage {
             .iter()
             .map(record)
             .collect::<Result<Vec<ConversationRecord>>>()?;
-        Ok(page(values, limit, |conversation| conversation.id.0))
+        page(values, limit, |conversation| conversation.id.0)
     }
 
     async fn entry(&self, id: EntryId, _context: &Context) -> Result<Option<StoredEntry>> {
@@ -1198,7 +1198,7 @@ impl Storage for SqliteStorage {
             .iter()
             .map(record)
             .collect::<Result<Vec<TaskRecord>>>()?;
-        Ok(page(values, limit, |task| task.id.0))
+        page(values, limit, |task| task.id.0)
     }
 
     async fn submission(
@@ -1256,7 +1256,7 @@ impl Storage for SqliteStorage {
             .iter()
             .map(record)
             .collect::<Result<Vec<SubmissionRecord>>>()?;
-        Ok(page(values, limit, |submission| submission.id.0))
+        page(values, limit, |submission| submission.id.0)
     }
 
     async fn submission_by_request(
@@ -1368,7 +1368,7 @@ impl Storage for SqliteStorage {
             .iter()
             .map(record)
             .collect::<Result<Vec<DocumentRecord>>>()?;
-        Ok(page(values, limit, |document| document.id.0))
+        page(values, limit, |document| document.id.0)
     }
 
     async fn close(&self, _context: &Context) -> Result<()> {

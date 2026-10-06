@@ -73,3 +73,50 @@ async fn runs_the_runner_independent_conformance_cases() {
         case.run().await;
     }
 }
+
+// Rust-only: Pi's `Number.isSafeInteger` cursor check accepts an integral
+// float, and `page()` throws for a zero limit over a non-empty scan.
+#[tokio::test]
+async fn accepts_integral_float_cursors_and_rejects_a_zero_page_limit() {
+    use crate::durable::types::{ConversationQuery, Cursor};
+
+    let storage = MemoryStorage::new();
+    let writes: Vec<StorageWrite> = (1..=3)
+        .map(|id| StorageWrite::Conversation {
+            value: ConversationRecord::new(crate::durable::ids::ConversationId(id)),
+        })
+        .collect();
+    storage.commit(&writes, &BACKGROUND_CONTEXT).await.unwrap();
+    let query = ConversationQuery::default();
+    let cursor = |after: serde_json::Value| -> Cursor {
+        serde_json::from_value(json!({ "after": after })).unwrap()
+    };
+
+    let page = storage
+        .scan_conversations(&query, 10, Some(&cursor(json!(1.0))), &BACKGROUND_CONTEXT)
+        .await
+        .unwrap();
+    let ids: Vec<u64> = page.items.iter().map(|record| record.id.0).collect();
+    assert_eq!(ids, [2, 3]);
+    for invalid in [
+        json!(1.5),
+        json!(-1),
+        json!("1"),
+        json!(9_007_199_254_740_992u64),
+    ] {
+        let error = storage
+            .scan_conversations(&query, 10, Some(&cursor(invalid)), &BACKGROUND_CONTEXT)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Invalid storage cursor"),
+            "{error}"
+        );
+    }
+
+    let error = storage
+        .scan_conversations(&query, 0, None, &BACKGROUND_CONTEXT)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reading 'id'"), "{error}");
+}

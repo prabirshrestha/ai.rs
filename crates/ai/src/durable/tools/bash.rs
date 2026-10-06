@@ -40,8 +40,24 @@ fn bash_schema() -> JsonValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashToolInput {
     pub command: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A present non-number (`null` included) reads as `NaN`, so validation rejects it with Pi's "must be a finite
+    /// number" message (Pi's `Number.isFinite` check fails for any non-number).
+    #[serde(
+        default,
+        deserialize_with = "non_number_as_nan",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout: Option<f64>,
+}
+
+fn non_number_as_nan<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error> {
+    Ok(Some(
+        JsonValue::deserialize(deserializer)?
+            .as_f64()
+            .unwrap_or(f64::NAN),
+    ))
 }
 
 /// `BashExecution`.
@@ -196,4 +212,28 @@ async fn execute(
         )));
     }
     Ok(ToolExecutionResult::default())
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    // Rust-only: Pi's `Number.isFinite` rejects a non-number timeout such as `null`.
+    #[test]
+    fn rejects_a_non_number_timeout_like_pi() {
+        for timeout in [json!(null), json!("5")] {
+            let input: BashToolInput =
+                serde_json::from_value(json!({ "command": "true", "timeout": timeout })).unwrap();
+            assert_eq!(
+                validate_timeout(input.timeout).unwrap_err().to_string(),
+                "Invalid timeout: must be a finite number of seconds"
+            );
+        }
+        let input: BashToolInput = serde_json::from_value(json!({ "command": "true" })).unwrap();
+        assert_eq!(input.timeout, None);
+        let input: BashToolInput =
+            serde_json::from_value(json!({ "command": "true", "timeout": 5 })).unwrap();
+        assert_eq!(input.timeout, Some(5.0));
+        assert!(validate_timeout(input.timeout).is_ok());
+    }
 }

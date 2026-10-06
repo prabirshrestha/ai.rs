@@ -440,6 +440,11 @@ impl<T: ObservedValue> CommittedWatch<T> {
         self.inner.state.lock().value.clone()
     }
 
+    /// Whether both handles are the same watch (JS identity).
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Settles when the watch terminates; an already-running callback remains caller-owned.
     pub fn closed(&self) -> Shared<BoxFuture<'static, WatchEnd>> {
         self.inner.closed.clone()

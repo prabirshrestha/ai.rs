@@ -2279,6 +2279,18 @@ impl RuntimeCore {
             return Err(self.invocation.ended_error());
         }
         self.invocation.watches.lock().push(watch.clone());
+        // `watch.closed.then(() => invocation.watches.delete(watch))`.
+        let invocation = Arc::downgrade(&self.invocation);
+        let (closed, tracked) = (watch.closed(), watch.clone());
+        tokio::spawn(async move {
+            closed.await;
+            if let Some(invocation) = invocation.upgrade() {
+                invocation
+                    .watches
+                    .lock()
+                    .retain(|watch| !watch.ptr_eq(&tracked));
+            }
+        });
         Ok(Some(watch))
     }
 }

@@ -728,6 +728,16 @@ pub async fn convert_partial(
     Ok(())
 }
 
+/// Pi stops the throttle in a `finally`; this guard halts it when `stream_response` is dropped mid-stream (the
+/// commit in flight still settles on its own task).
+struct HaltOnDrop(PartialThrottle);
+
+impl Drop for HaltOnDrop {
+    fn drop(&mut self) {
+        self.0.halt();
+    }
+}
+
 struct Throttle {
     pending: Option<AssistantMessage>,
     timer: Option<tokio::task::JoinHandle<()>>,
@@ -810,15 +820,18 @@ impl PartialThrottle {
         tokio::spawn(commit);
     }
 
+    /// Stop scheduling partial commits; returns the commit in flight.
+    fn halt(&self) -> Option<Shared<BoxFuture<'static, ()>>> {
+        let mut state = self.state.lock();
+        state.stopped = true;
+        if let Some(timer) = state.timer.take() {
+            timer.abort();
+        }
+        state.in_flight.clone()
+    }
+
     async fn stop(&self) {
-        let in_flight = {
-            let mut state = self.state.lock();
-            state.stopped = true;
-            if let Some(timer) = state.timer.take() {
-                timer.abort();
-            }
-            state.in_flight.clone()
-        };
+        let in_flight = self.halt();
         if let Some(in_flight) = in_flight {
             in_flight.await;
         }
@@ -863,6 +876,7 @@ async fn stream_response(
             stopped: false,
         })),
     };
+    let _halt = HaltOnDrop(throttle.clone());
     let models: Models = runtime.models();
     let mut events = models.stream_simple(
         model,

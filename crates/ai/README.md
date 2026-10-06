@@ -1047,6 +1047,9 @@ differences. Each is also documented on the module or item involved.
   an `i64` like Pi's `number`; a negative reserve sends `max_tokens` 0 for
   the summary request. `ToolExecutionApi::detached` (feature
   `durable-testing`) runs a tool outside a Harness for tests.
+  `AgentEventStream::snapshot` is the `SnapshotEvent` payload, which
+  serializes without `"type": "snapshot"` (wrap it in
+  `AgentEvent::Snapshot`). Storage cursors must be non-negative.
 - **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot and
   OpenRouter images; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses;
   classifiers; telemetry contexts; `session-resources`; the TypeBox

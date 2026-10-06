@@ -1234,6 +1234,8 @@ impl JsonlStorage {
                     error,
                 ))
             })?;
+            // `TextDecoder.decode` (`ignoreBOM: false`) drops a leading byte order mark.
+            let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
             lines.push(ParsedLine {
                 value: parse(text, line_number)?,
                 start: start as u64,

@@ -164,7 +164,7 @@ impl Harness {
             .collect();
         if !missing.is_empty() {
             return Err(Error::message(format!(
-                "Registry lacks built-in tasks {}; create it with create_registry()",
+                "Registry lacks built-in tasks {}; create it with createRegistry()",
                 missing.join(", ")
             )));
         }

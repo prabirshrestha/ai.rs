@@ -128,10 +128,7 @@ fn cursor_id(cursor: Option<&Cursor>) -> Result<Option<u64>> {
     let Some(after) = cursor.and_then(|cursor| cursor.get("after")) else {
         return Ok(None);
     };
-    match after.as_u64() {
-        Some(after) if after <= MAX_SAFE_INTEGER => Ok(Some(after)),
-        _ => Err(Error::type_error("Invalid storage cursor")),
-    }
+    super::cursor_after(after)
 }
 
 fn lower_bound(ids: &[u64], target: u64) -> usize {
@@ -203,19 +200,27 @@ fn is_current_only(record: &DocumentRecord) -> bool {
         || record.history == Some(History::Latest)
 }
 
-fn page<T: Clone>(values: Vec<&T>, limit: usize, id: impl Fn(&T) -> u64) -> Page<T> {
-    let next = if values.len() > limit && limit > 0 {
-        let mut cursor = Cursor::new();
-        cursor.insert("after".into(), JsonValue::from(id(values[limit - 1])));
-        Some(cursor)
-    } else {
-        None
-    };
-    Page {
-        items: values.into_iter().take(limit).cloned().collect(),
-        next,
+fn page<T: Clone>(values: Vec<&T>, limit: usize, id: impl Fn(&T) -> u64) -> Result<Page<T>> {
+    if values.len() <= limit {
+        return Ok(Page {
+            items: values.into_iter().cloned().collect(),
+            next: None,
+        });
     }
+    // Pi reads `items.at(-1)!.id`, which throws for a zero limit.
+    let Some(last) = limit.checked_sub(1).map(|index| values[index]) else {
+        return Err(Error::type_error(PAGE_LIMIT_ZERO));
+    };
+    let mut cursor = Cursor::new();
+    cursor.insert("after".into(), JsonValue::from(id(last)));
+    Ok(Page {
+        items: values.into_iter().take(limit).cloned().collect(),
+        next: Some(cursor),
+    })
 }
+
+/// The `TypeError` Pi's `page()` throws for a zero limit over a non-empty scan.
+pub(crate) const PAGE_LIMIT_ZERO: &str = "Cannot read properties of undefined (reading 'id')";
 
 /// A fully validated, detached state mutation whose application performs no fallible preparation.
 pub struct PreparedMemoryCommit<'a> {
@@ -880,7 +885,7 @@ impl Storage for MemoryStorage {
                 }
                 values.push(value);
             }
-            Ok(page(values, limit, |value| value.id.0))
+            page(values, limit, |value| value.id.0)
         })
     }
 
@@ -977,7 +982,7 @@ impl Storage for MemoryStorage {
                     visible.len() <= limit
                 },
             )?;
-            Ok(page(visible, limit, |entry| entry.id.0))
+            page(visible, limit, |entry| entry.id.0)
         })
     }
 
@@ -1028,7 +1033,7 @@ impl Storage for MemoryStorage {
                 }
                 values.push(value);
             }
-            Ok(page(values, limit, |value| value.id.0))
+            page(values, limit, |value| value.id.0)
         })
     }
 
@@ -1071,7 +1076,7 @@ impl Storage for MemoryStorage {
                 }
                 values.push(value);
             }
-            Ok(page(values, limit, |value| value.id.0))
+            page(values, limit, |value| value.id.0)
         })
     }
 
@@ -1149,7 +1154,7 @@ impl Storage for MemoryStorage {
                     values.push(record);
                 }
             }
-            Ok(page(values, limit, |record| record.id.0))
+            page(values, limit, |record| record.id.0)
         })
     }
 
