@@ -1902,6 +1902,45 @@ impl<'de> Deserialize<'de> for AnyModel {
     }
 }
 
+/// Pi's `hasKnownModelType()` on a raw model: a model without a `type` (or
+/// with `type: null`) is a chat model; `chat` and `image` are known.
+///
+/// Divergence: Pi also knows `classifier`. Classifier models are not ported,
+/// so they are treated like any other type this version does not know.
+pub fn has_known_model_type(model: &Value) -> bool {
+    match model.get("type") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(model_type)) => matches!(model_type.as_str(), "chat" | "image"),
+        Some(_) => false,
+    }
+}
+
+/// Deserialize raw models of every type, dropping those whose type this
+/// version does not know (Pi's `models.filter(hasKnownModelType)`, applied to
+/// stored catalogs and to fetched model lists). A `fetch_models`
+/// implementation that reads a remote JSON list should use this, so a newer
+/// model type does not fail the refresh.
+pub fn known_models_from_values(
+    models: impl IntoIterator<Item = Value>,
+) -> serde_json::Result<Vec<AnyModel>> {
+    models
+        .into_iter()
+        .filter(has_known_model_type)
+        .map(serde_json::from_value)
+        .collect()
+}
+
+/// `deserialize_with` helper for model lists: see [`known_models_from_values`].
+pub(crate) fn deserialize_known_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AnyModel>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let models = Vec::<Value>::deserialize(deserializer)?;
+    known_models_from_values(models).map_err(de::Error::custom)
+}
+
 impl AnyModel {
     pub fn id(&self) -> &str {
         match self {

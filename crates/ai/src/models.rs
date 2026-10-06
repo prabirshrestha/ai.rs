@@ -10,8 +10,11 @@
 //!   (cancelled) instead of continuing in the background.
 //! - Classifier models and `classify()` are not ported.
 //! - Unknown model types cannot be represented by [`AnyModel`], so Pi's
-//!   `hasKnownModelType()` filtering of stored catalogs happens at
-//!   deserialization time instead.
+//!   `hasKnownModelType()` filtering happens when raw models are
+//!   deserialized: [`ModelsStoreEntry`] drops them, and `fetch_models`
+//!   implementations that read JSON use
+//!   [`known_models_from_values`](crate::types::known_models_from_values).
+//!   Classifier models count as unknown.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -1889,14 +1892,11 @@ mod tests {
     //! Port of `test/models-runtime.test.ts`, `test/model-types.test.ts` and
     //! the catalog parts of `test/max-thinking.test.ts` and
     //! `test/supports-xhigh.test.ts`.
-    //!
-    //! Not ported: "stored and fetched models of unknown types are dropped"
-    //! (unknown model types cannot be represented by `AnyModel`).
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::sync::Notify;
 
     use super::*;
@@ -1906,7 +1906,7 @@ mod tests {
     };
     use crate::types::{
         AssistantContent, AssistantMessageEvent, Message, ModelCost, ModelCostTier, ModelInput,
-        StopReason, UserMessage,
+        StopReason, UserMessage, has_known_model_type, known_models_from_values,
     };
     use crate::utils::event_stream::AssistantMessageEventStream;
     use futures::StreamExt;
@@ -4879,6 +4879,94 @@ mod tests {
         ] {
             assert!(result.err().unwrap().to_string().contains(message));
         }
+    }
+
+    #[tokio::test]
+    async fn stored_and_fetched_models_of_unknown_types_are_dropped_instead_of_failing_the_refresh()
+    {
+        let chat = |id: &str| serde_json::to_value(test_model("dyn", id)).unwrap();
+        let image = |id: &str| serde_json::to_value(image_model("dyn", id)).unwrap();
+        let with_type = |mut model: Value, model_type: &str| {
+            model["type"] = json!(model_type);
+            model
+        };
+        // Pi writes the raw entry into the store; a Rust store deserializes it.
+        let stored: ModelsStoreEntry = serde_json::from_value(json!({
+            "models": [
+                chat("stored-chat"),
+                image("stored-image"),
+                with_type(chat("future-embedding"), "embedding"),
+                with_type(image("future-video"), "video"),
+            ],
+        }))
+        .unwrap();
+        let models_store = Arc::new(InMemoryModelsStore::new());
+        models_store
+            .write("dyn", stored, Default::default())
+            .await
+            .unwrap();
+
+        let fetched: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let source = fetched.clone();
+        let models = create_models(CreateModelsOptions {
+            models_store: Some(models_store.clone()),
+            ..Default::default()
+        });
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "dyn".to_string(),
+                auth: ambient_auth(),
+                fetch_models: Some(Arc::new(move |_| {
+                    let fetched = source.lock().clone();
+                    Box::pin(async move { Ok(known_models_from_values(fetched)?) })
+                })),
+                api: Some(chat_streams()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let ids = |models: &Models| {
+            models
+                .get_all_models(Some("dyn"))
+                .iter()
+                .map(|model| model.id().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let restored = models
+            .refresh(ModelsRefreshOptions {
+                providers: Some(vec!["dyn".to_string()]),
+                allow_network: Some(false),
+                ..Default::default()
+            })
+            .await;
+        assert!(restored.errors.is_empty());
+        assert_eq!(ids(&models), ["stored-chat", "stored-image"]);
+
+        *fetched.lock() = vec![
+            chat("fetched-chat"),
+            with_type(image("fetched-video"), "video"),
+        ];
+        let refreshed = models
+            .refresh(ModelsRefreshOptions {
+                providers: Some(vec!["dyn".to_string()]),
+                ..Default::default()
+            })
+            .await;
+        assert!(refreshed.errors.is_empty());
+        assert_eq!(ids(&models), ["fetched-chat"]);
+        let entry = models_store
+            .read("dyn", Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.models.iter().map(AnyModel::id).collect::<Vec<_>>(),
+            ["fetched-chat"]
+        );
+        // Classifier models are known to Pi but not ported.
+        assert!(!has_known_model_type(&with_type(chat("c"), "classifier")));
+        assert!(has_known_model_type(&json!({ "type": null })));
     }
 
     #[tokio::test]

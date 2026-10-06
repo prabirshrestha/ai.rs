@@ -14,7 +14,9 @@ use crate::types::AnyModel;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsStoreEntry {
-    /// Persisted models of every type.
+    /// Persisted models of every type. Deserializing drops models whose type
+    /// this version does not know (Pi's `withKnownModelTypes()` on read).
+    #[serde(deserialize_with = "crate::types::deserialize_known_models")]
     pub models: Vec<AnyModel>,
     /// Unix timestamp from the remote catalog's Last-Modified header.
     #[serde(default, skip_serializing_if = "Option::is_none")]

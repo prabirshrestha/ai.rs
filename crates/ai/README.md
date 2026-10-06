@@ -998,8 +998,9 @@ differences. Each is also documented on the module or item involved.
 - **Types.** `ModelCompat` is one flat struct. `AgentMessage = Message`
   (no custom message roles; `Message::Custom` is gone). Pi's open records
   become `provider_options` maps; optional provider methods become `Option`
-  returns or `supports_*()` probes. Unknown model types are dropped when a
-  catalog is deserialized.
+  returns or `supports_*()` probes. Models of unknown types (classifiers
+  included) are dropped when a store entry is deserialized or a fetched list
+  goes through `known_models_from_values`.
 - **Runtime.** Abort signals are `CancellationToken`s, producers run on
   `tokio::spawn`, and abandoned operations are dropped. A synchronous throw
   becomes `Err` or an error stream. `AgentEventStream::result()` returns `Err`
