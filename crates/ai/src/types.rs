@@ -1,99 +1,116 @@
+//! Port of `packages/ai/src/types.ts`.
+//!
+//! JSON shapes match Pi's wire format (camelCase field names, `role`/`type`
+//! discriminators). JavaScript object key order is significant in Pi (system
+//! prompt sections, header merge order, tool schemas), so maps use
+//! [`IndexMap`] and `serde_json` is built with `preserve_order`.
+
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde::ser::SerializeStruct;
+use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::Result;
-use crate::provider::{EmbeddingModelApi, LanguageModelApi};
+use crate::utils::diagnostics::AssistantMessageDiagnostic;
+
+pub use crate::utils::event_stream::AssistantMessageEventStream;
 
 pub type Api = String;
+pub type ImageApi = String;
+pub type ClassifierApi = String;
+/// ai.rs extra, not in Pi: the API id of an embedding model.
+pub type EmbeddingApi = String;
 pub type ProviderId = String;
-/// Provider-scoped environment overrides. Values take precedence over the
-/// process environment.
-pub type ProviderEnv = HashMap<String, String>;
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderHeaders(HashMap<String, Option<String>>);
 
-impl ProviderHeaders {
-    pub fn insert(
-        &mut self,
-        name: impl Into<String>,
-        value: impl Into<Option<String>>,
-    ) -> Option<Option<String>> {
-        self.0.insert(name.into(), value.into())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Option<String>)> {
-        self.0.iter()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Option<String>> {
-        self.0.get(name)
-    }
+/// Image APIs with a built-in implementation (`KnownImageApi`).
+/// `OpenaiImages` is an ai.rs extra (OpenAI-compatible `/images/generations`),
+/// not part of Pi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownImageApi {
+    OpenrouterImages,
+    OpenaiImages,
 }
 
-impl<K, V> FromIterator<(K, V)> for ProviderHeaders
-where
-    K: Into<String>,
-    V: Into<Option<String>>,
-{
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        let mut headers = Self::default();
-        for (name, value) in iter {
-            headers.insert(name, value);
+impl KnownImageApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenrouterImages => "openrouter-images",
+            Self::OpenaiImages => "openai-images",
         }
-        headers
     }
 }
 
-impl<'a> IntoIterator for &'a ProviderHeaders {
-    type Item = (&'a String, &'a Option<String>);
-    type IntoIter = std::collections::hash_map::Iter<'a, String, Option<String>>;
+/// Classifier APIs with a built-in implementation (`KnownClassifierApi`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownClassifierApi {
+    TypesafeSystemOne,
+    CloudflareWorkersAiSystemOne,
+    LlamaCppClassify,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+impl KnownClassifierApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypesafeSystemOne => "typesafe-system-one",
+            Self::CloudflareWorkersAiSystemOne => "cloudflare-workers-ai-system-one",
+            Self::LlamaCppClassify => "llama-cpp-classify",
+        }
     }
 }
 
-impl From<HashMap<String, String>> for ProviderHeaders {
-    fn from(headers: HashMap<String, String>) -> Self {
-        headers.into_iter().collect()
+/// Embedding APIs with a built-in implementation. ai.rs extra, not in Pi:
+/// `OpenaiEmbeddings` is the OpenAI-compatible `/embeddings` endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownEmbeddingApi {
+    OpenaiEmbeddings,
+}
+
+impl KnownEmbeddingApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiEmbeddings => "openai-embeddings",
+        }
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// APIs with a built-in implementation in Pi (`KnownApi`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KnownApi {
     OpenaiCompletions,
-    OpenaiEmbeddings,
+    MistralConversations,
     OpenaiResponses,
-    OpenaiImages,
+    AzureOpenaiResponses,
+    OpenaiCodexResponses,
     AnthropicMessages,
-    OpenrouterImages,
+    BedrockConverseStream,
+    GoogleGenerativeAi,
+    GoogleVertex,
+    PiMessages,
 }
 
 impl KnownApi {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenaiCompletions => "openai-completions",
-            Self::OpenaiEmbeddings => "openai-embeddings",
+            Self::MistralConversations => "mistral-conversations",
             Self::OpenaiResponses => "openai-responses",
-            Self::OpenaiImages => "openai-images",
+            Self::AzureOpenaiResponses => "azure-openai-responses",
+            Self::OpenaiCodexResponses => "openai-codex-responses",
             Self::AnthropicMessages => "anthropic-messages",
-            Self::OpenrouterImages => "openrouter-images",
+            Self::BedrockConverseStream => "bedrock-converse-stream",
+            Self::GoogleGenerativeAi => "google-generative-ai",
+            Self::GoogleVertex => "google-vertex",
+            Self::PiMessages => "pi-messages",
         }
     }
 }
@@ -104,7 +121,20 @@ impl From<KnownApi> for String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Display for KnownApi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoice {
+    Auto,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     Minimal,
@@ -115,7 +145,20 @@ pub enum ThinkingLevel {
     Max,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl ThinkingLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelThinkingLevel {
     Off,
@@ -152,6 +195,19 @@ impl ModelThinkingLevel {
             _ => None,
         }
     }
+
+    /// The level as a [`ThinkingLevel`], or `None` for `off`.
+    pub const fn thinking_level(self) -> Option<ThinkingLevel> {
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some(ThinkingLevel::Minimal),
+            Self::Low => Some(ThinkingLevel::Low),
+            Self::Medium => Some(ThinkingLevel::Medium),
+            Self::High => Some(ThinkingLevel::High),
+            Self::Xhigh => Some(ThinkingLevel::Xhigh),
+            Self::Max => Some(ThinkingLevel::Max),
+        }
+    }
 }
 
 impl From<ThinkingLevel> for ModelThinkingLevel {
@@ -167,8 +223,104 @@ impl From<ThinkingLevel> for ModelThinkingLevel {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+impl fmt::Display for ModelThinkingLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Maps pi thinking levels to provider/model-specific values. Missing keys
+/// use provider defaults; `None` (JSON `null`) marks a level as unsupported.
+pub type ThinkingLevelMap = IndexMap<ModelThinkingLevel, Option<String>>;
+pub type SamplingParams = serde_json::Map<String, Value>;
+pub type SamplingParamsByThinkingLevel = IndexMap<ModelThinkingLevel, SamplingParams>;
+
+/// `ChatTemplateKwargValue`: a literal or a `{ "$var": ... }` reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatTemplateKwargValue {
+    String(String),
+    Number(serde_json::Number),
+    Boolean(bool),
+    Null(()),
+    Variable(ChatTemplateKwargVariable),
+}
+
+impl ChatTemplateKwargValue {
+    pub fn from_f64(value: f64) -> Option<Self> {
+        serde_json::Number::from_f64(value).map(Self::Number)
+    }
+
+    pub fn variable(variable: ChatTemplateVariable, omit_when_off: bool) -> Self {
+        Self::Variable(ChatTemplateKwargVariable {
+            variable,
+            omit_when_off,
+        })
+    }
+}
+
+impl From<String> for ChatTemplateKwargValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for ChatTemplateKwargValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<bool> for ChatTemplateKwargValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+macro_rules! impl_chat_template_kwarg_number {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl From<$type> for ChatTemplateKwargValue {
+                fn from(value: $type) -> Self {
+                    Self::Number(value.into())
+                }
+            }
+        )+
+    };
+}
+
+impl_chat_template_kwarg_number!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatTemplateKwargVariable {
+    #[serde(rename = "$var")]
+    pub variable: ChatTemplateVariable,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub omit_when_off: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatTemplateVariable {
+    #[serde(rename = "thinking.enabled")]
+    ThinkingEnabled,
+    #[serde(rename = "thinking.effort")]
+    ThinkingEffort,
+    #[serde(rename = "thinking.budget")]
+    ThinkingBudget,
+}
+
+/// Top-level request field used to cap reasoning tokens on OpenAI-compatible servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingTokenBudgetField {
+    ThinkingTokenBudget,
+    ThinkingBudget,
+    ThinkingBudgetTokens,
+}
+
+/// Token budgets for each thinking level (token-based providers only).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingBudgets {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimal: Option<u32>,
@@ -180,29 +332,113 @@ pub struct ThinkingBudgets {
     pub high: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CacheRetention {
     None,
-    #[default]
     Short,
     Long,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Best-effort prompt cache lifetime in seconds for each retention tier.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPromptCache {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
     Sse,
     Websocket,
     WebsocketCached,
-    #[default]
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Provider-scoped environment overrides. Values take precedence over the
+/// process environment.
+pub type ProviderEnv = HashMap<String, String>;
+
+/// Ordered header overrides. A `None` value suppresses a default header with
+/// the same name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHeaders(IndexMap<String, Option<String>>);
+
+impl ProviderHeaders {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<Option<String>>,
+    ) -> Option<Option<String>> {
+        self.0.insert(name.into(), value.into())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Option<String>)> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Option<String>> {
+        self.0.get(name)
+    }
+
+    pub fn shift_remove(&mut self, name: &str) -> Option<Option<String>> {
+        self.0.shift_remove(name)
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for ProviderHeaders
+where
+    K: Into<String>,
+    V: Into<Option<String>>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let mut headers = Self::default();
+        for (name, value) in iter {
+            headers.insert(name, value);
+        }
+        headers
+    }
+}
+
+impl<'a> IntoIterator for &'a ProviderHeaders {
+    type Item = (&'a String, &'a Option<String>);
+    type IntoIter = indexmap::map::Iter<'a, String, Option<String>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl From<IndexMap<String, String>> for ProviderHeaders {
+    fn from(headers: IndexMap<String, String>) -> Self {
+        headers.into_iter().collect()
+    }
+}
+
+impl From<HashMap<String, String>> for ProviderHeaders {
+    fn from(headers: HashMap<String, String>) -> Self {
+        headers.into_iter().collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionAffinityFormat {
-    #[default]
     Openai,
     OpenaiNosession,
     Openrouter,
@@ -211,129 +447,196 @@ pub enum SessionAffinityFormat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub status: u16,
-    pub headers: HashMap<String, String>,
+    pub headers: IndexMap<String, String>,
 }
 
-pub type PayloadHook = Arc<
-    dyn Fn(Value, &Model) -> Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>
-        + Send
-        + Sync,
->;
-pub type ResponseHook = Arc<
-    dyn Fn(ProviderResponse, &Model) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-        + Send
-        + Sync,
->;
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
+/// `onPayload`: inspect or replace a provider payload before sending.
+/// Resolve to `None` to keep the payload unchanged.
+pub type PayloadHook = Arc<dyn Fn(Value, &Model) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse`: invoked after an HTTP response is received.
+pub type ResponseHook =
+    Arc<dyn Fn(ProviderResponse, &Model) -> BoxFuture<Result<()>> + Send + Sync>;
+/// `onProviderStreamEvent`: observe each parsed provider stream event.
+pub type ProviderStreamEventHook = Arc<dyn Fn(&Value, &Model) -> BoxFuture<()> + Send + Sync>;
+
+/// Authentication, HTTP transport, and lifecycle callbacks shared by provider
+/// requests (`ProviderRequestOptions`).
+///
+/// `fetch` becomes `http_client`; `telemetryContext` is not ported.
+#[derive(Clone, Default)]
+pub struct ProviderRequestOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<PayloadHook>,
+    pub on_response: Option<ResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    /// Maximum delay to wait when the server requests a long retry delay.
+    /// Default 60000; zero disables the cap.
+    pub max_retry_delay_ms: Option<u64>,
+}
+
+/// Options for `stream()` / `complete()` (`StreamOptions & Record<string, unknown>`).
+///
+/// Pi's provider-specific option bags (`ApiStreamOptions<TApi>`) become
+/// `provider_options`, an ordered map that API modules read by Pi's field
+/// names.
 #[derive(Clone, Default)]
 pub struct StreamOptions {
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<u32>,
-    pub cancellation_token: Option<CancellationToken>,
+    pub signal: Option<CancellationToken>,
     pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<PayloadHook>,
+    pub on_response: Option<ResponseHook>,
+    pub on_provider_stream_event: Option<ProviderStreamEventHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    pub temperature: Option<f64>,
+    pub sampling_params: Option<SamplingParams>,
+    pub max_tokens: Option<u32>,
     pub transport: Option<Transport>,
     pub cache_retention: Option<CacheRetention>,
     pub session_id: Option<String>,
-    pub on_payload: Option<PayloadHook>,
-    pub on_response: Option<ResponseHook>,
-    pub headers: ProviderHeaders,
-    pub timeout_ms: Option<u64>,
     pub websocket_connect_timeout_ms: Option<u64>,
-    /// Maximum retry attempts for providers that support client-side retries.
-    pub max_retries: Option<u32>,
-    /// Maximum delay in milliseconds to wait when the server requests a long
-    /// retry delay. If the requested delay exceeds this value, the request
-    /// fails immediately. Defaults to 60 seconds; set to zero to disable the
-    /// cap.
-    pub max_retry_delay_ms: Option<u64>,
-    pub http_client: Option<reqwest::Client>,
-    pub metadata: Option<Value>,
-    /// Provider-scoped environment values. These take precedence over process
-    /// environment variables for provider configuration.
-    pub env: ProviderEnv,
-    pub provider_options: HashMap<String, Value>,
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    /// API-specific options (`ProviderStreamOptions` record entries).
+    pub provider_options: serde_json::Map<String, Value>,
 }
 
-#[derive(Clone, Default)]
-pub struct RequestOptions {
-    pub cancellation_token: Option<CancellationToken>,
-    pub api_key: Option<String>,
-    pub on_payload: Option<PayloadHook>,
-    pub on_response: Option<ResponseHook>,
-    pub headers: ProviderHeaders,
-    pub timeout_ms: Option<u64>,
-    /// Maximum retry attempts for providers that support client-side retries.
-    pub max_retries: Option<u32>,
-    /// Maximum delay in milliseconds to wait when the server requests a long
-    /// retry delay. If the requested delay exceeds this value, the request
-    /// fails immediately. Defaults to 60 seconds; set to zero to disable the
-    /// cap.
-    pub max_retry_delay_ms: Option<u64>,
-    pub http_client: Option<reqwest::Client>,
-}
-
-#[derive(Clone, Default)]
-pub struct ImageGenerationOptions {
-    pub base: StreamOptions,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EmbeddingEncodingFormat {
-    #[default]
-    Float,
-    Base64,
-}
-
-impl EmbeddingEncodingFormat {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Float => "float",
-            Self::Base64 => "base64",
+impl StreamOptions {
+    /// The `ProviderRequestOptions` subset of these options.
+    pub fn request_options(&self) -> ProviderRequestOptions {
+        ProviderRequestOptions {
+            signal: self.signal.clone(),
+            api_key: self.api_key.clone(),
+            http_client: self.http_client.clone(),
+            env: self.env.clone(),
+            on_payload: self.on_payload.clone(),
+            on_response: self.on_response.clone(),
+            headers: self.headers.clone(),
+            timeout_ms: self.timeout_ms,
+            max_retries: self.max_retries,
+            max_retry_delay_ms: self.max_retry_delay_ms,
         }
     }
 }
 
+impl fmt::Debug for StreamOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("transport", &self.transport)
+            .field("cache_retention", &self.cache_retention)
+            .field("session_id", &self.session_id)
+            .field("provider_options", &self.provider_options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Options for fetching a deferred response.
 #[derive(Clone, Default)]
-pub struct EmbeddingOptions {
-    pub base: RequestOptions,
-    pub dimensions: Option<u32>,
-    pub encoding_format: Option<EmbeddingEncodingFormat>,
-    pub user: Option<String>,
+pub struct DeferredFetchOptions {
+    pub request: ProviderRequestOptions,
+    /// Maximum provider long-poll duration in milliseconds. Defaults to 0,
+    /// which performs one status check.
+    pub wait: Option<u64>,
 }
+
+/// Request options for best-effort deferred-response cancellation.
+pub type DeferredCancelOptions = ProviderRequestOptions;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EmbeddingVector {
-    Float(Vec<f32>),
-    Base64(String),
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmbeddingUsage {
-    pub prompt_tokens: u32,
-    pub total_tokens: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Embedding {
-    pub embedding: EmbeddingVector,
+#[serde(rename_all = "camelCase")]
+pub struct AnthropicAllowedFallbackModel {
+    pub provider: ProviderId,
     pub model: String,
-    pub usage: EmbeddingUsage,
+    pub cost: ModelCost,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EmbeddingBatch {
-    pub embeddings: Vec<EmbeddingVector>,
-    pub model: String,
-    pub usage: EmbeddingUsage,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredWindow {
+    #[serde(rename = "15m")]
+    Minutes15,
+    #[serde(rename = "1h")]
+    Hour1,
+    #[serde(rename = "24h")]
+    Hours24,
 }
 
-#[derive(Clone, Default)]
+/// `deferred?: boolean | { window?: "15m" | "1h" | "24h" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredRequest {
+    Flag(bool),
+    Window(Option<DeferredWindow>),
+}
+
+impl DeferredRequest {
+    /// JavaScript truthiness of the option.
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            Self::Flag(enabled) => *enabled,
+            Self::Window(_) => true,
+        }
+    }
+
+    pub fn window(&self) -> Option<DeferredWindow> {
+        match self {
+            Self::Flag(_) => None,
+            Self::Window(window) => *window,
+        }
+    }
+}
+
+/// Unified options with reasoning passed to `stream_simple()` and
+/// `complete_simple()`. Derefs to the inherited [`StreamOptions`].
+#[derive(Clone, Default, Debug)]
 pub struct SimpleStreamOptions {
     pub stream: StreamOptions,
-    pub reasoning: Option<ModelThinkingLevel>,
+    /// Provider-neutral tool selection. When omitted, adapters use
+    /// provider-specific behavior.
+    pub tool_choice: Option<ToolChoice>,
+    pub reasoning: Option<ThinkingLevel>,
+    /// Ask a capable provider to return a durable handle and continue the
+    /// request asynchronously.
+    pub deferred: Option<DeferredRequest>,
+    /// Custom token budgets for thinking levels (token-based providers only).
     pub thinking_budgets: Option<ThinkingBudgets>,
+}
+
+impl std::ops::Deref for SimpleStreamOptions {
+    type Target = StreamOptions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl std::ops::DerefMut for SimpleStreamOptions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stream
+    }
+}
+
+impl From<StreamOptions> for SimpleStreamOptions {
+    fn from(stream: StreamOptions) -> Self {
+        Self {
+            stream,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -351,27 +654,42 @@ pub enum TextPhase {
     FinalAnswer,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextContent {
     pub text: String,
+    /// e.g. OpenAI Responses message metadata (legacy id string or
+    /// `TextSignatureV1` JSON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_signature: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl TextContent {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            text_signature: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     pub thinking: String,
+    /// Provider-specific opaque or serialized reasoning replay data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_signature: Option<String>,
+    /// When true, the thinking content was redacted by safety filters and the
+    /// encrypted payload is stored in `thinking_signature`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageContent {
+    /// Base64 encoded image data.
     pub data: String,
     pub mime_type: String,
 }
@@ -381,11 +699,18 @@ pub struct ImageContent {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
+    /// JSON object arguments (`JsonObject`).
     pub arguments: Value,
+    /// Google-specific opaque signature for reusing thought context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    /// OpenAI Responses namespace for calls to dynamically loaded or
+    /// namespaced tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
+/// `TextContent | ImageContent` in user messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum UserContent {
@@ -397,31 +722,14 @@ pub enum UserContent {
 
 impl UserContent {
     pub fn text<T: Into<String>>(text: T) -> Self {
-        Self::Text(TextContent {
-            text: text.into(),
-            text_signature: None,
-        })
+        Self::Text(TextContent::new(text))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ToolResultContent {
-    #[serde(rename = "text")]
-    Text(TextContent),
-    #[serde(rename = "image")]
-    Image(ImageContent),
-}
+/// `TextContent | ImageContent` in tool results.
+pub type ToolResultContent = UserContent;
 
-impl ToolResultContent {
-    pub fn text<T: Into<String>>(text: T) -> Self {
-        Self::Text(TextContent {
-            text: text.into(),
-            text_signature: None,
-        })
-    }
-}
-
+/// `TextContent | ThinkingContent | ToolCall`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AssistantContent {
@@ -433,6 +741,47 @@ pub enum AssistantContent {
     ToolCall(ToolCall),
 }
 
+impl AssistantContent {
+    pub fn text<T: Into<String>>(text: T) -> Self {
+        Self::Text(TextContent::new(text))
+    }
+}
+
+/// `TextContent` inside a system message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SystemContent {
+    #[serde(rename = "text")]
+    Text(TextContent),
+}
+
+/// `string | TextContent[]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SystemMessageContent {
+    Text(String),
+    Parts(Vec<SystemContent>),
+}
+
+impl Default for SystemMessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl From<String> for SystemMessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for SystemMessageContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+/// `string | (TextContent | ImageContent)[]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserMessageContent {
@@ -446,27 +795,26 @@ impl Default for UserMessageContent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl From<String> for UserMessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for UserMessageContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageCost {
     pub input: f64,
     pub output: f64,
-    #[serde(rename = "cacheRead")]
     pub cache_read: f64,
-    #[serde(rename = "cacheWrite")]
     pub cache_write: f64,
     pub total: f64,
-}
-
-impl Default for UsageCost {
-    fn default() -> Self {
-        Self {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-            total: 0.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -476,38 +824,94 @@ pub struct Usage {
     pub output: u32,
     pub cache_read: u32,
     pub cache_write: u32,
-    /// Subset of `cache_write` written with one-hour retention. Only
-    /// Anthropic reports this split.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Subset of `cache_write` written with 1h retention. Only Anthropic
+    /// reports this split.
+    #[serde(rename = "cacheWrite1h", skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u32>,
-    /// Reasoning/thinking tokens when the provider reports them. This is a
-    /// subset of `output`, which already includes these tokens.
+    /// Reasoning/thinking tokens, a subset of `output`, when reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<u32>,
     pub total_tokens: u32,
     pub cost: UsageCost,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StopReason {
+    Pending,
     Stop,
     Length,
     ToolUse,
     Error,
     Aborted,
+    Deferred,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl StopReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolUse => "toolUse",
+            Self::Error => "error",
+            Self::Aborted => "aborted",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
+impl fmt::Display for StopReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ImagesStopReason {
-    Stop,
-    Error,
-    Aborted,
+pub struct DeferredHandle {
+    pub provider: String,
+    pub model_id: String,
+    pub api: String,
+    /// Provider token, such as a response id or batch id plus row id.
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+    /// Provider conversion data required to reconstruct the final message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// System instructions and tool declarations at one point in the transcript.
+///
+/// The leading system message is the system prompt. Later system messages
+/// change it: `content` adds instructions from that point on, `sections`
+/// replace or remove named prompt sections, and `tools_added`/`tools_removed`
+/// change the tool set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename = "system", rename_all = "camelCase")]
+pub struct SystemMessage {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub content: SystemMessageContent,
+    /// Named, ordered prompt sections rendered verbatim after `content`; a
+    /// `None` value removes a section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<IndexMap<String, Option<String>>>,
+    /// Complete definitions of tools that become available at this point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_added: Option<Vec<Tool>>,
+    /// Tools that stop being available at this point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_removed: Option<Vec<ToolReference>>,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename = "user", rename_all = "camelCase")]
 pub struct UserMessage {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub content: UserMessageContent,
     pub timestamp: u64,
 }
@@ -521,22 +925,46 @@ impl UserMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename = "assistant", rename_all = "camelCase")]
 pub struct AssistantMessage {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub content: Vec<AssistantContent>,
     pub api: Api,
     pub provider: ProviderId,
     pub model: String,
+    /// Concrete model reported by the provider when different from `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
+    /// Provider-specific response/message identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
-    pub diagnostics: Vec<Value>,
+    /// Exact provider-native effort level used for this response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thinking_level: Option<String>,
+    /// Pi thinking level the agent loop requested for this response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ModelThinkingLevel>,
+    /// Redacted provider/runtime diagnostics for failures and recoveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<AssistantMessageDiagnostic>>,
     pub usage: Usage,
     pub stop_reason: StopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<DeferredHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_stop_reason: Option<String>,
+    /// Provider indication of whether the model explicitly ended its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_turn: Option<bool>,
     pub timestamp: u64,
 }
 
 impl AssistantMessage {
+    /// An empty message attributed to `model`, the usual starting `output`
+    /// of API implementations.
     pub fn empty_for(model: &Model) -> Self {
         Self {
             content: Vec::new(),
@@ -545,228 +973,72 @@ impl AssistantMessage {
             model: model.id.clone(),
             response_model: None,
             response_id: None,
-            diagnostics: Vec::new(),
+            provider_thinking_level: None,
+            thinking_level: None,
+            diagnostics: None,
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            deferred: None,
             error_message: None,
+            raw_stop_reason: None,
+            end_turn: None,
             timestamp: crate::utils::time::now_millis(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NestedToolCallStatus {
+    Ok,
+    Error,
+    Unfinished,
+}
+
+/// A tool call that another tool made while it ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NestedToolCallRecord {
+    pub id: String,
+    pub name: String,
+    /// Omitted when over the size limits; `arguments_bytes` then gives the size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_bytes: Option<u64>,
+    pub status: NestedToolCallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Bounded record of the nested calls a tool made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NestedToolCalls {
+    pub calls: Vec<NestedToolCallRecord>,
+    /// False when calls were dropped, arguments omitted, or calls had not finished.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename = "toolResult", rename_all = "camelCase")]
 pub struct ToolResultMessage {
     pub tool_call_id: String,
     pub tool_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub content: Vec<ToolResultContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
-    /// Usage from the tool execution itself, if available. Not part of main LLM context accounting.
+    /// Usage from the tool execution itself. Not part of main LLM context accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Names from `Context::tools` that became available after this result.
-    pub added_tool_names: Vec<String>,
+    /// Calls this tool made to other tools. Kept for the session record; not
+    /// sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_calls: Option<NestedToolCalls>,
     pub is_error: bool,
     pub timestamp: u64,
-}
-
-fn validate_role(role: Option<&str>, expected: &str) -> std::result::Result<(), String> {
-    match role {
-        Some(actual) if actual != expected => {
-            Err(format!("expected role {expected}, got {actual}"))
-        }
-        _ => Ok(()),
-    }
-}
-
-impl Serialize for UserMessage {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("UserMessage", 3)?;
-        state.serialize_field("role", "user")?;
-        state.serialize_field("content", &self.content)?;
-        state.serialize_field("timestamp", &self.timestamp)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for UserMessage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper {
-            role: Option<String>,
-            #[serde(default, deserialize_with = "deserialize_null_default")]
-            content: UserMessageContent,
-            timestamp: u64,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        validate_role(helper.role.as_deref(), "user").map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            content: helper.content,
-            timestamp: helper.timestamp,
-        })
-    }
-}
-
-impl Serialize for AssistantMessage {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut field_count = 8;
-        if self.response_model.is_some() {
-            field_count += 1;
-        }
-        if self.response_id.is_some() {
-            field_count += 1;
-        }
-        if !self.diagnostics.is_empty() {
-            field_count += 1;
-        }
-        if self.error_message.is_some() {
-            field_count += 1;
-        }
-
-        let mut state = serializer.serialize_struct("AssistantMessage", field_count)?;
-        state.serialize_field("role", "assistant")?;
-        state.serialize_field("content", &self.content)?;
-        state.serialize_field("api", &self.api)?;
-        state.serialize_field("provider", &self.provider)?;
-        state.serialize_field("model", &self.model)?;
-        if let Some(response_model) = &self.response_model {
-            state.serialize_field("responseModel", response_model)?;
-        }
-        if let Some(response_id) = &self.response_id {
-            state.serialize_field("responseId", response_id)?;
-        }
-        if !self.diagnostics.is_empty() {
-            state.serialize_field("diagnostics", &self.diagnostics)?;
-        }
-        state.serialize_field("usage", &self.usage)?;
-        state.serialize_field("stopReason", &self.stop_reason)?;
-        if let Some(error_message) = &self.error_message {
-            state.serialize_field("errorMessage", error_message)?;
-        }
-        state.serialize_field("timestamp", &self.timestamp)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for AssistantMessage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Helper {
-            role: Option<String>,
-            #[serde(default, deserialize_with = "deserialize_null_default")]
-            content: Vec<AssistantContent>,
-            api: Api,
-            provider: ProviderId,
-            model: String,
-            response_model: Option<String>,
-            response_id: Option<String>,
-            #[serde(default)]
-            diagnostics: Vec<Value>,
-            usage: Usage,
-            stop_reason: StopReason,
-            error_message: Option<String>,
-            timestamp: u64,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        validate_role(helper.role.as_deref(), "assistant").map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            content: helper.content,
-            api: helper.api,
-            provider: helper.provider,
-            model: helper.model,
-            response_model: helper.response_model,
-            response_id: helper.response_id,
-            diagnostics: helper.diagnostics,
-            usage: helper.usage,
-            stop_reason: helper.stop_reason,
-            error_message: helper.error_message,
-            timestamp: helper.timestamp,
-        })
-    }
-}
-
-impl Serialize for ToolResultMessage {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut field_count = 6;
-        if self.details.is_some() {
-            field_count += 1;
-        }
-        if self.usage.is_some() {
-            field_count += 1;
-        }
-        if !self.added_tool_names.is_empty() {
-            field_count += 1;
-        }
-        let mut state = serializer.serialize_struct("ToolResultMessage", field_count)?;
-        state.serialize_field("role", "toolResult")?;
-        state.serialize_field("toolCallId", &self.tool_call_id)?;
-        state.serialize_field("toolName", &self.tool_name)?;
-        state.serialize_field("content", &self.content)?;
-        if let Some(details) = &self.details {
-            state.serialize_field("details", details)?;
-        }
-        if let Some(usage) = &self.usage {
-            state.serialize_field("usage", usage)?;
-        }
-        if !self.added_tool_names.is_empty() {
-            state.serialize_field("addedToolNames", &self.added_tool_names)?;
-        }
-        state.serialize_field("isError", &self.is_error)?;
-        state.serialize_field("timestamp", &self.timestamp)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for ToolResultMessage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Helper {
-            role: Option<String>,
-            tool_call_id: String,
-            tool_name: String,
-            #[serde(default, deserialize_with = "deserialize_null_default")]
-            content: Vec<ToolResultContent>,
-            details: Option<Value>,
-            usage: Option<Usage>,
-            #[serde(default)]
-            added_tool_names: Vec<String>,
-            is_error: bool,
-            timestamp: u64,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        validate_role(helper.role.as_deref(), "toolResult").map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            tool_call_id: helper.tool_call_id,
-            tool_name: helper.tool_name,
-            content: helper.content,
-            details: helper.details,
-            usage: helper.usage,
-            added_tool_names: helper.added_tool_names,
-            is_error: helper.is_error,
-            timestamp: helper.timestamp,
-        })
-    }
 }
 
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
@@ -777,12 +1049,66 @@ where
     Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// `SystemMessage | UserMessage | AssistantMessage | ToolResultMessage`.
+#[allow(clippy::large_enum_variant)] // mirrors Pi's plain unions
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
+    System(SystemMessage),
     User(UserMessage),
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
-    Custom(Value),
+}
+
+impl Message {
+    pub fn user_text<T: Into<String>>(text: T) -> Self {
+        Self::User(UserMessage::text(text))
+    }
+
+    pub fn role(&self) -> &'static str {
+        match self {
+            Self::System(_) => "system",
+            Self::User(_) => "user",
+            Self::Assistant(_) => "assistant",
+            Self::ToolResult(_) => "toolResult",
+        }
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::System(message) => message.timestamp,
+            Self::User(message) => message.timestamp,
+            Self::Assistant(message) => message.timestamp,
+            Self::ToolResult(message) => message.timestamp,
+        }
+    }
+}
+
+impl From<SystemMessage> for Message {
+    fn from(value: SystemMessage) -> Self {
+        Self::System(value)
+    }
+}
+
+impl From<UserMessage> for Message {
+    fn from(value: UserMessage) -> Self {
+        Self::User(value)
+    }
+}
+
+impl From<AssistantMessage> for Message {
+    fn from(value: AssistantMessage) -> Self {
+        Self::Assistant(value)
+    }
+}
+
+impl From<ToolResultMessage> for Message {
+    fn from(value: ToolResultMessage) -> Self {
+        Self::ToolResult(value)
+    }
 }
 
 impl Serialize for Message {
@@ -791,26 +1117,10 @@ impl Serialize for Message {
         S: Serializer,
     {
         match self {
+            Self::System(message) => message.serialize(serializer),
             Self::User(message) => message.serialize(serializer),
             Self::Assistant(message) => message.serialize(serializer),
             Self::ToolResult(message) => message.serialize(serializer),
-            Self::Custom(value) => {
-                let mut value = value.clone();
-                match &mut value {
-                    Value::Object(object) => {
-                        object
-                            .entry("role".to_string())
-                            .or_insert_with(|| Value::String("custom".to_string()));
-                        value.serialize(serializer)
-                    }
-                    _ => {
-                        let mut state = serializer.serialize_struct("CustomMessage", 2)?;
-                        state.serialize_field("role", "custom")?;
-                        state.serialize_field("value", &value)?;
-                        state.end()
-                    }
-                }
-            }
         }
     }
 }
@@ -824,40 +1134,49 @@ impl<'de> Deserialize<'de> for Message {
         let role = value
             .get("role")
             .and_then(Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom("missing message role"))?;
+            .ok_or_else(|| de::Error::custom("missing message role"))?;
         match role {
+            "system" => serde_json::from_value(value)
+                .map(Self::System)
+                .map_err(de::Error::custom),
             "user" => serde_json::from_value(value)
                 .map(Self::User)
-                .map_err(serde::de::Error::custom),
+                .map_err(de::Error::custom),
             "assistant" => serde_json::from_value(value)
                 .map(Self::Assistant)
-                .map_err(serde::de::Error::custom),
+                .map_err(de::Error::custom),
             "toolResult" => serde_json::from_value(value)
                 .map(Self::ToolResult)
-                .map_err(serde::de::Error::custom),
-            "custom" => Ok(Self::Custom(value)),
-            _ => Ok(Self::Custom(value)),
+                .map_err(de::Error::custom),
+            other => Err(de::Error::custom(format!("unknown message role: {other}"))),
         }
     }
 }
 
-impl Message {
-    pub fn user_text<T: Into<String>>(text: T) -> Self {
-        Self::User(UserMessage::text(text))
-    }
-
-    pub fn custom(value: Value) -> Self {
-        Self::Custom(value)
-    }
-
-    pub fn is_llm_message(&self) -> bool {
-        matches!(
-            self,
-            Self::User(_) | Self::Assistant(_) | Self::ToolResult(_)
-        )
-    }
+/// OpenAI grammar variants for constrained sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrammarFormat {
+    OpenaiLark,
+    OpenaiRegex,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConstrainedSamplingStrict {
+    Prefer,
+    Require,
+}
+
+/// Optional provider-side constrained sampling config for a tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConstrainedSamplingConfig {
@@ -865,8 +1184,7 @@ pub enum ConstrainedSamplingConfig {
     Grammar { variants: GrammarVariants },
 }
 
-/// A tool's constrained-sampling setting. Pi permits either an explicit
-/// `false` opt-out or a constrained-sampling configuration.
+/// `false | ConstrainedSamplingConfig`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstrainedSampling {
     Disabled,
@@ -911,38 +1229,15 @@ impl<'de> Deserialize<'de> for ConstrainedSampling {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConstrainedSamplingStrict {
-    Prefer,
-    Require,
-}
-
-/// OpenAI grammar encodings supported by Pi constrained-sampling configs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrammarFormat {
-    OpenaiLark,
-    OpenaiRegex,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrammarVariants {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_lark: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_regex: Option<String>,
-}
-
+/// A tool declaration. `parameters` is a JSON Schema object (Pi uses
+/// TypeBox schemas, which are plain JSON Schema at runtime).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: Value,
-    #[serde(
-        rename = "constrainedSampling",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constrained_sampling: Option<ConstrainedSampling>,
 }
 
@@ -957,6 +1252,7 @@ impl Tool {
     }
 }
 
+/// Rust convenience builder for [`Tool`] (not in Pi).
 #[derive(Debug, Clone)]
 pub struct ToolBuilder {
     name: String,
@@ -1015,105 +1311,24 @@ impl ToolBuilder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolReference {
+    pub name: String,
+}
+
+/// Request input accepted by the public stream entry points. `system_prompt`
+/// and `tools` are shorthand for a leading system message;
+/// `normalize_context()` folds them into one before the request reaches a
+/// provider.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Context {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub messages: Vec<Message>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Tool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImagesContext {
-    #[serde(default)]
-    pub input: Vec<UserContent>,
-}
-
-impl ImagesContext {
-    pub fn builder() -> ImagesContextBuilder {
-        ImagesContextBuilder::default()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ImagesContextBuilder {
-    context: ImagesContext,
-}
-
-impl ImagesContextBuilder {
-    pub fn text(mut self, text: impl Into<String>) -> Self {
-        self.context.input.push(UserContent::text(text));
-        self
-    }
-
-    pub fn image(mut self, image: ImageContent) -> Self {
-        self.context.input.push(UserContent::Image(image));
-        self
-    }
-
-    pub fn input(mut self, input: impl IntoIterator<Item = UserContent>) -> Self {
-        self.context.input.extend(input);
-        self
-    }
-
-    pub fn build(self) -> ImagesContext {
-        self.context
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ImageOutput {
-    #[serde(rename = "text")]
-    Text(TextContent),
-    #[serde(rename = "image")]
-    Image(ImageContent),
-}
-
-impl ImageOutput {
-    pub fn text<T: Into<String>>(text: T) -> Self {
-        Self::Text(TextContent {
-            text: text.into(),
-            text_signature: None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssistantImages {
-    pub api: Api,
-    pub provider: ProviderId,
-    pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-    #[serde(default)]
-    pub output: Vec<ImageOutput>,
-    pub usage: Usage,
-    pub stop_reason: ImagesStopReason,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    pub timestamp: u64,
-}
-
-impl AssistantImages {
-    pub fn empty_for(model: &Model) -> Self {
-        Self {
-            api: model.api.clone(),
-            provider: model.provider.clone(),
-            model: model.id.clone(),
-            response_id: None,
-            output: Vec::new(),
-            usage: Usage::default(),
-            stop_reason: ImagesStopReason::Stop,
-            error_message: None,
-            timestamp: crate::utils::time::now_millis(),
-        }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
 }
 
 impl Context {
@@ -1122,6 +1337,7 @@ impl Context {
     }
 }
 
+/// Rust convenience builder for [`Context`] (not in Pi).
 #[derive(Debug, Clone, Default)]
 pub struct ContextBuilder {
     context: Context,
@@ -1133,8 +1349,8 @@ impl ContextBuilder {
         self
     }
 
-    pub fn message(mut self, message: Message) -> Self {
-        self.context.messages.push(message);
+    pub fn message(mut self, message: impl Into<Message>) -> Self {
+        self.context.messages.push(message.into());
         self
     }
 
@@ -1144,12 +1360,15 @@ impl ContextBuilder {
     }
 
     pub fn tool(mut self, tool: Tool) -> Self {
-        self.context.tools.push(tool);
+        self.context.tools.get_or_insert_with(Vec::new).push(tool);
         self
     }
 
     pub fn tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
-        self.context.tools.extend(tools);
+        self.context
+            .tools
+            .get_or_insert_with(Vec::new)
+            .extend(tools);
         self
     }
 
@@ -1158,391 +1377,80 @@ impl ContextBuilder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelInput {
-    Text,
-    Image,
+/// Normalized request context passed to providers and API implementations.
+/// The prompt and tool declarations are carried by the transcript's system
+/// messages. Only `normalize_context()` (and the transcript helpers) produce
+/// this type, so a raw [`Context`] cannot reach provider code by accident.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct TranscriptContext {
+    pub messages: Vec<Message>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelOutput {
-    Text,
-    Image,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelCostRates {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelCostTier {
-    /// Use this tier for requests whose total input usage exceeds this token
-    /// count.
-    pub input_tokens_above: u32,
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelCost {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-    /// Request-wide pricing tiers. The highest matching input threshold
-    /// applies to the full request.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tiers: Vec<ModelCostTier>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Model {
-    pub id: String,
-    pub name: String,
-    pub api: Api,
-    pub provider: ProviderId,
-    pub base_url: String,
-    pub reasoning: bool,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub thinking_level_map: HashMap<String, Option<String>>,
-    #[serde(default)]
-    pub input: Vec<ModelInput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output: Vec<ModelOutput>,
-    pub cost: ModelCost,
-    pub context_window: u32,
-    pub max_tokens: u32,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub headers: HashMap<String, String>,
-    #[serde(default)]
-    pub compat: ModelCompat,
-    #[serde(skip)]
-    pub(crate) language_api: Option<Arc<dyn LanguageModelApi>>,
-    #[serde(skip)]
-    pub(crate) image_api: Option<Arc<dyn crate::provider::ImageModelApi>>,
-    #[serde(skip)]
-    pub(crate) embedding_api: Option<Arc<dyn EmbeddingModelApi>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRef {
-    pub provider_id: ProviderId,
-    pub api_id: Api,
-    pub id: String,
-}
-
-impl std::fmt::Debug for Model {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Model")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("api", &self.api)
-            .field("provider", &self.provider)
-            .field("base_url", &self.base_url)
-            .field("reasoning", &self.reasoning)
-            .field("thinking_level_map", &self.thinking_level_map)
-            .field("input", &self.input)
-            .field("output", &self.output)
-            .field("cost", &self.cost)
-            .field("context_window", &self.context_window)
-            .field("max_tokens", &self.max_tokens)
-            .field(
-                "headers",
-                &(!self.headers.is_empty()).then_some("<redacted>"),
-            )
-            .field("compat", &self.compat)
-            .finish()
+impl TranscriptContext {
+    pub(crate) fn from_messages(messages: Vec<Message>) -> Self {
+        Self { messages }
     }
 }
 
-impl PartialEq for Model {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.api == other.api
-            && self.provider == other.provider
-            && self.base_url == other.base_url
-            && self.reasoning == other.reasoning
-            && self.thinking_level_map == other.thinking_level_map
-            && self.input == other.input
-            && self.output == other.output
-            && self.cost == other.cost
-            && self.context_window == other.context_window
-            && self.max_tokens == other.max_tokens
-            && self.headers == other.headers
-            && self.compat == other.compat
+/// The uniform stream contract of an API implementation module
+/// (`ProviderStreams`): every module under `api/` provides `stream` and
+/// `stream_simple`; capable modules may also provide deferred-response
+/// methods (`supports_*` reports whether Pi's optional method exists).
+///
+/// Implementations return immediately and produce events from a spawned
+/// Tokio task, so they must be called inside a Tokio runtime.
+#[async_trait::async_trait]
+pub trait ProviderStreams: Send + Sync {
+    fn stream(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: StreamOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream;
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: SimpleStreamOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream;
+
+    fn supports_fetch_deferred(&self) -> bool {
+        false
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: Model,
+        _handle: DeferredHandle,
+        _options: DeferredFetchOptions,
+    ) -> crate::utils::event_stream::AssistantMessageEventStream {
+        crate::api::lazy::error_stream(&model, "API does not support deferred responses")
+    }
+
+    fn supports_cancel_deferred(&self) -> bool {
+        false
+    }
+
+    async fn cancel_deferred(
+        &self,
+        _model: Model,
+        _handle: DeferredHandle,
+        _options: DeferredCancelOptions,
+    ) -> Result<()> {
+        Err(crate::Error::message(
+            "API cannot cancel deferred responses",
+        ))
     }
 }
 
-impl Model {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn provider_id(&self) -> &str {
-        &self.provider
-    }
-
-    pub fn api_id(&self) -> &str {
-        &self.api
-    }
-
-    pub fn model_ref(&self) -> ModelRef {
-        ModelRef::from(self)
-    }
-
-    pub fn language_api(&self) -> Option<Arc<dyn LanguageModelApi>> {
-        self.language_api.clone()
-    }
-
-    pub fn image_api(&self) -> Option<Arc<dyn crate::provider::ImageModelApi>> {
-        self.image_api.clone()
-    }
-
-    pub fn embedding_api(&self) -> Option<Arc<dyn EmbeddingModelApi>> {
-        self.embedding_api.clone()
-    }
-}
-
-impl From<&Model> for ModelRef {
-    fn from(model: &Model) -> Self {
-        Self {
-            provider_id: model.provider.clone(),
-            api_id: model.api.clone(),
-            id: model.id.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ModelCompat {
-    #[serde(flatten)]
-    pub openai_completions: OpenAICompletionsCompat,
-    #[serde(flatten)]
-    pub openai_responses: OpenAIResponsesCompat,
-    #[serde(flatten)]
-    pub anthropic_messages: AnthropicMessagesCompat,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAICompletionsCompat {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_store: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_developer_role: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_reasoning_effort: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_usage_in_streaming: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens_field: Option<MaxTokensField>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_tool_result_name: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_assistant_after_tool_result: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_thinking_as_text: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_format: Option<OpenAIThinkingFormat>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub chat_template_kwargs: HashMap<String, ChatTemplateKwargValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub open_router_routing: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vercel_gateway_routing: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub zai_tool_stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_openai_grammar_tools: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control_format: Option<CacheControlFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub send_session_affinity_headers: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_affinity_format: Option<SessionAffinityFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deferred_tools_mode: Option<DeferredToolsMode>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeferredToolsMode {
-    Kimi,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaxTokensField {
-    MaxCompletionTokens,
-    MaxTokens,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OpenAIThinkingFormat {
-    Openai,
-    Openrouter,
-    Deepseek,
-    Together,
-    Zai,
-    Qwen,
-    QwenChatTemplate,
-    ChatTemplate,
-    StringThinking,
-    AntLing,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ChatTemplateKwargValue {
-    String(String),
-    Number(serde_json::Number),
-    Boolean(bool),
-    Null(()),
-    Variable(ChatTemplateKwargVariable),
-}
-
-impl ChatTemplateKwargValue {
-    pub fn from_f64(value: f64) -> Option<Self> {
-        serde_json::Number::from_f64(value).map(Self::Number)
-    }
-
-    pub fn thinking_enabled() -> Self {
-        Self::Variable(ChatTemplateKwargVariable {
-            variable: ChatTemplateVariable::ThinkingEnabled,
-            omit_when_off: false,
-        })
-    }
-
-    pub fn thinking_effort(omit_when_off: bool) -> Self {
-        Self::Variable(ChatTemplateKwargVariable {
-            variable: ChatTemplateVariable::ThinkingEffort,
-            omit_when_off,
-        })
-    }
-}
-
-impl From<String> for ChatTemplateKwargValue {
-    fn from(value: String) -> Self {
-        Self::String(value)
-    }
-}
-
-impl From<&str> for ChatTemplateKwargValue {
-    fn from(value: &str) -> Self {
-        Self::String(value.to_string())
-    }
-}
-
-impl From<bool> for ChatTemplateKwargValue {
-    fn from(value: bool) -> Self {
-        Self::Boolean(value)
-    }
-}
-
-macro_rules! impl_chat_template_kwarg_number {
-    ($($type:ty),+ $(,)?) => {
-        $(
-            impl From<$type> for ChatTemplateKwargValue {
-                fn from(value: $type) -> Self {
-                    Self::Number(value.into())
-                }
-            }
-        )+
-    };
-}
-
-impl_chat_template_kwarg_number!(i8, i16, i32, i64, u8, u16, u32, u64);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatTemplateKwargVariable {
-    #[serde(rename = "$var")]
-    pub variable: ChatTemplateVariable,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub omit_when_off: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChatTemplateVariable {
-    #[serde(rename = "thinking.enabled")]
-    ThinkingEnabled,
-    #[serde(rename = "thinking.effort")]
-    ThinkingEffort,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheControlFormat {
-    Anthropic,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAIResponsesCompat {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_developer_role: Option<bool>,
-    /// Legacy compatibility setting. `false` maps to `OpenaiNosession` when
-    /// `session_affinity_format` is not explicitly configured.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub send_session_id_header: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_affinity_format: Option<SessionAffinityFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_strict_mode: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_openai_grammar_tools: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_explicit_prompt_cache_mode: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_tool_search: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnthropicMessagesCompat {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_eager_tool_input_streaming: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_long_cache_retention: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub send_session_affinity_headers: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_cache_control_on_tools: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_temperature: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force_adaptive_thinking: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_empty_signature: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_strict_tools: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_tool_references: Option<bool>,
-}
-
+/// Event protocol for [`AssistantMessageEventStream`].
+///
+/// Successful streams emit `Start` before partial updates and terminate with
+/// `Done`. A stream may terminate directly with `Error` when request setup
+/// fails before generation starts. `partial` is a snapshot of the response so
+/// far at the time of the event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AssistantMessageEvent {
@@ -1609,16 +1517,1101 @@ pub enum AssistantMessageEvent {
         tool_call: ToolCall,
         partial: AssistantMessage,
     },
+    /// `reason` is one of `Stop`, `Length`, `ToolUse` or `Deferred`.
     #[serde(rename = "done")]
     Done {
         reason: StopReason,
         message: AssistantMessage,
     },
+    /// `reason` is `Aborted` or `Error`.
     #[serde(rename = "error")]
     Error {
         reason: StopReason,
         error: AssistantMessage,
     },
+}
+
+impl AssistantMessageEvent {
+    /// The Pi event `type` string.
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "start",
+            Self::TextStart { .. } => "text_start",
+            Self::TextDelta { .. } => "text_delta",
+            Self::TextEnd { .. } => "text_end",
+            Self::ThinkingStart { .. } => "thinking_start",
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::ThinkingEnd { .. } => "thinking_end",
+            Self::ToolCallStart { .. } => "toolcall_start",
+            Self::ToolCallDelta { .. } => "toolcall_delta",
+            Self::ToolCallEnd { .. } => "toolcall_end",
+            Self::Done { .. } => "done",
+            Self::Error { .. } => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaxTokensField {
+    MaxCompletionTokens,
+    MaxTokens,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenAIThinkingFormat {
+    Openai,
+    Openrouter,
+    Deepseek,
+    Together,
+    Baseten,
+    Zai,
+    Qwen,
+    ChatTemplate,
+    QwenChatTemplate,
+    StringThinking,
+    AntLing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheControlFormat {
+    Anthropic,
+}
+
+/// OpenRouter provider routing preferences, sent as the `provider` request field.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterRouting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// `"deny" | "allow"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_distillable_text: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantizations: Option<Vec<String>>,
+    /// A string or `{ by, partition }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_min_throughput: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency: Option<Value>,
+}
+
+/// Vercel AI Gateway routing preferences.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VercelGatewayRouting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+}
+
+/// Compatibility overrides for a model.
+///
+/// Pi types `Model.compat` per API (`OpenAICompletionsCompat`,
+/// `OpenAIResponsesCompat`, `AnthropicMessagesCompat`, `BedrockCompat`,
+/// `MistralConversationsCompat`). Those interfaces share field names, so the
+/// Rust port uses one struct holding the union of their fields; each API
+/// reads the fields its TypeScript interface declares. The per-API names are
+/// kept as aliases.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCompat {
+    // OpenAICompletionsCompat
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_store: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_usage_in_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_finish_reason: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_field: Option<MaxTokensField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_tool_result_name: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_assistant_after_tool_result: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_thinking_as_text: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_format: Option<OpenAIThinkingFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<IndexMap<String, ChatTemplateKwargValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_args: Option<IndexMap<String, ChatTemplateKwargValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_router_routing: Option<OpenRouterRouting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vercel_gateway_routing: Option<VercelGatewayRouting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zai_tool_stream: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget_field: Option<ThinkingTokenBudgetField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking_token_budget: Option<bool>,
+    #[serde(
+        default,
+        rename = "supportsOpenAIGrammarTools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_openai_grammar_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mid_convo_system_messages: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mid_convo_tool_additions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_format: Option<CacheControlFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_session_affinity_headers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_affinity_format: Option<SessionAffinityFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_long_cache_retention: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vllm_priority: Option<i64>,
+    // OpenAIResponsesCompat
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_additional_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_explicit_prompt_cache_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_max_output_tokens: Option<bool>,
+    // AnthropicMessagesCompat
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_eager_tool_input_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_cache_control_on_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_temperature: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_adaptive_thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_empty_signature: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mid_convo_effort: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_mid_convo_tool_changes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_fallback_models: Option<Vec<AnthropicAllowedFallbackModel>>,
+}
+
+pub type OpenAICompletionsCompat = ModelCompat;
+pub type OpenAIResponsesCompat = ModelCompat;
+pub type AnthropicMessagesCompat = ModelCompat;
+pub type BedrockCompat = ModelCompat;
+pub type MistralConversationsCompat = ModelCompat;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCostRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCostTier {
+    /// Use this tier for requests whose total input usage exceeds this token count.
+    pub input_tokens_above: u32,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    /// Request-wide pricing tiers. The highest matching input threshold
+    /// applies to the full request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<Vec<ModelCostTier>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImageResizeOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    /// Maximum base64-encoded payload size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jpeg_quality: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImageInputLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<ModelImageResizeOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_message: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_request: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInputLimits {
+    /// Maximum serialized provider request size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<ModelImageInputLimits>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelInput {
+    Text,
+    Image,
+}
+
+pub type ModelOutput = ModelInput;
+
+/// What a catalog entry is for (`ModelType`). Decides which `Models`
+/// operation accepts it. `Embedding` is an ai.rs extra, not in Pi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    Chat,
+    Image,
+    Classifier,
+    Embedding,
+}
+
+impl ModelType {
+    /// The serialized `type` name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Image => "image",
+            Self::Classifier => "classifier",
+            Self::Embedding => "embedding",
+        }
+    }
+}
+
+/// Chat model: usable with `Models::stream()` and friends (`Model<Api>`).
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub api: Api,
+    pub provider: ProviderId,
+    pub base_url: String,
+    /// Optional: chat is the default model type.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<ModelType>,
+    pub reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level_map: Option<ThinkingLevelMap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<ModelPromptCache>,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    pub cost: ModelCost,
+    pub context_window: u32,
+    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params: Option<SamplingParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<SamplingParamsByThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<ModelCompat>,
+}
+
+impl fmt::Debug for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Model")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("api", &self.api)
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("model_type", &self.model_type)
+            .field("reasoning", &self.reasoning)
+            .field("thinking_level_map", &self.thinking_level_map)
+            .field("prompt_cache", &self.prompt_cache)
+            .field("input", &self.input)
+            .field("input_limits", &self.input_limits)
+            .field("cost", &self.cost)
+            .field("context_window", &self.context_window)
+            .field("max_tokens", &self.max_tokens)
+            .field("headers", &self.headers.as_ref().map(|_| "<redacted>"))
+            .field("sampling_params", &self.sampling_params)
+            .field(
+                "sampling_params_by_thinking_level",
+                &self.sampling_params_by_thinking_level,
+            )
+            .field("compat", &self.compat)
+            .finish()
+    }
+}
+
+impl Model {
+    pub fn compat(&self) -> ModelCompat {
+        self.compat.clone().unwrap_or_default()
+    }
+}
+
+/// Image-generation model: usable with `Models::generate_images()` only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageModel {
+    pub id: String,
+    pub name: String,
+    pub api: ImageApi,
+    pub provider: ProviderId,
+    pub base_url: String,
+    #[serde(rename = "type")]
+    pub model_type: ImageModelType,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    /// Output modalities. Always includes `Image`.
+    #[serde(default)]
+    pub output: Vec<ModelOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    pub cost: ModelCost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+}
+
+/// The `"image"` discriminator of [`ImageModel`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageModelType {
+    #[default]
+    Image,
+}
+
+/// Structured classifier model: usable with `Models::classify()` only
+/// (`ClassifierModel<TApi>`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierModel {
+    pub id: String,
+    pub name: String,
+    pub api: ClassifierApi,
+    pub provider: ProviderId,
+    pub base_url: String,
+    #[serde(rename = "type")]
+    pub model_type: ClassifierModelType,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    pub cost: ModelCost,
+    pub context_window: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+}
+
+/// The `"classifier"` discriminator of [`ClassifierModel`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClassifierModelType {
+    #[default]
+    Classifier,
+}
+
+/// Embedding model: usable with `Models::embed()` only. ai.rs extra, not in
+/// Pi; shaped like [`ImageModel`] and [`ClassifierModel`] (`BaseModel` plus
+/// the type's own fields).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModel {
+    pub id: String,
+    pub name: String,
+    pub api: EmbeddingApi,
+    pub provider: ProviderId,
+    pub base_url: String,
+    #[serde(rename = "type")]
+    pub model_type: EmbeddingModelType,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    /// Price per million input tokens in `cost.input`; the other rates are 0.
+    pub cost: ModelCost,
+    /// Maximum tokens per input string.
+    pub context_window: u32,
+    /// Length of the returned vectors when the request does not ask for
+    /// other `dimensions`.
+    pub dimensions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+}
+
+/// The `"embedding"` discriminator of [`EmbeddingModel`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingModelType {
+    #[default]
+    Embedding,
+}
+
+/// Anything a provider can list (`AnyModel`). Narrow with
+/// `is_model_type()`. `Embedding` is an ai.rs extra.
+#[allow(clippy::large_enum_variant)] // mirrors Pi's plain unions
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum AnyModel {
+    Chat(Model),
+    Image(ImageModel),
+    Classifier(ClassifierModel),
+    Embedding(EmbeddingModel),
+}
+
+impl<'de> Deserialize<'de> for AnyModel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value.get("type").and_then(Value::as_str) {
+            Some("image") => serde_json::from_value(value)
+                .map(Self::Image)
+                .map_err(de::Error::custom),
+            Some("classifier") => serde_json::from_value(value)
+                .map(Self::Classifier)
+                .map_err(de::Error::custom),
+            Some("embedding") => serde_json::from_value(value)
+                .map(Self::Embedding)
+                .map_err(de::Error::custom),
+            _ => serde_json::from_value(value)
+                .map(Self::Chat)
+                .map_err(de::Error::custom),
+        }
+    }
+}
+
+/// Pi's `hasKnownModelType()` on a raw model: a model without a `type` (or
+/// with `type: null`) is a chat model; `chat`, `image`, `classifier` and
+/// `embedding` are known. `embedding` is an ai.rs extra.
+pub fn has_known_model_type(model: &Value) -> bool {
+    match model.get("type") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(model_type)) => {
+            matches!(
+                model_type.as_str(),
+                "chat" | "image" | "classifier" | "embedding"
+            )
+        }
+        Some(_) => false,
+    }
+}
+
+/// Deserialize raw models of every type, dropping those whose type this
+/// version does not know (Pi's `models.filter(hasKnownModelType)`, applied to
+/// stored catalogs and to fetched model lists). A `fetch_models`
+/// implementation that reads a remote JSON list should use this, so a newer
+/// model type does not fail the refresh.
+pub fn known_models_from_values(
+    models: impl IntoIterator<Item = Value>,
+) -> serde_json::Result<Vec<AnyModel>> {
+    models
+        .into_iter()
+        .filter(has_known_model_type)
+        .map(serde_json::from_value)
+        .collect()
+}
+
+/// `deserialize_with` helper for model lists: see [`known_models_from_values`].
+pub(crate) fn deserialize_known_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AnyModel>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let models = Vec::<Value>::deserialize(deserializer)?;
+    known_models_from_values(models).map_err(de::Error::custom)
+}
+
+impl AnyModel {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Chat(model) => &model.id,
+            Self::Image(model) => &model.id,
+            Self::Classifier(model) => &model.id,
+            Self::Embedding(model) => &model.id,
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        match self {
+            Self::Chat(model) => &model.provider,
+            Self::Image(model) => &model.provider,
+            Self::Classifier(model) => &model.provider,
+            Self::Embedding(model) => &model.provider,
+        }
+    }
+
+    pub fn api(&self) -> &str {
+        match self {
+            Self::Chat(model) => &model.api,
+            Self::Image(model) => &model.api,
+            Self::Classifier(model) => &model.api,
+            Self::Embedding(model) => &model.api,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::Chat(model) => &model.base_url,
+            Self::Image(model) => &model.base_url,
+            Self::Classifier(model) => &model.base_url,
+            Self::Embedding(model) => &model.base_url,
+        }
+    }
+
+    pub fn as_chat(&self) -> Option<&Model> {
+        match self {
+            Self::Chat(model) => Some(model),
+            Self::Image(_) | Self::Classifier(_) | Self::Embedding(_) => None,
+        }
+    }
+
+    pub fn as_image(&self) -> Option<&ImageModel> {
+        match self {
+            Self::Image(model) => Some(model),
+            Self::Chat(_) | Self::Classifier(_) | Self::Embedding(_) => None,
+        }
+    }
+
+    pub fn as_classifier(&self) -> Option<&ClassifierModel> {
+        match self {
+            Self::Classifier(model) => Some(model),
+            Self::Chat(_) | Self::Image(_) | Self::Embedding(_) => None,
+        }
+    }
+
+    pub fn as_embedding(&self) -> Option<&EmbeddingModel> {
+        match self {
+            Self::Embedding(model) => Some(model),
+            Self::Chat(_) | Self::Image(_) | Self::Classifier(_) => None,
+        }
+    }
+}
+
+impl From<Model> for AnyModel {
+    fn from(value: Model) -> Self {
+        Self::Chat(value)
+    }
+}
+
+impl From<ImageModel> for AnyModel {
+    fn from(value: ImageModel) -> Self {
+        Self::Image(value)
+    }
+}
+
+impl From<ClassifierModel> for AnyModel {
+    fn from(value: ClassifierModel) -> Self {
+        Self::Classifier(value)
+    }
+}
+
+impl From<EmbeddingModel> for AnyModel {
+    fn from(value: EmbeddingModel) -> Self {
+        Self::Embedding(value)
+    }
+}
+
+/// `TextContent | ImageContent` accepted by image generation.
+pub type ImagesInputContent = UserContent;
+/// `TextContent | ImageContent` returned by image generation.
+pub type ImagesOutputContent = UserContent;
+
+/// `ImagesContext`: the prompt for an image-generation request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagesContext {
+    pub input: Vec<ImagesInputContent>,
+}
+
+impl ImagesContext {
+    /// Rust addition kept from the pre-1.0 API.
+    pub fn builder() -> ImagesContextBuilder {
+        ImagesContextBuilder::default()
+    }
+}
+
+/// Builder for [`ImagesContext`] (pre-1.0 API).
+#[derive(Debug, Clone, Default)]
+pub struct ImagesContextBuilder {
+    context: ImagesContext,
+}
+
+impl ImagesContextBuilder {
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.context.input.push(UserContent::text(text));
+        self
+    }
+
+    pub fn image(mut self, image: ImageContent) -> Self {
+        self.context.input.push(UserContent::Image(image));
+        self
+    }
+
+    pub fn input(mut self, input: impl IntoIterator<Item = ImagesInputContent>) -> Self {
+        self.context.input.extend(input);
+        self
+    }
+
+    pub fn build(self) -> ImagesContext {
+        self.context
+    }
+}
+
+/// `ImagesStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImagesStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `AssistantImages`: the result of an image-generation request. Failures
+/// are reported in-band (`stop_reason` error/aborted plus `error_message`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantImages {
+    pub api: ImageApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub output: Vec<ImagesOutputContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: ImagesStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl AssistantImages {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &ImageModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            output: Vec::new(),
+            response_id: None,
+            usage: None,
+            stop_reason: ImagesStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for image requests (`ProviderRequestOptions<ImageModel>`).
+pub type ImagesPayloadHook =
+    Arc<dyn Fn(Value, &ImageModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for image requests.
+pub type ImagesResponseHook =
+    Arc<dyn Fn(ProviderResponse, &ImageModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `ImagesOptions` (`ProviderImagesOptions`): request options for image
+/// generation. Pi's open `Record<string, unknown>` extras become
+/// `provider_options`.
+#[derive(Clone, Default)]
+pub struct ImagesOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<ImagesPayloadHook>,
+    pub on_response: Option<ImagesResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Optional metadata to include in API requests. Providers extract the
+    /// fields they understand and ignore the rest.
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    /// API-specific options (`ProviderImagesOptions` record entries).
+    pub provider_options: serde_json::Map<String, Value>,
+}
+
+impl fmt::Debug for ImagesOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImagesOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("provider_options", &self.provider_options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderImages`: the uniform contract of an image-generation API
+/// implementation. Never fails: errors are reported in the result.
+#[async_trait::async_trait]
+pub trait ProviderImages: Send + Sync {
+    async fn generate_images(
+        &self,
+        model: ImageModel,
+        context: ImagesContext,
+        options: ImagesOptions,
+    ) -> AssistantImages;
+}
+
+/// `ClassifierBoolQuestion.criteria`: what `true` and `false` mean.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifierBoolCriteria {
+    #[serde(rename = "true")]
+    pub true_: String,
+    #[serde(rename = "false")]
+    pub false_: String,
+}
+
+/// `ClassifierQuestion`: `choice` (criteria keyed by answer), `score`
+/// (ordered levels) or `bool`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ClassifierQuestion {
+    Choice {
+        instructions: String,
+        criteria: IndexMap<String, String>,
+    },
+    Score {
+        instructions: String,
+        criteria: Vec<String>,
+    },
+    Bool {
+        instructions: String,
+        criteria: ClassifierBoolCriteria,
+    },
+}
+
+impl ClassifierQuestion {
+    pub fn instructions(&self) -> &str {
+        match self {
+            Self::Choice { instructions, .. }
+            | Self::Score { instructions, .. }
+            | Self::Bool { instructions, .. } => instructions,
+        }
+    }
+}
+
+/// `ClassifierContext`: the state to judge and the questions about it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassifierContext {
+    /// `JsonObject`.
+    pub state: serde_json::Map<String, Value>,
+    pub questions: IndexMap<String, ClassifierQuestion>,
+}
+
+/// `ClassifierAnswer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ClassifierAnswer {
+    Choice {
+        choice: String,
+        probabilities: IndexMap<String, f64>,
+        confidence: f64,
+    },
+    Score {
+        score: f64,
+        confidence: f64,
+    },
+    Bool {
+        probability: f64,
+    },
+}
+
+/// `ClassifierStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClassifierStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `ClassifierResult`. Failures are reported in-band (`stop_reason`
+/// error/aborted plus `error_message`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierResult {
+    pub api: ClassifierApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub answers: IndexMap<String, ClassifierAnswer>,
+    /// Token usage and its cost at the model's catalog price, when the
+    /// service reports token counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: ClassifierStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl ClassifierResult {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &ClassifierModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            answers: IndexMap::new(),
+            usage: None,
+            stop_reason: ClassifierStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for classifier requests (`ProviderRequestOptions<ClassifierModel>`).
+pub type ClassifierPayloadHook =
+    Arc<dyn Fn(Value, &ClassifierModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for classifier requests.
+pub type ClassifierResponseHook =
+    Arc<dyn Fn(ProviderResponse, &ClassifierModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `ClassifierOptions`.
+#[derive(Clone, Default)]
+pub struct ClassifierOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<ClassifierPayloadHook>,
+    pub on_response: Option<ClassifierResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Divides the answer logits by this value before they are normalized
+    /// into probabilities. Values above 1 soften the distribution; values
+    /// below 1 sharpen it. Must be positive. APIs that cannot apply it
+    /// ignore it.
+    pub temperature: Option<f64>,
+}
+
+impl fmt::Debug for ClassifierOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClassifierOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("temperature", &self.temperature)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderClassifier`: the uniform contract implemented by classifier API
+/// modules. Never fails: errors are reported in the result.
+#[async_trait::async_trait]
+pub trait ProviderClassifier: Send + Sync {
+    async fn classify(
+        &self,
+        model: ClassifierModel,
+        context: ClassifierContext,
+        options: ClassifierOptions,
+    ) -> ClassifierResult;
+}
+
+// Embeddings: ai.rs extra, not in Pi. The types mirror the image-generation
+// ones above (`ImagesContext` -> `EmbeddingsContext`, `AssistantImages` ->
+// `EmbeddingsResult`, `ProviderImages` -> `ProviderEmbeddings`).
+
+/// `EmbeddingsContext`: the strings to embed, in order. One request embeds
+/// them all.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingsContext {
+    pub input: Vec<String>,
+}
+
+/// A float vector, or a base64 string when the request asks for
+/// `encodingFormat: "base64"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingVector {
+    Float(Vec<f32>),
+    Base64(String),
+}
+
+/// `EmbeddingsStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmbeddingsStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `EmbeddingsResult`: the result of an embeddings request, one vector per
+/// input string in input order. Failures are reported in-band (`stop_reason`
+/// error/aborted plus `error_message`), like [`AssistantImages`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingsResult {
+    pub api: EmbeddingApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub embeddings: Vec<EmbeddingVector>,
+    /// The model id the provider reports, when it differs from `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
+    /// Token usage and its cost at the model's catalog price, when the
+    /// service reports token counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: EmbeddingsStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl EmbeddingsResult {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &EmbeddingModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            embeddings: Vec::new(),
+            response_model: None,
+            usage: None,
+            stop_reason: EmbeddingsStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for embeddings requests (`ProviderRequestOptions<EmbeddingModel>`).
+pub type EmbeddingsPayloadHook =
+    Arc<dyn Fn(Value, &EmbeddingModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for embeddings requests.
+pub type EmbeddingsResponseHook =
+    Arc<dyn Fn(ProviderResponse, &EmbeddingModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `EmbeddingsOptions`: request options for embeddings, shaped like
+/// [`ImagesOptions`]. API-specific options go in `provider_options`.
+#[derive(Clone, Default)]
+pub struct EmbeddingsOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<EmbeddingsPayloadHook>,
+    pub on_response: Option<EmbeddingsResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Optional metadata to include in API requests. Providers extract the
+    /// fields they understand and ignore the rest.
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    /// Requested vector length, for models that can shorten their output.
+    /// APIs that cannot apply it ignore it.
+    pub dimensions: Option<u32>,
+    /// API-specific options.
+    pub provider_options: serde_json::Map<String, Value>,
+}
+
+impl fmt::Debug for EmbeddingsOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbeddingsOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("dimensions", &self.dimensions)
+            .field("provider_options", &self.provider_options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderEmbeddings`: the uniform contract of an embeddings API
+/// implementation, like [`ProviderImages`]. Never fails: errors are reported
+/// in the result.
+#[async_trait::async_trait]
+pub trait ProviderEmbeddings: Send + Sync {
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        context: EmbeddingsContext,
+        options: EmbeddingsOptions,
+    ) -> EmbeddingsResult;
 }
 
 #[cfg(test)]
@@ -1627,23 +2620,50 @@ mod tests {
 
     use super::*;
 
+    fn usage_json() -> Value {
+        json!({
+            "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+            "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }
+        })
+    }
+
     fn assistant_message() -> AssistantMessage {
         AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: "hello".to_string(),
-                text_signature: None,
-            })],
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            model: "gpt-5.5".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: Vec::new(),
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
+            content: vec![AssistantContent::text("hello")],
             timestamp: 123,
+            ..AssistantMessage::empty_for(&Model {
+                id: "gpt-5.5".to_string(),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                ..Default::default()
+            })
         }
+    }
+
+    // message-types.test.ts
+    #[test]
+    fn system_messages_carry_named_sections_and_tool_changes() {
+        let message: Message = serde_json::from_value(json!({
+            "role": "system",
+            "content": "base",
+            "sections": { "skills": "<skills/>", "old": null },
+            "toolsAdded": [{ "name": "read", "description": "Read", "parameters": { "type": "object" } }],
+            "toolsRemoved": [{ "name": "write" }],
+            "timestamp": 1
+        }))
+        .unwrap();
+        let Message::System(system) = &message else {
+            panic!("expected system message");
+        };
+        let sections = system.sections.as_ref().unwrap();
+        assert_eq!(
+            sections.keys().collect::<Vec<_>>(),
+            vec!["skills", "old"],
+            "section order is preserved"
+        );
+        assert_eq!(sections["old"], None);
+        assert_eq!(system.tools_removed.as_ref().unwrap()[0].name, "write");
+        assert_eq!(serde_json::to_value(&message).unwrap()["role"], "system");
     }
 
     #[test]
@@ -1660,43 +2680,39 @@ mod tests {
             serde_json::to_value(assistant_message()).unwrap()["role"],
             json!("assistant")
         );
+        let tool_result = ToolResultMessage {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "read".to_string(),
+            content: vec![ToolResultContent::text("done")],
+            details: None,
+            usage: None,
+            nested_calls: None,
+            is_error: false,
+            timestamp: 2,
+        };
         assert_eq!(
-            serde_json::to_value(ToolResultMessage {
-                tool_call_id: "call_1".to_string(),
-                tool_name: "read".to_string(),
-                content: vec![ToolResultContent::text("done")],
-                details: None,
-                usage: None,
-                added_tool_names: Vec::new(),
-                is_error: false,
-                timestamp: 2,
-            })
-            .unwrap()["role"],
+            serde_json::to_value(tool_result).unwrap()["role"],
             json!("toolResult")
         );
     }
 
     #[test]
     fn assistant_events_include_role_in_nested_messages() {
-        let message = assistant_message();
         let event = AssistantMessageEvent::Done {
             reason: StopReason::Stop,
-            message,
+            message: assistant_message(),
         };
         let value = serde_json::to_value(event).unwrap();
-
         assert_eq!(value["type"], json!("done"));
         assert_eq!(value["message"]["role"], json!("assistant"));
     }
 
     #[test]
-    fn context_builder_collects_system_messages_and_tools() {
-        let tool = Tool {
-            name: "lookup".to_string(),
-            description: "Lookup a value.".to_string(),
-            parameters: json!({ "type": "object" }),
-            constrained_sampling: None,
-        };
+    fn context_builder_collects_messages_and_tools() {
+        let tool = Tool::builder("lookup")
+            .description("Lookup a value.")
+            .build()
+            .unwrap();
         let context = Context::builder()
             .system_prompt("You are concise.")
             .message(Message::user_text("hi"))
@@ -1704,76 +2720,20 @@ mod tests {
             .build();
 
         assert_eq!(context.system_prompt.as_deref(), Some("You are concise."));
-        assert_eq!(context.messages, vec![Message::user_text("hi")]);
-        assert_eq!(context.tools, vec![tool]);
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.tools, Some(vec![tool]));
     }
 
     #[test]
-    fn tool_builder_creates_tool_with_parameters() {
-        let tool = Tool::builder("lookup")
-            .description("Lookup a value.")
-            .parameters(json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string" }
-                },
-                "required": ["key"]
-            }))
-            .build()
-            .expect("tool");
-
-        assert_eq!(tool.name, "lookup");
-        assert_eq!(tool.description, "Lookup a value.");
-        assert_eq!(tool.parameters["type"], json!("object"));
-    }
-
-    #[test]
-    fn tool_builder_defaults_to_empty_object_schema() {
+    fn tool_builder_validates_and_defaults_schema() {
         let tool = Tool::builder("ping")
             .description("Ping the tool.")
             .build()
-            .expect("tool");
-
+            .unwrap();
         assert_eq!(
             tool.parameters,
             json!({ "type": "object", "properties": {} })
         );
-    }
-
-    #[test]
-    fn constrained_sampling_matches_pi_wire_format() {
-        let disabled: ConstrainedSampling = serde_json::from_value(json!(false)).unwrap();
-        assert_eq!(disabled, ConstrainedSampling::Disabled);
-
-        let tool = Tool::builder("apply_patch")
-            .description("Apply a patch.")
-            .parameters(json!({
-                "type": "object",
-                "properties": { "input": { "type": "string" } },
-                "required": ["input"]
-            }))
-            .constrained_sampling(ConstrainedSamplingConfig::Grammar {
-                variants: GrammarVariants {
-                    openai_lark: Some("start: /.+/s".to_string()),
-                    openai_regex: None,
-                },
-            })
-            .build()
-            .unwrap();
-        let value = serde_json::to_value(&tool).unwrap();
-
-        assert_eq!(
-            value["constrainedSampling"],
-            json!({
-                "type": "grammar",
-                "variants": { "openai_lark": "start: /.+/s" }
-            })
-        );
-        assert_eq!(serde_json::from_value::<Tool>(value).unwrap(), tool);
-    }
-
-    #[test]
-    fn tool_builder_validates_required_fields() {
         assert!(Tool::builder("").description("desc").build().is_err());
         assert!(Tool::builder("lookup").build().is_err());
         assert!(
@@ -1786,9 +2746,38 @@ mod tests {
     }
 
     #[test]
+    fn constrained_sampling_matches_pi_wire_format() {
+        let disabled: ConstrainedSampling = serde_json::from_value(json!(false)).unwrap();
+        assert_eq!(disabled, ConstrainedSampling::Disabled);
+        assert!(serde_json::from_value::<ConstrainedSampling>(json!(true)).is_err());
+
+        let tool = Tool::builder("apply_patch")
+            .description("Apply a patch.")
+            .constrained_sampling(ConstrainedSamplingConfig::Grammar {
+                variants: GrammarVariants {
+                    openai_lark: Some("start: /.+/s".to_string()),
+                    openai_regex: None,
+                },
+            })
+            .build()
+            .unwrap();
+        let value = serde_json::to_value(&tool).unwrap();
+        assert_eq!(
+            value["constrainedSampling"],
+            json!({ "type": "grammar", "variants": { "openai_lark": "start: /.+/s" } })
+        );
+        assert_eq!(serde_json::from_value::<Tool>(value).unwrap(), tool);
+    }
+
+    #[test]
     fn context_messages_round_trip_with_roles() {
         let context = Context {
             messages: vec![
+                Message::System(SystemMessage {
+                    content: "sys".into(),
+                    timestamp: 0,
+                    ..Default::default()
+                }),
                 Message::user_text("hi"),
                 Message::Assistant(assistant_message()),
                 Message::ToolResult(ToolResultMessage {
@@ -1797,7 +2786,18 @@ mod tests {
                     content: vec![ToolResultContent::text("done")],
                     details: None,
                     usage: None,
-                    added_tool_names: Vec::new(),
+                    nested_calls: Some(NestedToolCalls {
+                        calls: vec![NestedToolCallRecord {
+                            id: "n1".to_string(),
+                            name: "grep".to_string(),
+                            arguments: None,
+                            arguments_bytes: Some(10),
+                            status: NestedToolCallStatus::Unfinished,
+                            duration_ms: None,
+                            error: None,
+                        }],
+                        complete: false,
+                    }),
                     is_error: false,
                     timestamp: 2,
                 }),
@@ -1807,118 +2807,79 @@ mod tests {
         let value = serde_json::to_value(&context).unwrap();
         let restored: Context = serde_json::from_value(value.clone()).unwrap();
 
-        assert_eq!(value["messages"][0]["role"], json!("user"));
-        assert_eq!(value["messages"][1]["role"], json!("assistant"));
-        assert_eq!(value["messages"][2]["role"], json!("toolResult"));
-        assert_eq!(restored, context);
-    }
-
-    #[test]
-    fn model_ref_serializes_provider_api_and_model_id() {
-        let model = Model {
-            id: "gpt-5.5".to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            ..Model::default()
-        };
-
+        assert_eq!(value["messages"][0]["role"], json!("system"));
+        assert_eq!(value["messages"][1]["role"], json!("user"));
+        assert_eq!(value["messages"][2]["role"], json!("assistant"));
+        assert_eq!(value["messages"][3]["role"], json!("toolResult"));
         assert_eq!(
-            serde_json::to_value(model.model_ref()).unwrap(),
-            json!({
-                "providerId": "openai",
-                "apiId": "openai-responses",
-                "id": "gpt-5.5"
-            })
+            value["messages"][3]["nestedCalls"]["calls"][0]["argumentsBytes"],
+            json!(10)
         );
+        assert_eq!(restored, context);
     }
 
     #[test]
     fn deserializes_null_or_missing_message_content_as_empty() {
         let messages: Vec<Message> = serde_json::from_value(json!([
+            { "role": "user", "content": null, "timestamp": 1 },
             {
-                "role": "user",
-                "content": null,
-                "timestamp": 1
+                "role": "assistant", "content": null, "api": "openai-completions",
+                "provider": "openai", "model": "gpt-4o-mini", "usage": usage_json(),
+                "stopReason": "stop", "timestamp": 2
             },
-            {
-                "role": "assistant",
-                "content": null,
-                "api": "openai-completions",
-                "provider": "openai",
-                "model": "gpt-4o-mini",
-                "usage": {
-                    "input": 0,
-                    "output": 0,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                    "totalTokens": 0,
-                    "cost": {
-                        "input": 0.0,
-                        "output": 0.0,
-                        "cacheRead": 0.0,
-                        "cacheWrite": 0.0,
-                        "total": 0.0
-                    }
-                },
-                "stopReason": "stop",
-                "timestamp": 2
-            },
-            {
-                "role": "toolResult",
-                "toolCallId": "call_1",
-                "toolName": "web_search",
-                "isError": false,
-                "timestamp": 3
-            }
+            { "role": "toolResult", "toolCallId": "call_1", "toolName": "web_search", "isError": false, "timestamp": 3 }
         ]))
         .expect("lax messages deserialize");
 
+        let Message::User(user) = &messages[0] else {
+            panic!()
+        };
+        assert_eq!(user.content, UserMessageContent::Parts(Vec::new()));
+        let Message::Assistant(assistant) = &messages[1] else {
+            panic!()
+        };
+        assert!(assistant.content.is_empty());
+        let Message::ToolResult(result) = &messages[2] else {
+            panic!()
+        };
+        assert!(result.content.is_empty());
+    }
+
+    #[test]
+    fn assistant_message_optional_fields_round_trip() {
+        let message = AssistantMessage {
+            stop_reason: StopReason::Deferred,
+            deferred: Some(DeferredHandle {
+                provider: "openai".to_string(),
+                model_id: "gpt-5.5".to_string(),
+                api: "openai-responses".to_string(),
+                id: "resp_1".to_string(),
+                expires_at: Some(5),
+                poll_after_ms: None,
+                data: Some(json!({ "k": 1 })),
+            }),
+            provider_thinking_level: Some("xhigh".to_string()),
+            thinking_level: Some(ModelThinkingLevel::High),
+            raw_stop_reason: Some("end_turn".to_string()),
+            end_turn: Some(true),
+            ..assistant_message()
+        };
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["stopReason"], json!("deferred"));
+        assert_eq!(value["deferred"]["modelId"], json!("gpt-5.5"));
+        assert_eq!(value["thinkingLevel"], json!("high"));
+        assert!(value.get("diagnostics").is_none());
         assert_eq!(
-            messages,
-            vec![
-                Message::User(UserMessage {
-                    content: UserMessageContent::Parts(Vec::new()),
-                    timestamp: 1,
-                }),
-                Message::Assistant(AssistantMessage {
-                    content: Vec::new(),
-                    api: "openai-completions".to_string(),
-                    provider: "openai".to_string(),
-                    model: "gpt-4o-mini".to_string(),
-                    response_model: None,
-                    response_id: None,
-                    diagnostics: Vec::new(),
-                    usage: Usage::default(),
-                    stop_reason: StopReason::Stop,
-                    error_message: None,
-                    timestamp: 2,
-                }),
-                Message::ToolResult(ToolResultMessage {
-                    tool_call_id: "call_1".to_string(),
-                    tool_name: "web_search".to_string(),
-                    content: Vec::new(),
-                    details: None,
-                    usage: None,
-                    added_tool_names: Vec::new(),
-                    is_error: false,
-                    timestamp: 3,
-                }),
-            ]
+            serde_json::from_value::<AssistantMessage>(value).unwrap(),
+            message
         );
     }
 
+    // max-thinking.test.ts (type-level parts)
     #[test]
     fn max_thinking_level_round_trips() {
         assert_eq!(
             serde_json::to_value(ThinkingLevel::Max).unwrap(),
-            json!("max")
-        );
-        assert_eq!(
-            serde_json::from_value::<ThinkingLevel>(json!("max")).unwrap(),
-            ThinkingLevel::Max
-        );
-        assert_eq!(
-            serde_json::to_value(ModelThinkingLevel::Max).unwrap(),
             json!("max")
         );
         assert_eq!(
@@ -1932,66 +2893,6 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_formats_and_legacy_responses_setting_round_trip() {
-        for (format, serialized) in [
-            (SessionAffinityFormat::Openai, "openai"),
-            (SessionAffinityFormat::OpenaiNosession, "openai-nosession"),
-            (SessionAffinityFormat::Openrouter, "openrouter"),
-        ] {
-            assert_eq!(serde_json::to_value(format).unwrap(), json!(serialized));
-            assert_eq!(
-                serde_json::from_value::<SessionAffinityFormat>(json!(serialized)).unwrap(),
-                format
-            );
-        }
-
-        let completions = OpenAICompletionsCompat {
-            session_affinity_format: Some(SessionAffinityFormat::OpenaiNosession),
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(completions).unwrap()["sessionAffinityFormat"],
-            json!("openai-nosession")
-        );
-
-        let legacy: OpenAIResponsesCompat =
-            serde_json::from_value(json!({ "sendSessionIdHeader": false })).unwrap();
-        assert_eq!(legacy.send_session_id_header, Some(false));
-        assert_eq!(
-            serde_json::to_value(legacy).unwrap(),
-            json!({ "sendSessionIdHeader": false })
-        );
-
-        let responses = OpenAIResponsesCompat {
-            supports_developer_role: Some(false),
-            session_affinity_format: Some(SessionAffinityFormat::Openrouter),
-            supports_long_cache_retention: Some(false),
-            supports_explicit_prompt_cache_mode: Some(true),
-            ..Default::default()
-        };
-        let serialized = serde_json::to_value(&responses).unwrap();
-        assert_eq!(serialized["supportsDeveloperRole"], json!(false));
-        assert_eq!(serialized["sessionAffinityFormat"], json!("openrouter"));
-        assert_eq!(serialized["supportsLongCacheRetention"], json!(false));
-        assert_eq!(serialized["supportsExplicitPromptCacheMode"], json!(true));
-        assert_eq!(
-            serde_json::from_value::<OpenAIResponsesCompat>(serialized).unwrap(),
-            responses
-        );
-
-        let headers: ProviderHeaders = [
-            ("x-keep".to_string(), Some("value".to_string())),
-            ("x-remove".to_string(), None),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            serde_json::to_value(headers).unwrap(),
-            json!({ "x-keep": "value", "x-remove": null })
-        );
-    }
-
-    #[test]
     fn usage_optional_breakdowns_and_cost_tiers_round_trip() {
         let usage = Usage {
             output: 20,
@@ -2000,177 +2901,134 @@ mod tests {
             reasoning: Some(7),
             ..Default::default()
         };
-        let serialized_usage = serde_json::to_value(&usage).unwrap();
-        assert_eq!(serialized_usage["cacheWrite1h"], json!(4));
-        assert_eq!(serialized_usage["reasoning"], json!(7));
-        assert_eq!(
-            serde_json::from_value::<Usage>(serialized_usage).unwrap(),
-            usage
-        );
-        let empty_usage = serde_json::to_value(Usage::default()).unwrap();
-        assert!(empty_usage.get("cacheWrite1h").is_none());
-        assert!(empty_usage.get("reasoning").is_none());
+        let serialized = serde_json::to_value(&usage).unwrap();
+        assert_eq!(serialized["cacheWrite1h"], json!(4));
+        assert_eq!(serialized["reasoning"], json!(7));
+        assert_eq!(serde_json::from_value::<Usage>(serialized).unwrap(), usage);
+        let empty = serde_json::to_value(Usage::default()).unwrap();
+        assert!(empty.get("cacheWrite1h").is_none());
+        assert!(empty.get("reasoning").is_none());
 
         let cost = ModelCost {
             input: 5.0,
             output: 30.0,
             cache_read: 0.5,
             cache_write: 6.25,
-            tiers: vec![ModelCostTier {
+            tiers: Some(vec![ModelCostTier {
                 input_tokens_above: 272_000,
                 input: 10.0,
                 output: 45.0,
                 cache_read: 1.0,
                 cache_write: 12.5,
-            }],
+            }]),
         };
-        let serialized_cost = serde_json::to_value(&cost).unwrap();
-        assert_eq!(serialized_cost["tiers"][0]["inputTokensAbove"], 272_000);
+        let serialized = serde_json::to_value(&cost).unwrap();
+        assert_eq!(serialized["tiers"][0]["inputTokensAbove"], 272_000);
         assert_eq!(
-            serde_json::from_value::<ModelCost>(serialized_cost).unwrap(),
+            serde_json::from_value::<ModelCost>(serialized).unwrap(),
             cost
         );
     }
 
     #[test]
-    fn chat_template_compat_round_trips() {
-        let compat = OpenAICompletionsCompat {
-            thinking_format: Some(OpenAIThinkingFormat::ChatTemplate),
-            chat_template_kwargs: [
-                (
-                    "enabled".to_string(),
-                    ChatTemplateKwargValue::thinking_enabled(),
-                ),
-                (
-                    "effort".to_string(),
-                    ChatTemplateKwargValue::thinking_effort(true),
-                ),
-                ("preserve".to_string(), true.into()),
-                (
-                    "temperature".to_string(),
-                    ChatTemplateKwargValue::from_f64(0.5).unwrap(),
-                ),
-                ("sentinel".to_string(), ChatTemplateKwargValue::Null(())),
-            ]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        };
-        let value = serde_json::to_value(&compat).unwrap();
-        let restored: OpenAICompletionsCompat = serde_json::from_value(value.clone()).unwrap();
-
-        assert_eq!(value["thinkingFormat"], json!("chat-template"));
+    fn model_compat_round_trips_pi_field_names() {
+        let compat: ModelCompat = serde_json::from_value(json!({
+            "supportsDeveloperRole": false,
+            "supportsOpenAIGrammarTools": true,
+            "supportsMidConvoSystemMessages": true,
+            "sessionAffinityFormat": "openai-nosession",
+            "thinkingFormat": "chat-template",
+            "chatTemplateKwargs": {
+                "enabled": { "$var": "thinking.enabled" },
+                "effort": { "$var": "thinking.effort", "omitWhenOff": true },
+                "budget": { "$var": "thinking.budget" },
+                "preserve": true,
+                "temperature": 0.5,
+                "sentinel": null
+            },
+            "thinkingTokenBudgetField": "thinking_budget_tokens",
+            "supportsTemperature": false,
+            "allowedFallbackModels": [{
+                "provider": "anthropic", "model": "claude-x",
+                "cost": { "input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0 }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(compat.supports_developer_role, Some(false));
+        assert_eq!(compat.supports_openai_grammar_tools, Some(true));
         assert_eq!(
-            value["chatTemplateKwargs"]["enabled"],
-            json!({ "$var": "thinking.enabled" })
+            compat.session_affinity_format,
+            Some(SessionAffinityFormat::OpenaiNosession)
         );
+        let kwargs = compat.chat_template_kwargs.as_ref().unwrap();
+        assert_eq!(
+            kwargs["budget"],
+            ChatTemplateKwargValue::variable(ChatTemplateVariable::ThinkingBudget, false)
+        );
+        assert_eq!(kwargs["sentinel"], ChatTemplateKwargValue::Null(()));
+        let value = serde_json::to_value(&compat).unwrap();
+        assert_eq!(value["supportsOpenAIGrammarTools"], json!(true));
         assert_eq!(
             value["chatTemplateKwargs"]["effort"],
             json!({ "$var": "thinking.effort", "omitWhenOff": true })
         );
-        assert_eq!(value["chatTemplateKwargs"]["temperature"], json!(0.5));
-        assert_eq!(value["chatTemplateKwargs"]["sentinel"], Value::Null);
-        assert_eq!(restored, compat);
-    }
-
-    #[test]
-    fn anthropic_temperature_compat_round_trips() {
-        let compat = AnthropicMessagesCompat {
-            supports_temperature: Some(false),
-            ..Default::default()
-        };
-
-        let value = serde_json::to_value(&compat).unwrap();
-        let restored: AnthropicMessagesCompat = serde_json::from_value(value.clone()).unwrap();
-
-        assert_eq!(value["supportsTemperature"], json!(false));
-        assert_eq!(restored, compat);
-    }
-
-    #[test]
-    fn deferred_tool_metadata_round_trips() {
-        let message = ToolResultMessage {
-            tool_call_id: "call_1".to_string(),
-            tool_name: "base_tool".to_string(),
-            content: vec![ToolResultContent::text("done")],
-            details: None,
-            usage: None,
-            added_tool_names: vec!["late_tool".to_string()],
-            is_error: false,
-            timestamp: 3,
-        };
-        let value = serde_json::to_value(&message).unwrap();
-        assert_eq!(value["addedToolNames"], json!(["late_tool"]));
-        assert_eq!(
-            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
-            message
-        );
-
-        let compat = ModelCompat {
-            openai_completions: OpenAICompletionsCompat {
-                deferred_tools_mode: Some(DeferredToolsMode::Kimi),
-                ..Default::default()
-            },
-            openai_responses: OpenAIResponsesCompat {
-                supports_tool_search: Some(true),
-                ..Default::default()
-            },
-            anthropic_messages: AnthropicMessagesCompat {
-                supports_tool_references: Some(true),
-                ..Default::default()
-            },
-        };
-        let value = serde_json::to_value(&compat).unwrap();
-        assert_eq!(value["deferredToolsMode"], json!("kimi"));
-        assert_eq!(value["supportsToolSearch"], json!(true));
-        assert_eq!(value["supportsToolReferences"], json!(true));
         assert_eq!(
             serde_json::from_value::<ModelCompat>(value).unwrap(),
             compat
         );
-    }
-
-    #[test]
-    fn tool_result_usage_round_trips() {
-        let message = ToolResultMessage {
-            tool_call_id: "call_1".to_string(),
-            tool_name: "llm_tool".to_string(),
-            content: vec![ToolResultContent::text("done")],
-            details: None,
-            usage: Some(Usage {
-                input: 1,
-                output: 2,
-                cache_read: 3,
-                cache_write: 4,
-                total_tokens: 10,
-                cost: UsageCost {
-                    input: 0.1,
-                    output: 0.2,
-                    cache_read: 0.3,
-                    cache_write: 0.4,
-                    total: 1.0,
-                },
-                ..Default::default()
-            }),
-            added_tool_names: Vec::new(),
-            is_error: false,
-            timestamp: 3,
-        };
-        let value = serde_json::to_value(&message).unwrap();
-
-        assert_eq!(
-            value["usage"],
-            serde_json::to_value(&message.usage).unwrap()
-        );
-        assert_eq!(
-            serde_json::from_value::<ToolResultMessage>(value).unwrap(),
-            message
-        );
-    }
-
-    #[test]
-    fn chat_template_float_values_reject_non_finite_numbers() {
         assert!(ChatTemplateKwargValue::from_f64(f64::NAN).is_none());
-        assert!(ChatTemplateKwargValue::from_f64(f64::INFINITY).is_none());
+    }
+
+    #[test]
+    fn provider_headers_keep_insertion_order_and_null_suppression() {
+        let headers: ProviderHeaders = [("x-b", Some("1".to_string())), ("x-a", None)]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            serde_json::to_string(&headers).unwrap(),
+            r#"{"x-b":"1","x-a":null}"#
+        );
+    }
+
+    #[test]
+    fn any_model_dispatches_on_type() {
+        let chat: AnyModel = serde_json::from_value(json!({
+            "id": "m", "name": "M", "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://x", "type": "chat", "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 10, "maxTokens": 5,
+            "thinkingLevelMap": { "off": null, "xhigh": "xhigh" }
+        }))
+        .unwrap();
+        let model = chat.as_chat().unwrap();
+        assert_eq!(model.model_type, Some(ModelType::Chat));
+        assert_eq!(
+            model.thinking_level_map.as_ref().unwrap()[&ModelThinkingLevel::Off],
+            None
+        );
+        let image: AnyModel = serde_json::from_value(json!({
+            "id": "i", "name": "I", "api": "openrouter-images", "provider": "openrouter",
+            "baseUrl": "https://x", "type": "image", "input": ["text"], "output": ["image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }))
+        .unwrap();
+        assert!(image.as_image().is_some());
+        let embedding: AnyModel = serde_json::from_value(json!({
+            "id": "e", "name": "E", "api": "openai-embeddings", "provider": "openai",
+            "baseUrl": "https://x", "type": "embedding", "input": ["text"],
+            "cost": { "input": 0.02, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 8192, "dimensions": 1536
+        }))
+        .unwrap();
+        let model = embedding.as_embedding().unwrap();
+        assert_eq!(model.dimensions, 1536);
+        assert_eq!(model.context_window, 8192);
+        assert!(has_known_model_type(
+            &serde_json::to_value(&embedding).unwrap()
+        ));
+        assert_eq!(
+            serde_json::to_value(&embedding).unwrap()["type"],
+            "embedding"
+        );
     }
 }

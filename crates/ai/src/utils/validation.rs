@@ -1,8 +1,19 @@
+//! Port of `utils/validation.ts`.
+//!
+//! Pi validates with TypeBox (`Value.Convert` for TypeBox schemas, then an
+//! AJV-compatible coercion pass for plain JSON schemas). Rust tools carry
+//! plain JSON Schema, so every schema takes the coercion path and is checked
+//! by a built-in JSON Schema subset validator (type, enum/const, allOf/anyOf/
+//! oneOf, object/array/number/string constraints; `$ref` is not resolved).
+//! Error lines keep Pi's `"  - <path>: <message>"` layout, but the messages
+//! are this validator's, not TypeBox's.
+
 use serde_json::{Map, Number, Value};
 
 use crate::types::{Tool, ToolCall};
 use crate::{Error, Result};
 
+/// Finds a tool by name and validates the tool call arguments against its schema.
 pub fn validate_tool_call(tools: &[Tool], tool_call: &ToolCall) -> Result<Value> {
     let tool = tools
         .iter()
@@ -11,24 +22,41 @@ pub fn validate_tool_call(tools: &[Tool], tool_call: &ToolCall) -> Result<Value>
     validate_tool_arguments(tool, tool_call)
 }
 
+/// Validates tool call arguments against the tool's schema and returns the
+/// validated (and potentially coerced) arguments.
 pub fn validate_tool_arguments(tool: &Tool, tool_call: &ToolCall) -> Result<Value> {
-    let args = coerce_with_json_schema(tool_call.arguments.clone(), &tool.parameters);
-    let mut errors = Vec::new();
-    validate_value(&args, &tool.parameters, "root", &mut errors);
-    if errors.is_empty() {
+    let mut args = tool_call.arguments.clone();
+    normalize_optional_nulls(&mut args, &tool.parameters);
+    let args = coerce_with_json_schema(args, &tool.parameters);
+
+    if check(&args, &tool.parameters) {
         return Ok(args);
     }
 
-    Err(Error::Validation(format!(
-        "Validation failed for tool \"{}\":\n{}\n\nReceived arguments:\n{}",
-        tool_call.name,
+    let mut errors = Vec::new();
+    validate_value(&args, &tool.parameters, "root", &mut errors);
+    let errors = if errors.is_empty() {
+        "Unknown validation error".to_string()
+    } else {
         errors
             .iter()
             .map(|error| format!("  - {error}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+    };
+
+    Err(Error::Validation(format!(
+        "Validation failed for tool \"{}\":\n{errors}\n\nReceived arguments:\n{}",
+        tool_call.name,
         serde_json::to_string_pretty(&tool_call.arguments).unwrap_or_else(|_| "null".to_string())
     )))
+}
+
+/// `validator.Check(value)`.
+fn check(value: &Value, schema: &Value) -> bool {
+    let mut errors = Vec::new();
+    validate_value(value, schema, "root", &mut errors);
+    errors.is_empty()
 }
 
 fn schema_types(schema: &Value) -> Vec<&str> {
@@ -39,10 +67,16 @@ fn schema_types(schema: &Value) -> Vec<&str> {
     }
 }
 
+fn is_integer(value: &Value) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
+}
+
 fn matches_json_type(value: &Value, schema_type: &str) -> bool {
     match schema_type {
         "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "integer" => is_integer(value),
         "boolean" => value.is_boolean(),
         "string" => value.is_string(),
         "null" => value.is_null(),
@@ -52,47 +86,80 @@ fn matches_json_type(value: &Value, schema_type: &str) -> bool {
     }
 }
 
+/// A JSON number for a JavaScript number: integral values stay integers.
+fn json_number(value: f64) -> Value {
+    if value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+        return Value::Number(Number::from(value as i64));
+    }
+    Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+/// JavaScript `Number(string)` for non-blank decimal strings.
+fn js_number(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed
+        .chars()
+        .any(|ch| !(ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E')))
+    {
+        return None;
+    }
+    trimmed.parse::<f64>().ok()
+}
+
+/// JavaScript `String(number)` for the values JSON numbers hold.
+fn js_number_string(number: &Number) -> String {
+    match number.as_f64() {
+        Some(value)
+            if !number.is_i64()
+                && !number.is_u64()
+                && value.fract() == 0.0
+                && value.abs() < 1e21 =>
+        {
+            format!("{}", value as i64)
+        }
+        _ => number.to_string(),
+    }
+}
+
 fn coerce_primitive_by_type(value: Value, schema_type: &str) -> Value {
     match schema_type {
         "number" => match value {
             Value::Null => json_number(0.0),
-            Value::String(text) if !text.trim().is_empty() => text
-                .parse::<f64>()
-                .ok()
-                .and_then(Number::from_f64)
-                .map(Value::Number)
-                .unwrap_or(Value::String(text)),
+            Value::String(text) if !text.trim().is_empty() => match js_number(&text) {
+                Some(parsed) if parsed.is_finite() => json_number(parsed),
+                _ => Value::String(text),
+            },
             Value::Bool(flag) => json_number(if flag { 1.0 } else { 0.0 }),
             other => other,
         },
         "integer" => match value {
-            Value::Null => Value::Number(Number::from(0)),
-            Value::String(text) if !text.trim().is_empty() => text
-                .parse::<i64>()
-                .ok()
-                .map(Number::from)
-                .map(Value::Number)
-                .unwrap_or(Value::String(text)),
-            Value::Bool(flag) => Value::Number(Number::from(if flag { 1 } else { 0 })),
+            Value::Null => json_number(0.0),
+            Value::String(text) if !text.trim().is_empty() => match js_number(&text) {
+                Some(parsed) if parsed.is_finite() && parsed.fract() == 0.0 => json_number(parsed),
+                _ => Value::String(text),
+            },
+            Value::Bool(flag) => json_number(if flag { 1.0 } else { 0.0 }),
             other => other,
         },
         "boolean" => match value {
             Value::Null => Value::Bool(false),
             Value::String(text) if text == "true" => Value::Bool(true),
             Value::String(text) if text == "false" => Value::Bool(false),
-            Value::Number(number) if number.as_i64() == Some(1) => Value::Bool(true),
-            Value::Number(number) if number.as_i64() == Some(0) => Value::Bool(false),
+            Value::Number(number) if number.as_f64() == Some(1.0) => Value::Bool(true),
+            Value::Number(number) if number.as_f64() == Some(0.0) => Value::Bool(false),
             other => other,
         },
         "string" => match value {
             Value::Null => Value::String(String::new()),
-            Value::Number(number) => Value::String(number.to_string()),
+            Value::Number(number) => Value::String(js_number_string(&number)),
             Value::Bool(flag) => Value::String(flag.to_string()),
             other => other,
         },
         "null" => match value {
             Value::String(text) if text.is_empty() => Value::Null,
-            Value::Number(number) if number.as_i64() == Some(0) => Value::Null,
+            Value::Number(number) if number.as_f64() == Some(0.0) => Value::Null,
             Value::Bool(false) => Value::Null,
             other => other,
         },
@@ -100,10 +167,60 @@ fn coerce_primitive_by_type(value: Value, schema_type: &str) -> Value {
     }
 }
 
-fn json_number(value: f64) -> Value {
-    Number::from_f64(value)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
+fn apply_schema_object_coercion(object: &mut Map<String, Value>, schema: &Value) {
+    let properties = schema.get("properties").and_then(Value::as_object);
+
+    if let Some(properties) = properties {
+        for (key, property_schema) in properties {
+            if let Some(value) = object.get_mut(key) {
+                *value = coerce_with_json_schema(value.take(), property_schema);
+            }
+        }
+    }
+
+    if let Some(additional_schema) = schema
+        .get("additionalProperties")
+        .filter(|value| value.is_object())
+    {
+        for (key, value) in object.iter_mut() {
+            if properties.is_some_and(|properties| properties.contains_key(key)) {
+                continue;
+            }
+            *value = coerce_with_json_schema(value.take(), additional_schema);
+        }
+    }
+}
+
+fn apply_schema_array_coercion(array: &mut [Value], schema: &Value) {
+    match schema.get("items") {
+        Some(Value::Array(items)) => {
+            for (index, value) in array.iter_mut().enumerate() {
+                if let Some(item_schema) = items.get(index) {
+                    *value = coerce_with_json_schema(value.take(), item_schema);
+                }
+            }
+        }
+        Some(item_schema) if item_schema.is_object() => {
+            for value in array.iter_mut() {
+                *value = coerce_with_json_schema(value.take(), item_schema);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn coerce_with_union_schema(value: Value, schemas: &[Value]) -> Value {
+    if schemas.iter().any(|schema| check(&value, schema)) {
+        return value;
+    }
+
+    for schema in schemas {
+        let coerced = coerce_with_json_schema(value.clone(), schema);
+        if check(&coerced, schema) {
+            return coerced;
+        }
+    }
+    value
 }
 
 fn coerce_with_json_schema(value: Value, schema: &Value) -> Value {
@@ -139,77 +256,67 @@ fn coerce_with_json_schema(value: Value, schema: &Value) -> Value {
     }
 
     if types.contains(&"object")
-        && let Value::Object(object) = next
+        && let Value::Object(object) = &mut next
     {
-        next = Value::Object(coerce_object(object, schema));
+        apply_schema_object_coercion(object, schema);
     }
 
     if types.contains(&"array")
-        && let Value::Array(array) = next
+        && let Value::Array(array) = &mut next
     {
-        next = Value::Array(coerce_array(array, schema));
+        apply_schema_array_coercion(array, schema);
     }
 
     next
 }
 
-fn coerce_with_union_schema(value: Value, schemas: &[Value]) -> Value {
-    for schema in schemas {
-        let candidate = coerce_with_json_schema(value.clone(), schema);
-        let mut errors = Vec::new();
-        validate_value(&candidate, schema, "root", &mut errors);
-        if errors.is_empty() {
-            return candidate;
-        }
-    }
-    value
-}
-
-fn coerce_object(mut object: Map<String, Value>, schema: &Value) -> Map<String, Value> {
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (key, property_schema) in properties {
-            if let Some(value) = object.remove(key) {
-                object.insert(key.clone(), coerce_with_json_schema(value, property_schema));
-            }
-        }
-    }
-
-    if let Some(additional_schema) = schema
-        .get("additionalProperties")
-        .filter(|value| value.is_object())
-    {
-        let defined = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for (key, value) in object.clone() {
-            if !defined.contains(&key) {
-                object.insert(key, coerce_with_json_schema(value, additional_schema));
-            }
-        }
-    }
-
-    object
-}
-
-fn coerce_array(mut array: Vec<Value>, schema: &Value) -> Vec<Value> {
-    match schema.get("items") {
-        Some(Value::Array(items)) => {
-            for (index, item_schema) in items.iter().enumerate() {
-                if let Some(value) = array.get_mut(index) {
-                    *value = coerce_with_json_schema(value.clone(), item_schema);
+/// Treat `null` as omission for optional properties whose schema rejects
+/// `null` (`$ref` properties are left alone).
+fn normalize_optional_nulls(value: &mut Value, schema: &Value) {
+    if let Value::Array(array) = value {
+        match schema.get("items") {
+            Some(Value::Array(items)) => {
+                for (index, item) in array.iter_mut().enumerate() {
+                    if let Some(item_schema) = items.get(index) {
+                        normalize_optional_nulls(item, item_schema);
+                    }
                 }
             }
-        }
-        Some(item_schema) if item_schema.is_object() => {
-            for value in &mut array {
-                *value = coerce_with_json_schema(value.clone(), item_schema);
+            Some(item_schema) => {
+                for item in array.iter_mut() {
+                    normalize_optional_nulls(item, item_schema);
+                }
             }
+            None => {}
         }
-        _ => {}
+        return;
     }
-    array
+    let Value::Object(object) = value else {
+        return;
+    };
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    for (key, property_schema) in properties {
+        let Some(property) = object.get_mut(key) else {
+            continue;
+        };
+        if property.is_null()
+            && !required.contains(&key.as_str())
+            && !property_schema.get("$ref").is_some_and(Value::is_string)
+            && !check(&Value::Null, property_schema)
+        {
+            object.shift_remove(key);
+        } else {
+            normalize_optional_nulls(property, property_schema);
+        }
+    }
 }
 
 fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<String>) {
@@ -522,6 +629,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: json!({ "value": value }),
             thought_signature: None,
+            namespace: None,
         };
         (tool, tool_call)
     }
@@ -545,20 +653,21 @@ mod tests {
             name: "echo".to_string(),
             arguments: json!({ "count": "42" }),
             thought_signature: None,
+            namespace: None,
         };
 
         assert_eq!(
             validate_tool_arguments(&tool, &tool_call).unwrap(),
-            json!({ "count": 42.0 })
+            json!({ "count": 42 })
         );
     }
 
     #[test]
     fn coerces_serialized_plain_json_schemas_with_ajv_compatible_primitive_rules() {
         let cases = [
-            (json!({ "type": "number" }), json!("42"), json!(42.0)),
-            (json!({ "type": "number" }), json!(true), json!(1.0)),
-            (json!({ "type": "number" }), Value::Null, json!(0.0)),
+            (json!({ "type": "number" }), json!("42"), json!(42)),
+            (json!({ "type": "number" }), json!(true), json!(1)),
+            (json!({ "type": "number" }), Value::Null, json!(0)),
             (json!({ "type": "integer" }), json!("42"), json!(42)),
             (json!({ "type": "boolean" }), json!("true"), json!(true)),
             (json!({ "type": "boolean" }), json!("false"), json!(false)),
@@ -577,7 +686,7 @@ mod tests {
             (
                 json!({ "type": ["boolean", "number"] }),
                 json!("1"),
-                json!(1.0),
+                json!(1),
             ),
         ];
 
@@ -639,6 +748,7 @@ mod tests {
                 "extra": "4"
             }),
             thought_signature: None,
+            namespace: None,
         };
 
         assert_eq!(
@@ -649,7 +759,7 @@ mod tests {
                 "tag": "ab",
                 "items": ["one"],
                 "fixed": "yes",
-                "extra": 4.0
+                "extra": 4
             })
         );
 
@@ -665,6 +775,7 @@ mod tests {
                 "extra": "not-a-number"
             }),
             thought_signature: None,
+            namespace: None,
         };
         let error = validate_tool_arguments(&tool, &invalid)
             .expect_err("expected validation error")
@@ -677,5 +788,131 @@ mod tests {
         assert!(error.contains("items: must have unique items"));
         assert!(error.contains("fixed: must equal const value"));
         assert!(error.contains("extra: expected number"));
+    }
+
+    fn object_tool(parameters: Value, arguments: Value) -> (Tool, ToolCall) {
+        (
+            Tool {
+                name: "echo".to_string(),
+                description: "Echo tool".to_string(),
+                parameters,
+                constrained_sampling: None,
+            },
+            ToolCall {
+                id: "tool-1".to_string(),
+                name: "echo".to_string(),
+                arguments,
+                thought_signature: None,
+                namespace: None,
+            },
+        )
+    }
+
+    #[test]
+    fn treats_null_as_omission_for_optional_non_nullable_properties() {
+        // Type.Object({ path, offset?, nullable?: string | null, metadata: { enabled? } })
+        let (tool, tool_call) = object_tool(
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "number" },
+                    "nullable": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                    "metadata": {
+                        "type": "object",
+                        "properties": { "enabled": { "type": "boolean" } }
+                    }
+                },
+                "required": ["path", "metadata"]
+            }),
+            json!({ "path": "file.txt", "offset": null, "nullable": null, "metadata": { "enabled": null } }),
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "path": "file.txt", "nullable": null, "metadata": {} })
+        );
+    }
+
+    #[test]
+    fn preserves_optional_nulls_whose_referenced_schema_is_nullable() {
+        let (tool, tool_call) = object_tool(
+            json!({
+                "type": "object",
+                "properties": { "value": { "$ref": "#/$defs/value" } },
+                "$defs": { "value": { "anyOf": [{ "type": "number" }, { "type": "null" }] } }
+            }),
+            json!({ "value": null }),
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "value": null })
+        );
+    }
+
+    #[test]
+    fn preserves_a_value_that_already_matches_a_nullable_union_arm() {
+        let (tool, tool_call) = object_tool(
+            json!({
+                "type": "object",
+                "properties": { "value": { "anyOf": [{ "type": "number" }, { "type": "null" }] } },
+                "required": ["value"]
+            }),
+            json!({ "value": null }),
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "value": null })
+        );
+    }
+
+    #[test]
+    fn preserves_a_value_that_already_matches_a_one_of_nullable_union_arm() {
+        let (tool, tool_call) = create_tool_call_with_plain_schema(
+            json!({ "oneOf": [{ "type": "number" }, { "type": "null" }] }),
+            Value::Null,
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "value": null })
+        );
+    }
+
+    #[test]
+    fn still_coerces_nullable_unions_when_the_original_value_does_not_match_any_arm() {
+        let (tool, tool_call) = create_tool_call_with_plain_schema(
+            json!({ "anyOf": [{ "type": "number" }, { "type": "null" }] }),
+            json!("42"),
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "value": 42 })
+        );
+    }
+
+    #[test]
+    fn accepts_null_for_nullable_array_schemas_with_items() {
+        let (tool, tool_call) = create_tool_call_with_plain_schema(
+            json!({ "type": ["array", "null"], "items": { "type": "string" } }),
+            Value::Null,
+        );
+        assert_eq!(
+            validate_tool_arguments(&tool, &tool_call).unwrap(),
+            json!({ "value": null })
+        );
+    }
+
+    #[test]
+    fn reports_missing_tools_and_validation_failures() {
+        let (tool, tool_call) =
+            create_tool_call_with_plain_schema(json!({ "type": "boolean" }), json!("1"));
+        let error = validate_tool_call(&[], &tool_call).unwrap_err();
+        assert_eq!(error.to_string(), "Tool \"echo\" not found");
+        let error = validate_tool_call(&[tool], &tool_call)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("Validation failed for tool \"echo\":\n  - value: expected boolean")
+        );
+        assert!(error.ends_with("Received arguments:\n{\n  \"value\": \"1\"\n}"));
     }
 }

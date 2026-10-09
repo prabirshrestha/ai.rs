@@ -1,89 +1,79 @@
+#![doc = include_str!("../README.md")]
+
+// Compile-checks the snippets of the workspace README as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct WorkspaceReadmeDoctests;
+
 pub mod agent;
-pub mod agent_error;
-pub mod agent_loop;
-pub mod agent_types;
-pub mod embeddings;
+pub mod api;
+pub mod auth;
+#[cfg(feature = "durable")]
+pub mod chord;
+#[cfg(feature = "durable")]
+pub mod durable;
 pub mod env_api_keys;
 pub mod error;
-pub mod event_stream;
-pub mod images;
-mod models;
-pub mod oauth;
-pub mod provider;
+pub mod model_catalog;
+pub mod models;
+pub mod models_store;
 pub mod providers;
-pub mod session_resources;
-pub mod stream;
 pub mod types;
 pub mod utils;
 
+pub use agent::types::*;
 pub use agent::{
-    Agent, AgentOptions, AgentOptionsBuilder, AgentPrepareNextTurnFn, AgentState,
-    AgentStateBuilder, AgentSubscription,
+    Agent, AgentError, AgentEventStream, AgentInitialState, AgentOptions, AgentOptionsBuilder,
+    AgentPrepareNextTurnFn, AgentPrepareNextTurnWithContextFn, AgentResult, AgentSubscription,
+    ProxyAssistantMessageEvent, ProxyStreamOptions, RunToolCallOptions, ToolCallHooks,
+    ToolUpdateCallback, agent_loop, agent_loop_continue, get_default_stream_fn, run_agent_loop,
+    run_agent_loop_continue, run_tool_call, set_default_stream_fn, stream_proxy, stream_simple_fn,
 };
-pub use agent_error::{AgentError, AgentResult};
-pub use agent_loop::{
-    AgentEventStream, agent_loop, agent_loop_continue, run_agent_loop, run_agent_loop_continue,
+pub use api::lazy::lazy_stream;
+pub use api::openai_completions::{
+    OpenAICompletionsOptions, stream_openai_completions, stream_simple_openai_completions,
 };
-pub use agent_types::*;
-pub use embeddings::{embed, embed_many};
-pub use env_api_keys::{
-    ANTHROPIC_API_KEY_ENV_VAR, ANTHROPIC_AUTH_TOKEN_ENV_VAR, ANTHROPIC_OAUTH_TOKEN_ENV_VAR,
-    GITHUB_COPILOT_TOKEN_ENV_VAR, KnownProvider, OPENAI_API_KEY_ENV_VAR,
-    OPENROUTER_API_KEY_ENV_VAR, get_env_api_key,
+pub use api::openai_responses::{
+    OpenAIResponsesOptions, stream_openai_responses, stream_simple_openai_responses,
 };
+pub use auth::oauth::{
+    OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthLoginCallbacksBuilder,
+    OAuthPrompt, OAuthSelectOption, OAuthSelectPrompt, anthropic_oauth, get_oauth_provider,
+    github_copilot_oauth, login_anthropic, login_github_copilot, modify_github_copilot_models,
+    refresh_anthropic_token, refresh_github_copilot_token, register_oauth_provider,
+    unregister_oauth_provider,
+};
+pub use auth::{
+    ApiKeyAuth, ApiKeyAuthInput, ApiKeyCredential, AuthCheck, AuthContext, AuthEvent, AuthInfoLink,
+    AuthInteraction, AuthOperationOptions, AuthPrompt, AuthPromptKind, AuthResolutionOverrides,
+    AuthResult, AuthSelectOption, AuthType, Credential, CredentialInfo, CredentialModifier,
+    CredentialStore, InMemoryCredentialStore, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential,
+    OAuthCredentials, ProviderAuth, ProviderAuthInteraction, default_provider_auth_context,
+    env_api_key_auth,
+};
+pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};
-pub use event_stream::{
-    AssistantEventStream, AssistantMessageEventStreamSender, create_assistant_message_event_stream,
-};
-pub use images::generate_images;
-pub use models::{
-    calculate_cost, clamp_thinking_level, get_supported_thinking_levels, models_are_equal,
-};
-pub use oauth::{
-    AnthropicOAuthProvider, GitHubCopilotOAuthProvider, OAuthApiKey, OAuthAuthCallback,
-    OAuthAuthInfo, OAuthCredentials, OAuthDeviceCodeInfo, OAuthDeviceCodePollResult,
-    OAuthLoginCallbacks, OAuthLoginCallbacksBuilder, OAuthManualCodeInputCallback, OAuthPrompt,
-    OAuthProvider, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface, OAuthSelectCallback,
-    OAuthSelectOption, OAuthSelectPrompt, anthropic_oauth_provider,
-    exchange_anthropic_authorization_code, get_oauth_provider, get_oauth_provider_info_list,
-    get_oauth_providers, github_copilot_oauth_provider, login_anthropic, login_github_copilot,
-    modify_github_copilot_models, normalize_domain, poll_oauth_device_code_flow,
-    refresh_anthropic_token, refresh_github_copilot_token, refresh_oauth_token,
-    register_oauth_provider, reset_oauth_providers, unregister_oauth_provider,
-};
-pub use provider::{
-    EmbeddingModelApi, ImageModelApi, LanguageModelApi, ModelBuilder, Provider,
-    ProviderCapabilities,
-};
-pub use providers::anthropic::{
-    Anthropic, AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay, stream_anthropic,
-    stream_simple_anthropic,
-};
+pub use models::*;
+pub use models_store::*;
+pub use providers::anthropic::Anthropic;
 pub use providers::faux::{
-    FauxAssistantContent, FauxAssistantMessageOptions, FauxModelDefinition,
-    FauxProviderRegistration, FauxProviderState, FauxResponseStep, FauxTokenSize,
-    RegisterFauxProviderOptions, faux_assistant_message, faux_text, faux_thinking, faux_tool_call,
-    register_faux_provider,
+    FauxContent, FauxContentBlock, FauxCore, FauxDeferredOptions, FauxMessageOptions,
+    FauxModelDefinition, FauxProviderHandle, FauxProviderState, FauxResponseFactory,
+    FauxResponseStep, FauxTokenSize, RegisterFauxProviderOptions, create_faux_core,
+    faux_assistant_message, faux_provider, faux_text, faux_thinking, faux_tool_call,
 };
 pub use providers::github_copilot::{GitHubCopilot, GitHubCopilotApi};
 pub use providers::openai::{OpenAi, OpenAiApi};
-pub use providers::openai_completions::{
-    OpenAICompletionsOptions, stream_openai_completions, stream_simple_openai_completions,
-};
-pub use providers::openai_responses::{
-    OpenAIResponsesOptions, stream_openai_responses, stream_simple_openai_responses,
-};
 pub use providers::openrouter::OpenRouter;
-pub use session_resources::{
-    SessionResourceCleanup, SessionResourceCleanupRegistration, cleanup_session_resources,
-    register_session_resource_cleanup,
-};
-pub use stream::{complete, complete_simple, stream, stream_simple};
+pub use providers::{ImageModelBuilder, ModelBuilder};
 pub use types::*;
-pub use utils::diagnostics::{
-    AssistantMessageDiagnostic, DiagnosticErrorInfo, append_assistant_message_diagnostic,
-    create_assistant_message_diagnostic, extract_diagnostic_error, format_thrown_value,
-};
-pub use utils::json::{parse_json_with_repair, parse_streaming_json, repair_json};
-pub use utils::overflow::{get_overflow_patterns, is_context_overflow};
-pub use utils::validation::{validate_tool_arguments, validate_tool_call};
+pub use utils::assistant_message_frame::*;
+pub use utils::diagnostics::*;
+pub use utils::event_stream::*;
+pub use utils::json_parse::*;
+pub use utils::overflow::*;
+pub use utils::retry::*;
+pub use utils::text::{content_text, get_system_message_text, render_system_message_update};
+pub use utils::transcript::*;
+pub use utils::uuid::uuidv7;
+pub use utils::validation::*;

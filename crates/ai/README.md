@@ -1,115 +1,71 @@
 # ai
 
-Simple to use LLM library for Rust with streaming, tool calling, OAuth helpers,
-and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-works/pi).
+LLM library for Rust: streaming, tool calling, a models registry with auth and
+OAuth, image generation, embeddings and an agent loop.
 
-## Table of Contents
+`ai` is a 1:1 Rust port of Pi's [`@earendil-works/pi-ai`] and
+[`@earendil-works/pi-agent-core`] **1.0.2** (Pi commit
+[`200387122ca450d6387f033949423114a270b96c`]). Pi is the source of truth: the
+data model, event order, provider payloads and error texts follow it. Rust
+adaptations and the few intentional differences are listed in
+[Differences from Pi](#differences-from-pi). Breaking changes from 0.7 are in
+[CHANGELOG.md](CHANGELOG.md).
 
-- [Supported Providers](#supported-providers)
+[`@earendil-works/pi-ai`]: https://github.com/earendil-works/pi/tree/main/packages/ai
+[`@earendil-works/pi-agent-core`]: https://github.com/earendil-works/pi/tree/main/packages/agent
+[`200387122ca450d6387f033949423114a270b96c`]: https://github.com/earendil-works/pi/tree/200387122ca450d6387f033949423114a270b96c
+
+## Contents
+
+- [Scope](#scope)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
+- [Quick start](#quick-start)
+- [Streaming](#streaming)
+- [Choosing an entry point](#choosing-an-entry-point)
+- [Providers](#providers)
 - [Tools](#tools)
-  - [Defining Tools](#defining-tools)
-  - [Handling Tool Calls](#handling-tool-calls)
-  - [Streaming Tool Calls with Partial JSON](#streaming-tool-calls-with-partial-json)
-  - [Validating Tool Arguments](#validating-tool-arguments)
-  - [Complete Event Reference](#complete-event-reference)
-- [Image Input](#image-input)
-- [Image Generation](#image-generation)
-  - [Basic Image Generation](#basic-image-generation)
-  - [Notes and Limitations](#notes-and-limitations)
-- [Embeddings](#embeddings)
-- [Thinking/Reasoning](#thinkingreasoning)
-  - [Unified Interface](#unified-interface-streamsimplecompletesimple)
-  - [Provider-Specific Options](#provider-specific-options-streamcomplete)
-  - [Streaming Thinking Content](#streaming-thinking-content)
-- [Stop Reasons](#stop-reasons)
-- [Error Handling](#error-handling)
-  - [Aborting Requests](#aborting-requests)
-  - [Continuing After Abort](#continuing-after-abort)
-  - [Debugging Provider Payloads](#debugging-provider-payloads)
-- [APIs, Models, and Providers](#apis-models-and-providers)
-  - [Faux provider for tests](#faux-provider-for-tests)
-  - [Providers and Models](#providers-and-models)
-  - [Querying Providers and Models](#querying-providers-and-models)
-  - [Custom Models](#custom-models)
-  - [OpenAI Compatibility Settings](#openai-compatibility-settings)
-  - [Thread Safety](#thread-safety)
-  - [Type Safety](#type-safety)
-- [Cross-Provider Handoffs](#cross-provider-handoffs)
-  - [How It Works](#how-it-works)
-  - [Example: Multi-Provider Conversation](#example-multi-provider-conversation)
-  - [Provider Compatibility](#provider-compatibility)
-- [Context Serialization](#context-serialization)
-- [Browser Usage](#browser-usage)
-  - [Browser Compatibility Notes](#browser-compatibility-notes)
-  - [Environment Variables](#environment-variables)
-  - [Checking Environment Variables](#checking-environment-variables)
-- [OAuth Providers](#oauth-providers)
-  - [CLI Login](#cli-login)
-  - [Programmatic OAuth](#programmatic-oauth)
-  - [Login Flow Example](#login-flow-example)
-  - [Using OAuth Tokens](#using-oauth-tokens)
-  - [Provider Notes](#provider-notes)
-- [Agent Core](#agent-core)
-  - [Installation](#agent-installation)
-  - [Quick Start](#agent-quick-start)
-  - [Core Concepts](#core-concepts)
-  - [Event Flow](#event-flow)
-  - [prompt_text() Event Sequence](#prompt_text-event-sequence)
-  - [With Tool Calls](#with-tool-calls)
-  - [continue_run() Event Sequence](#continue_run-event-sequence)
-  - [Event Types](#event-types)
-  - [Agent Options](#agent-options)
-  - [Agent State](#agent-state)
-  - [Methods](#methods)
-  - [Session and Thinking Budgets](#session-and-thinking-budgets)
-  - [Steering and Follow-up](#steering-and-follow-up)
-  - [Custom Message Types](#custom-message-types)
-  - [Tools](#agent-tools)
-  - [Tool Error Handling](#agent-tool-error-handling)
-  - [Proxy Usage](#proxy-usage)
-  - [Low-Level API](#low-level-api)
-- [Development](#development)
-  - [Adding a New Provider](#adding-a-new-provider)
+- [System messages and mid-conversation tool changes](#system-messages-and-mid-conversation-tool-changes)
+- [Thinking and reasoning](#thinking-and-reasoning)
+- [Image input](#image-input)
+- [Aborting, errors and debugging](#aborting-errors-and-debugging)
+- [Models registry](#models-registry)
+- [Faux provider for tests](#faux-provider-for-tests)
+- [Agent](#agent)
+- [Image generation](#image-generation)
+- [Classifiers](#classifiers)
+- [Embeddings (ai.rs extra)](#embeddings-ai-rs-extra)
+- [Durable (feature `durable`, on by default)](#durable-feature-durable-on-by-default)
+- [Differences from Pi](#differences-from-pi)
 - [License](#license)
 
-## Supported Providers
+## Scope
 
-- **OpenAI** via Chat Completions, Responses, Images, and Embeddings
-- **Anthropic** via Messages
-- **GitHub Copilot** through OAuth-backed OpenAI/Anthropic-compatible routes
-- **OpenRouter** for image generation
-- **Azure Foundry and other compatible endpoints** through provider handles with
-  explicit `base_url`, headers, and compatibility settings
+| Area | Providers / APIs |
+| --- | --- |
+| Chat | OpenAI (`openai-responses`, `openai-completions`), Anthropic (`anthropic-messages`), GitHub Copilot (all three, routed per model) |
+| OpenAI-compatible servers | llama.cpp, Ollama, vLLM, MLX, LM Studio, Azure Foundry, ... through the OpenAI provider handle with a custom `base_url` |
+| Auth | API keys from the environment or explicit, credential stores, OAuth for Anthropic (Claude Pro/Max) and GitHub Copilot (device code) |
+| Tests | the faux provider (scripted responses, no network) |
+| Image generation | OpenAI-compatible `/images/generations` (`openai-images`, ai.rs extra) and OpenRouter (`openrouter-images`) |
+| Classifiers | `ModelType::Classifier` models and `Models::classify`: TypeSafe and OpenRouter (`typesafe-system-one`), Cloudflare Workers AI (`cloudflare-workers-ai-system-one`), and llama.cpp's `llama-server` (`llama-cpp-classify`) |
+| Cloudflare Workers AI | chat models over `openai-completions` and System One classifiers, with the account ID from `CLOUDFLARE_ACCOUNT_ID` |
+| Embeddings | `ModelType::Embedding` models and `Models::embed`, OpenAI-compatible `/embeddings` (`openai-embeddings`) for OpenAI and GitHub Copilot (ai.rs extra, not in Pi) |
 
-The active built-in stream APIs are:
+Other Pi providers (Google, Bedrock, Mistral, xAI, OpenRouter chat, Codex,
+the Cloudflare AI Gateway, ...) are not ported. Pi's `pi-mcp` and
+`pi-codemode` packages are not ported yet; they are planned for a future
+release.
 
-- `openai-completions`
-- `openai-responses`
-- `anthropic-messages`
+Crate features:
 
-The active built-in image generation APIs are:
-
-- `openai-images`
-- `openrouter-images`
-
-The active built-in embedding API is `openai-embeddings`, available through
-OpenAI-compatible and GitHub Copilot provider handles.
-
-The active built-in provider handles are focused on `openai`, `anthropic`, and
-`github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
-Foundry, llama.cpp, MLX, Ollama, vLLM, and other compatible endpoints can use
-configured provider handles with explicit `base_url`, HTTP headers, and
-compatibility settings.
-
-Broad native provider-specific APIs outside OpenAI, Anthropic, GitHub Copilot,
-and custom compatible routing are not part of the active built-in provider
-surface. PRs to add support for additional providers are welcome.
-
-Image generation is exposed through OpenAI-compatible image models and
-OpenRouter image models. Chat image input and image blocks in tool results are
-still supported by the regular chat APIs.
+- `durable` (default): Pi Durable (`ai::durable`) and the subset of chord it
+  uses (`ai::chord`), with memory and portable JSONL/SQLite storage cores and
+  the coding tools.
+- `durable-local-env` (default): `LocalExecutionEnv` (local files and
+  processes) and the local JSONL storage adapter.
+- `durable-sqlite`: `SqliteStorage` over a bundled SQLite (`rusqlite`).
+- `durable-testing`: the storage conformance suite (`ai::durable::testing`)
+  for custom `Storage` backends.
 
 ## Installation
 
@@ -119,1480 +75,1122 @@ cargo add tokio --features macros,rt-multi-thread
 cargo add futures serde_json
 ```
 
-This crate uses Tokio-compatible async APIs. The examples use
-`#[tokio::main]`, which requires Tokio's `macros` and `rt-multi-thread`
-features. The examples also use `futures::StreamExt` for stream iteration and
-`serde_json::json` for JSON Schema values.
+The crate runs on Tokio. Cancellation uses `tokio_util`'s `CancellationToken`
+(`cargo add tokio-util` if you abort requests). Examples below use
+`#[tokio::main]` and `futures::StreamExt`.
 
-## Quick Start
+## Quick start
 
-```rust
-use ai::{complete_simple, providers::openai, Context, Message, Result};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let openai = openai::from_env()?;
-    let model = openai.model("gpt-5.5").build()?;
-
-    let context = Context::builder()
-        .system_prompt("You are a helpful assistant.")
-        .message(Message::user_text("What is the capital of France?"))
-        .build();
-
-    let message = complete_simple(model, context, None).await?;
-    println!("{message:?}");
-    Ok(())
-}
-```
-
-### Streaming
-
-Use `stream_simple` when the UI should update as tokens arrive. The
-`futures::StreamExt` import is only needed for `.next().await`.
-
-```rust
-use futures::StreamExt;
-
-use ai::{providers::openai, stream_simple, AssistantMessageEvent, Context, Message, Result};
+```rust,no_run
+use ai::{Context, Message, Result, SimpleStreamOptions, content_text, providers::openai};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Reads OPENAI_API_KEY.
     let openai = openai::from_env()?;
+    let models = openai.models();
     let model = openai.model("gpt-5.5").build()?;
     let context = Context::builder()
+        .system_prompt("You are a concise assistant.")
         .message(Message::user_text("Write a haiku about Rust."))
         .build();
 
-    let mut events = stream_simple(model, context, None)?;
-    while let Some(event) = events.next().await {
-        if let AssistantMessageEvent::TextDelta { delta, .. } = event? {
-            print!("{delta}");
-        }
-    }
-
+    let message = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
+    println!("{}", content_text(&message.content));
     Ok(())
 }
 ```
 
-### Provider Handles
+Requests go through a [`Models`](#models-registry) registry, as in Pi 1.0.
+A provider handle owns one with its provider registered (`handle.models()`).
+`complete_simple` returns the final `AssistantMessage`. Failures never come
+back as `Err`: they are reported in-band with
+`stop_reason == StopReason::Error` (or `Aborted`) and `error_message`, like in
+Pi, including an unknown provider or missing auth.
 
-Use `openai::from_env()` for OpenAI Responses. Use `openai::builder()` when
-selecting Chat Completions or an OpenAI-compatible endpoint.
+## Streaming
 
-#### OpenAI Responses
-
-```rust
-use ai::providers::openai;
-
-let openai_responses_from_env = openai::from_env()?;
-
-let openai_responses_with_key = openai::builder()
-    .api_key(Some("sk-..."))
-    .responses()
-    .build()?;
-```
-
-#### OpenAI Chat Completions
-
-```rust
-use ai::providers::openai;
-
-let openai_chat_with_key = openai::builder()
-    .api_key(Some("sk-..."))
-    .chat_completions()
-    .build()?;
-
-let ollama_chat = openai::builder()
-    .base_url("http://localhost:11434/v1")
-    .chat_completions()
-    .build()?;
-```
-
-#### Anthropic
-
-```rust
-use ai::providers::anthropic;
-
-let anthropic_from_env = anthropic::from_env()?;
-
-let anthropic_with_key = anthropic::builder()
-    .api_key("sk-ant-...")
-    .build()?;
-```
-
-### Dynamic Provider Choice
-
-Provider handles are trait objects when the application wants to choose a
-backend at runtime.
-
-```rust
-use ai::{complete_simple, providers::openai, Context, Message, Provider, Result};
+```rust,no_run
+use ai::{
+    AssistantMessageEvent, Context, Message, Result, SimpleStreamOptions, providers::anthropic,
+};
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (provider, model_id): (Box<dyn Provider>, &str) =
-        if std::env::var("OPENAI_API_KEY").is_ok() {
-            (Box::new(openai::from_env()?), "gpt-5.5")
-        } else {
-            let local = openai::builder()
-                .provider_id("ollama")
-                .base_url("http://localhost:11434/v1")
-                .chat_completions()
-                .build()?;
-            (Box::new(local), "gemma4:12b")
-        };
-
-    let model = provider.model(model_id).build()?;
+    // Reads ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN / ANTHROPIC_OAUTH_TOKEN).
+    let anthropic = anthropic::from_env()?;
+    let model = anthropic.model("claude-sonnet-4-5").build()?;
     let context = Context::builder()
-        .message(Message::user_text("Summarize Rust ownership."))
+        .message(Message::user_text("Explain ownership in one paragraph."))
         .build();
 
-    let message = complete_simple(model, context, None).await?;
-    println!("{message:?}");
+    let mut events = anthropic
+        .models()
+        .stream_simple(&model, &context, SimpleStreamOptions::default());
+    while let Some(event) = events.next().await {
+        match event {
+            AssistantMessageEvent::TextDelta { delta, .. } => print!("{delta}"),
+            AssistantMessageEvent::Done { message, .. } => {
+                println!("\n{} tokens", message.usage.total_tokens)
+            }
+            AssistantMessageEvent::Error { error, .. } => {
+                eprintln!("\nerror: {:?}", error.error_message)
+            }
+            _ => {}
+        }
+    }
+
+    // The stream also resolves to the final message.
+    let _final_message = events.result().await;
     Ok(())
 }
 ```
+
+`AssistantMessageEventStream` is a `futures::Stream` of
+`AssistantMessageEvent`s. Every event carries the `partial` message built so
+far. The sequence is:
+
+| Event | Meaning |
+| --- | --- |
+| `Start { partial }` | the response started |
+| `TextStart` / `TextDelta { delta }` / `TextEnd { content }` | a text block |
+| `ThinkingStart` / `ThinkingDelta` / `ThinkingEnd` | a reasoning block |
+| `ToolCallStart` / `ToolCallDelta { delta }` / `ToolCallEnd { tool_call }` | a tool call; `delta` is raw argument JSON |
+| `Done { reason, message }` | success; `reason` is `Stop`, `Length`, `ToolUse` or `Deferred` |
+| `Error { reason, error }` | failure; `reason` is `Error` or `Aborted` |
+
+Each block event has a `content_index` into `partial.content`. While a tool
+call streams, `parse_streaming_json(Some(&partial_json))` turns incomplete
+argument JSON into the best-effort value so far.
+
+## Choosing an entry point
+
+| Function | Options | Use it for |
+| --- | --- | --- |
+| `Models::stream_simple` / `Models::complete_simple` | `SimpleStreamOptions` | most code: one `reasoning` level, `tool_choice`, thinking budgets, plus everything in `StreamOptions` |
+| `Models::stream` / `Models::complete` | `StreamOptions` | lower-level control; API-specific options go in `provider_options` under Pi's names |
+| `api::*::stream_*` (e.g. `stream_openai_responses`) | typed per-API options | calling one API implementation directly, with explicit auth |
+
+The `Models` methods also take `ModelsOptions { options, transform_headers }`
+to transform the assembled request headers.
+
+`SimpleStreamOptions` derefs to `StreamOptions`, so both kinds of field are
+set the same way:
+
+```rust,no_run
+use ai::{
+    CacheRetention, Context, Message, Result, SimpleStreamOptions, StreamOptions, ThinkingLevel,
+    providers::openai,
+};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let models = openai.models();
+    let model = openai.model("gpt-5.5").build()?;
+    let context = Context::builder().message(Message::user_text("Hi")).build();
+
+    let simple = SimpleStreamOptions {
+        reasoning: Some(ThinkingLevel::Low),
+        stream: StreamOptions {
+            max_tokens: Some(1024),
+            cache_retention: Some(CacheRetention::Long),
+            session_id: Some("session-1".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    models.complete_simple(&model, &context, simple).await;
+
+    // Lower level: API-specific options under Pi's names.
+    let mut options = StreamOptions::default();
+    options
+        .provider_options
+        .insert("reasoningEffort".into(), json!("high"));
+    options
+        .provider_options
+        .insert("reasoningSummary".into(), json!("detailed"));
+    models.complete(&model, &context, options).await;
+    Ok(())
+}
+```
+
+When `api_key` is not set, the `Models` methods resolve the provider's auth:
+a stored credential, OAuth, or the provider's environment variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `COPILOT_GITHUB_TOKEN`, ...).
+`get_env_api_key(provider, None)` and `find_env_keys` expose the environment
+lookup.
+
+## Providers
+
+Provider handles (`providers::openai`, `providers::anthropic`,
+`providers::github_copilot`, `providers::openrouter`) are the ai.rs entry point
+kept from 0.7. A handle owns a private [`Models`](#models-registry) collection
+with one provider in it, configured with the handle's key, base URL and HTTP
+client; `handle.models()` returns it. `handle.model("id")` starts from the
+catalog entry (or a default shape for unknown ids) and returns a
+`ModelBuilder` for a plain `Model`. Send requests for it through
+`handle.models()` (or any `Models` that has the handle's provider).
+
+`ModelBuilder` can override `name`, `base_url`, `reasoning`,
+`thinking_level_map`, `input`, `cost`, `context_window`, `max_tokens`,
+`compat` and `headers`/`header`.
+
+### OpenAI: Responses and Chat Completions
+
+```rust,no_run
+use ai::{Result, providers::openai};
+
+fn main() -> Result<()> {
+    // OPENAI_API_KEY; models use the Responses API.
+    let openai = openai::from_env()?;
+    let _gpt = openai.model("gpt-5.5").build()?;
+
+    // Explicit key, Chat Completions API, custom HTTP client.
+    let chat = openai::builder()
+        .api_key(Some("sk-..."))
+        .chat_completions()
+        .http_client(reqwest::Client::new())
+        .build()?;
+    let _gpt4o = chat.model("gpt-4o").build()?;
+    Ok(())
+}
+```
+
+### OpenAI-compatible servers: llama.cpp, Ollama, Azure Foundry
+
+Point the OpenAI handle at the server and pick the API it speaks. A handle
+with a custom `base_url` and no key sends no `Authorization` header.
+
+```rust,no_run
+use ai::{ModelCompat, ModelInput, Result, providers::openai};
+
+fn main() -> Result<()> {
+    // Ollama (or llama.cpp: http://localhost:8080/v1, vLLM, MLX, LM Studio).
+    let ollama = openai::builder()
+        .provider_id("ollama")
+        .base_url("http://localhost:11434/v1")
+        .chat_completions()
+        .build()?;
+    let _gemma = ollama
+        .model("gemma4:12b")
+        .context_window(128_000)
+        .max_tokens(8192)
+        .input([ModelInput::Text])
+        // Servers that do not understand the `developer` role or
+        // `reasoning_effort`.
+        .compat(ModelCompat {
+            supports_developer_role: Some(false),
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        })
+        .build()?;
+
+    // Azure AI Foundry (OpenAI v1 endpoint), Responses API.
+    let foundry = openai::builder()
+        .provider_id("azure-foundry")
+        .api_key(Some("..."))
+        .base_url("https://example.services.ai.azure.com/openai/v1")
+        .responses()
+        .build()?;
+    let _deployment = foundry
+        .model("gpt-5.5")
+        .header("x-ms-client-request-id", "my-app")?
+        .build()?;
+    Ok(())
+}
+```
+
+`ModelCompat` mirrors Pi's per-API compat records (`OpenAICompletionsCompat`,
+`OpenAIResponsesCompat`, `AnthropicMessagesCompat`) as one flat struct:
+`max_tokens_field`, `thinking_format`, `chat_template_kwargs`,
+`supports_store`, `supports_strict_mode`, `cache_control_format`,
+`session_affinity_format`, `supports_mid_convo_system_messages`, and so on.
+Unset fields fall back to Pi's detection by provider and base URL.
+
+### Anthropic
+
+```rust,no_run
+use ai::{Result, providers::anthropic};
+
+fn main() -> Result<()> {
+    let _from_env = anthropic::from_env()?;
+    let with_key = anthropic::builder().api_key("sk-ant-...").build()?;
+    // An OAuth access token (Claude Pro/Max) or a gateway bearer token.
+    let _with_token = anthropic::builder().auth_token("sk-ant-oat...").build()?;
+
+    let _sonnet = with_key.model("claude-sonnet-4-5").build()?;
+    Ok(())
+}
+```
+
+Typed Messages options (`AnthropicOptions`, `AnthropicEffort`, ...) and
+`stream_anthropic` live in `ai::api::anthropic_messages`. Through
+`Models::stream`/`Models::complete` they are `provider_options` entries named as in Pi
+(`thinkingEnabled`, `effort`, `toolChoice`, ...).
+
+### GitHub Copilot
+
+Copilot routes each model to the API its catalog entry names: Claude models to
+Anthropic Messages, GPT-5/Grok/MAI models to Responses, the rest to Chat
+Completions. `.anthropic_messages()`, `.responses()` and `.chat_completions()`
+on the builder force one API.
+
+```rust,no_run
+use ai::{OAuthLoginCallbacks, Result, login_github_copilot, providers::github_copilot};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Device-code login. Persist `credential` (it serializes) and reuse it.
+    let callbacks = OAuthLoginCallbacks::builder()
+        // Asked for a GitHub Enterprise domain; empty means github.com.
+        .on_prompt(|_prompt| async { Ok(String::new()) })
+        .on_device_code(|info| {
+            println!("Open {} and enter {}", info.verification_uri, info.user_code)
+        })
+        .on_progress(|message| println!("{message}"))
+        .build();
+    let credential = login_github_copilot(callbacks).await?;
+
+    // Refreshes an expired credential and returns the request token.
+    let token = github_copilot::get_oauth_api_key(&credential).await?;
+    let copilot = github_copilot::builder()
+        .api_key(token.api_key)
+        .base_url(github_copilot::base_url_for_credentials(&token.new_credentials))
+        .build()?;
+    let _claude = copilot.model("claude-sonnet-4.6").build()?;
+    let _gpt = copilot.model("gpt-5.5").build()?;
+
+    // Or: COPILOT_GITHUB_TOKEN.
+    let _from_env = github_copilot::from_env()?;
+    Ok(())
+}
+```
+
+With a [models registry](#models-registry) and a credential store, Copilot
+OAuth credentials are refreshed automatically under a lock instead
+(`Models::login` / `Models::get_auth`). `login_anthropic` is the equivalent
+legacy entry point for Claude Pro/Max.
 
 ## Tools
 
-Tools enable LLMs to interact with external systems. This crate uses JSON
-Schema values for tool definitions and provides validation helpers for tool
-calls.
+Tools are JSON Schema declarations. Validate arguments with
+`validate_tool_call`, answer with a `ToolResultMessage` and call the model
+again until it stops asking for tools:
 
-### Defining Tools
-
-```rust
-use ai::Tool;
-use serde_json::json;
-
-let weather_tool = Tool::builder("get_weather")
-    .description("Get current weather for a location.")
-    .parameters(json!({
-        "type": "object",
-        "properties": {
-            "location": { "type": "string" },
-            "units": {
-                "type": "string",
-                "enum": ["celsius", "fahrenheit"],
-                "default": "celsius"
-            }
-        },
-        "required": ["location"]
-    }))
-    .build()?;
-```
-
-### Constrained Sampling for Tools
-
-Tools can opt in to provider-side constrained sampling. JSON-schema constraints
-use strict tool schemas when the active provider supports them. `Prefer` falls
-back to ordinary tool calling when strict schemas are unavailable, while
-`Require` returns a validation error.
-
-```rust
-use ai::{ConstrainedSamplingConfig, ConstrainedSamplingStrict, Tool};
-use serde_json::json;
-
-let edit_file = Tool::builder("edit_file")
-    .description("Edit a file.")
-    .parameters(json!({
-        "type": "object",
-        "properties": {
-            "path": { "type": "string" },
-            "content": { "type": "string" }
-        },
-        "required": ["path", "content"],
-        "additionalProperties": false
-    }))
-    .constrained_sampling(ConstrainedSamplingConfig::JsonSchema {
-        strict: ConstrainedSamplingStrict::Prefer,
-    })
-    .build()?;
-```
-
-OpenAI Responses and Chat Completions can also emit native Lark or regex
-grammar tools when the model's compatibility metadata enables
-`supports_openai_grammar_tools`. Native grammar tools must use an object schema
-with exactly one required string property. When grammar tools are unsupported,
-the definition falls back to an ordinary function tool.
-
-```rust
-use ai::{ConstrainedSamplingConfig, GrammarVariants, Tool};
-use serde_json::json;
-
-let apply_patch = Tool::builder("apply_patch")
-    .description("Apply a patch.")
-    .parameters(json!({
-        "type": "object",
-        "properties": { "input": { "type": "string" } },
-        "required": ["input"],
-        "additionalProperties": false
-    }))
-    .constrained_sampling(ConstrainedSamplingConfig::Grammar {
-        variants: GrammarVariants {
-            openai_lark: Some("start: /.+/s".to_string()),
-            openai_regex: None,
-        },
-    })
-    .build()?;
-```
-
-OpenAI Responses history uses `custom_tool_call` and
-`custom_tool_call_output` for native grammar tools. Internally, streamed raw
-input is exposed through the tool's single string argument, so consumers use
-the same `ToolCall.arguments` shape for native and fallback execution.
-
-### Handling Tool Calls
-
-Tool results use content blocks and can include both text and images.
-
-```rust
-use ai::{AssistantContent, Message, ToolResultContent, ToolResultMessage};
-
-if let AssistantContent::ToolCall(call) = block {
-    let result = run_weather_lookup(&call.arguments).await;
-    context.messages.push(Message::ToolResult(ToolResultMessage {
-        tool_call_id: call.id,
-        tool_name: call.name,
-        content: vec![ToolResultContent::text(result)],
-        details: None,
-        is_error: false,
-        timestamp: 0,
-    }));
-}
-```
-
-### Streaming Tool Calls with Partial JSON
-
-During streaming, tool call arguments are progressively parsed as they arrive.
-This enables real-time UI updates before the complete arguments are available.
-
-```rust
-use ai::AssistantMessageEvent;
-
-match event {
-    AssistantMessageEvent::ToolCallDelta {
-        content_index,
-        delta,
-        partial,
-    } => {
-        println!("tool block {content_index} delta: {delta}");
-        println!("partial message: {partial:?}");
-    }
-    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
-        println!("tool completed: {} {:?}", tool_call.name, tool_call.arguments);
-    }
-    _ => {}
-}
-```
-
-Important notes about partial tool arguments:
-
-- During `ToolCallDelta`, arguments may be incomplete.
-- Fields may be missing or partially parsed.
-- String values may be truncated mid-word.
-- Arrays and nested objects may be incomplete.
-- Always validate final tool arguments before executing external effects.
-- Use `content_index` to associate events with the right assistant content block.
-
-### Validating Tool Arguments
-
-When using the agent loop, tool arguments are validated before execution. When
-implementing your own loop with `stream` or `complete`, use
-`validate_tool_call` or `validate_tool_arguments`.
-
-```rust
-use ai::{validate_tool_call, Tool, ToolCall};
-
-let validated = validate_tool_call(&tools, &tool_call)?;
-```
-
-### Complete Event Reference
-
-All streaming events emitted during assistant message generation:
-
-| Event | Description | Key Properties |
-| --- | --- | --- |
-| `Start` | Stream begins | `partial`: initial assistant message structure |
-| `TextStart` | Text block starts | `content_index`: position in content array |
-| `TextDelta` | Text chunk received | `delta`, `content_index` |
-| `TextEnd` | Text block complete | `content`, `content_index` |
-| `ThinkingStart` | Thinking block starts | `content_index` |
-| `ThinkingDelta` | Thinking chunk received | `delta`, `content_index` |
-| `ThinkingEnd` | Thinking block complete | `content`, `content_index` |
-| `ToolCallStart` | Tool call begins | `content_index` |
-| `ToolCallDelta` | Tool arguments stream | `delta`, `partial` |
-| `ToolCallEnd` | Tool call complete | `tool_call` |
-| `Done` | Stream complete | `reason`, `message` |
-| `Error` | Error occurred | `reason`, `error` |
-
-Streaming events for different content blocks are not guaranteed to be
-contiguous. Consumers should use `content_index` to associate deltas and end
-events with their blocks.
-
-## Image Input
-
-Models with vision capabilities can process images. Check `model.input` for
-`ModelInput::Image`. If you pass images to a non-vision model, the message
-transform layer downgrades unsupported image content to text placeholders.
-
-```rust
+```rust,no_run
 use ai::{
-    providers::openai, Context, ImageContent, Message, ModelInput, UserContent,
-    UserMessage, UserMessageContent,
+    AssistantContent, Context, Message, Result, SimpleStreamOptions, StopReason, Tool,
+    ToolResultMessage, UserContent, providers::openai, validate_tool_call,
 };
-
-let openai = openai::from_env()?;
-let model = openai.model("gpt-5.5").build()?;
-if model.input.contains(&ModelInput::Image) {
-    println!("model supports vision");
-}
-
-let context = Context {
-    messages: vec![Message::User(UserMessage {
-        content: UserMessageContent::Parts(vec![
-            UserContent::text("What is in this image?"),
-            UserContent::Image(ImageContent {
-                data: "...base64...".to_string(),
-                mime_type: "image/png".to_string(),
-            }),
-        ]),
-        timestamp: 0,
-    })],
-    ..Default::default()
-};
-```
-
-## Image Generation
-
-Use `generate_images` with an OpenAI-compatible or OpenRouter image model. The
-returned `AssistantImages` can contain text and image output blocks, matching
-the selected model configuration.
-
-### Basic Image Generation
-
-```rust
-use ai::{
-    generate_images, providers::openai, ImageOutput, ImagesContext, Result,
-};
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let openai = openai::from_env()?;
-    let model = openai.image_model("gpt-image-2").build_image()?;
-
-    let context = ImagesContext::builder()
-        .text("Generate a small watercolor robot reading a book.")
+    let models = openai.models();
+    let model = openai.model("gpt-5.5").build()?;
+    let weather = Tool::builder("get_weather")
+        .description("Current weather for a city")
+        .parameters(json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+            "additionalProperties": false
+        }))
+        .build()?;
+    let tools = vec![weather.clone()];
+    let mut context = Context::builder()
+        .tool(weather)
+        .message(Message::user_text("Weather in Paris?"))
         .build();
 
-    let images = generate_images(model, context, None).await?;
-    for output in images.output {
-        match output {
-            ImageOutput::Text(text) => println!("{}", text.text),
-            ImageOutput::Image(image) => {
-                println!("{} bytes of {}", image.data.len(), image.mime_type);
-            }
+    loop {
+        let message = models
+            .complete_simple(&model, &context, SimpleStreamOptions::default())
+            .await;
+        context.messages.push(message.clone().into());
+        if message.stop_reason != StopReason::ToolUse {
+            break;
+        }
+        for content in &message.content {
+            let AssistantContent::ToolCall(call) = content else {
+                continue;
+            };
+            let (text, is_error) = match validate_tool_call(&tools, call) {
+                Ok(args) => (format!("Sunny in {}", args["city"]), false),
+                Err(error) => (error.to_string(), true),
+            };
+            context.messages.push(Message::ToolResult(ToolResultMessage {
+                tool_call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                content: vec![UserContent::text(text)],
+                details: None,
+                usage: None,
+                nested_calls: None,
+                is_error,
+                timestamp: 0,
+            }));
         }
     }
-
     Ok(())
 }
 ```
 
-For llama.cpp, MLX, Ollama, or another OpenAI-compatible image endpoint, use the
-OpenAI provider with the compatible server's base URL. For example, with
-Ollama:
+`Tool::builder(..).constrained_sampling(..)` opts a tool into strict JSON
+Schema or grammar-constrained sampling where the API supports it (Pi's
+`constrainedSampling`). Tool results can contain images
+(`UserContent::Image`).
 
-```rust
-use ai::{generate_images, providers::openai, ImagesContext};
+## System messages and mid-conversation tool changes
 
-let ollama = openai::builder()
-    .provider_id("ollama")
-    .base_url("http://localhost:11434/v1")
-    .images()
-    .build()?;
+In Pi 1.0 the system prompt and the tool set live in the transcript.
+`Context::system_prompt` and `Context::tools` are shorthand for a leading
+`SystemMessage`. Later system messages change things from that point on,
+without rewriting earlier turns (so prompt caches stay valid):
 
-let model = ollama.model("x/z-image-turbo").build_image()?;
-let context = ImagesContext::builder()
-    .text("Generate a small watercolor robot reading a book.")
-    .build();
+- `content`: extra instructions from here on;
+- `sections`: named prompt sections, replaced by name (`None` removes one);
+- `tools_added` / `tools_removed`: the tool set changes.
 
-let images = generate_images(model, context, None).await?;
-```
-
-Set `OPENROUTER_API_KEY` for `openrouter::from_env()`, or pass a key through
-`providers::openrouter::builder().api_key(Some("..."))`.
-
-OpenRouter image models remain available through the `openrouter` provider:
-
-```rust
-use ai::{generate_images, providers::openrouter, ImagesContext};
-
-let openrouter = openrouter::from_env()?;
-let model = openrouter
-    .model("google/gemini-3.1-flash-image-preview")
-    .build_image()?;
-let context = ImagesContext::builder().text("Generate a logo.").build();
-
-let images = generate_images(model, context, None).await?;
-```
-
-OpenRouter image models use conservative defaults because this crate does not
-ship a built-in model catalog. They default to text input and image output. If a
-specific OpenRouter model supports image input or text output, set those
-capabilities on the model builder:
-
-```rust
-use ai::{generate_images, providers::openrouter, ImagesContext, ModelInput, ModelOutput};
-
-let openrouter = openrouter::from_env()?;
-let model = openrouter
-    .model("google/gemini-3.1-flash-image-preview")
-    .input(vec![ModelInput::Text, ModelInput::Image])
-    .output(vec![ModelOutput::Image, ModelOutput::Text])
-    .build_image()?;
-let context = ImagesContext::builder().text("Generate a logo.").build();
-
-let images = generate_images(model, context, None).await?;
-```
-
-### Notes and Limitations
-
-The active Rust image-generation surface covers OpenAI-compatible
-`/images/generations` models through the `openai-images` API and OpenRouter's
-chat-completions-style image models through the `openrouter-images` API. The
-OpenAI-compatible generations path supports text input; image edits are not
-implemented yet. OpenRouter image input and text output are opt-in model
-capabilities configured by the caller. Provider errors are returned as
-`AssistantImages` with `stop_reason: ImagesStopReason::Error`; cancelled
-requests use `ImagesStopReason::Aborted`.
-
-## Embeddings
-
-Use `embed` for one string and `embed_many` for multiple strings. Both call
-the OpenAI-compatible `/embeddings` endpoint. A single input is sent upstream
-as a one-item array for compatibility with providers that reject scalar input.
-
-```rust
-use ai::{embed, embed_many, providers::openai, Result};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let openai = openai::from_env()?;
-    let model = openai
-        .embedding_model("text-embedding-3-small")
-        .build_embedding()?;
-
-    let one = embed(model.clone(), "hello", None).await?;
-    let batch = embed_many(model, ["first", "second"], None).await?;
-    println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
-    Ok(())
-}
-```
-
-## Thinking/Reasoning
-
-Many models support thinking or reasoning content. Check `model.reasoning` and
-use `get_supported_thinking_levels` to inspect supported levels.
-`ModelThinkingLevel::Xhigh` and `ModelThinkingLevel::Max` are model-specific,
-opt-in levels: a model exposes them only when its `thinking_level_map` has a
-non-null `"xhigh"` or `"max"` entry. An unsupported request clamps to the
-nearest supported level.
-
-### Unified Interface (streamSimple/completeSimple)
-
-Rust exports these as `stream_simple` and `complete_simple`.
-
-```rust
+```rust,no_run
 use ai::{
-    complete_simple, providers::anthropic, Context, Message, ModelThinkingLevel,
-    SimpleStreamOptions,
+    Context, Message, Result, SimpleStreamOptions, SystemMessage, Tool, ToolReference,
+    providers::anthropic,
 };
-
-let anthropic = anthropic::from_env()?;
-let model = anthropic.model("claude-sonnet-4-5").build()?;
-let options = SimpleStreamOptions {
-    reasoning: Some(ModelThinkingLevel::Medium),
-    ..Default::default()
-};
-
-let response = complete_simple(
-    model,
-    Context {
-        messages: vec![Message::user_text("Solve: 2x + 5 = 13")],
-        ..Default::default()
-    },
-    Some(options),
-)
-.await?;
-```
-
-### Provider-Specific Options (stream/complete)
-
-`stream_simple` and `complete_simple` are the preferred app-level APIs,
-They take `SimpleStreamOptions`, resolve the model's API, and map common
-options such as reasoning, cache retention, API key, cancellation, payload
-hooks, retry settings, and provider options onto the selected provider.
-
-`stream` and `complete` are the lower-level APIs. Use them when you need the
-non-simple `StreamOptions` shape or direct provider-option forwarding. For
-provider-specific escape hatches, place fields in
-`StreamOptions::provider_options` using provider option names such as
-`toolChoice`, `serviceTier`, or `thinkingDisplay`.
-
-The crate root also exports scoped direct provider stream functions:
-
-- `stream_openai_completions` / `stream_simple_openai_completions`
-- `stream_openai_responses` / `stream_simple_openai_responses`
-- `stream_anthropic` / `stream_simple_anthropic`
-
-Provider modules expose typed provider options for direct provider calls:
-
-- `providers::openai_completions::OpenAICompletionsOptions`
-- `providers::openai_responses::OpenAIResponsesOptions`
-- `providers::anthropic::AnthropicOptions`
-
-### Streaming Thinking Content
-
-Thinking content streams through `ThinkingStart`, `ThinkingDelta`, and
-`ThinkingEnd` events. Completed messages store thinking blocks as
-`AssistantContent::Thinking`.
-
-## Stop Reasons
-
-Every `AssistantMessage` includes a `stop_reason` field that indicates how the
-generation ended:
-
-- `Stop` - Normal completion
-- `Length` - Output hit the maximum token limit
-- `ToolUse` - Model is calling tools and expects tool results
-- `Error` - An error occurred during generation
-- `Aborted` - Request was cancelled
-
-`AssistantMessage` may also include `response_id`, a provider-specific response
-or message identifier when the underlying API exposes one.
-
-## Error Handling
-
-Setup failures before a stream exists are returned as `Error` values. Once a
-provider stream exists, provider-declared failures and cancellation are
-surfaced as terminal `AssistantMessageEvent::Error` events carrying the final
-assistant message. The `complete_*` helpers return that final assistant message;
-check `message.stop_reason` for `StopReason::Error` or `StopReason::Aborted`.
-Transport or decoder failures that cannot be represented as provider messages
-still return `Err`.
-
-### Aborting Requests
-
-Use a Tokio cancellation token to abort in-flight requests. Prefer direct
-struct initialization over mutating default options:
-
-```rust
-use ai::{SimpleStreamOptions, StreamOptions};
-use tokio_util::sync::CancellationToken;
-
-let token = CancellationToken::new();
-let options = SimpleStreamOptions {
-    stream: StreamOptions {
-        cancellation_token: Some(token.clone()),
-        ..Default::default()
-    },
-    ..Default::default()
-};
-
-token.cancel();
-```
-
-### Continuing After Abort
-
-Abort produces an assistant message with `StopReason::Aborted`. The transform
-layer drops aborted assistant turns before follow-up messages so conversations
-can continue cleanly.
-
-### Debugging Provider Payloads
-
-Use `StreamOptions::on_payload` and `StreamOptions::on_response` hooks to
-inspect or override provider payloads and observe raw provider responses. The
-hooks are supported by `stream`, `complete`, `stream_simple`, and
-`complete_simple`.
-
-## APIs, Models, and Providers
-
-Provider handles build executable models. Built-in language model APIs include:
-
-- **`anthropic-messages`**: Anthropic Messages API
-- **`openai-completions`**: OpenAI Chat Completions API
-- **`openai-responses`**: OpenAI Responses API
-
-### Faux provider for tests
-
-`register_faux_provider()` registers a temporary in-memory provider for tests
-and demos. It is opt-in and not part of the built-in provider set.
-
-### Providers and Models
-
-A provider offers models through a specific API. In this crate:
-
-- **Anthropic** models use `anthropic-messages`.
-- **OpenAI** models use `openai-completions` or `openai-responses`.
-- **GitHub Copilot** models use OAuth-backed OpenAI/Anthropic-compatible
-  routes.
-- **Azure Foundry** and other compatible endpoints are configured as custom
-  models by choosing an active API, setting `base_url`, and filling
-  `ModelCompat` where the endpoint differs from the default request shape.
-
-Built-in provider handles create executable model values directly from string
-IDs. There is no built-in model catalog; applications that need one should keep
-it in application state and build models through configured provider handles.
-
-### Querying Providers and Models
-
-```rust
-use ai::{providers::{github_copilot, openai}, Provider};
-
-let provider = openai::from_env()?;
-let capabilities = provider.capabilities();
-let model = provider.model("gpt-5.5").build()?;
-
-let copilot = github_copilot::builder()
-    .api_key("...")
-    .anthropic_messages()
-    .build()?;
-let claude = copilot.model("claude-opus-4.5").build()?;
-```
-
-### Custom Models
-
-You can create provider-bound models for local inference servers or custom
-endpoints:
-
-```rust
-use ai::{
-    providers::openai, stream_simple, Context, Message, SimpleStreamOptions,
-};
-
-let provider = openai::builder()
-    .provider_id("azure-foundry")
-    .api_key(Some("..."))
-    .base_url("https://example.services.ai.azure.com/openai/v1")
-    .chat_completions()
-    .build()?;
-let model = provider.model("gpt-5.5").build()?;
-
-let stream = stream_simple(
-    model,
-    Context {
-        messages: vec![Message::user_text("What is the capital of France?")],
-        ..Default::default()
-    },
-    Some(SimpleStreamOptions::default()),
-)?;
-```
-
-The same pattern works for local inference servers such as llama.cpp, MLX,
-Ollama, vLLM, and LM Studio when they expose an OpenAI-compatible chat endpoint.
-
-Some OpenAI-compatible servers do not understand the `developer` role used for
-reasoning-capable models. For those endpoints, build the model with compat
-metadata so the system prompt is sent as a `system` message instead. If the
-server also does not support `reasoning_effort`, disable that compat flag too.
-
-### OpenAI Compatibility Settings
-
-The `openai-completions` API is implemented by many providers with minor
-differences. `ModelCompat` stores compatibility metadata for explicit custom
-models, but the active built-in surface does not infer broad provider-specific
-behavior from provider names or base URLs.
-
-Set model-builder compat metadata when the target OpenAI-compatible endpoint
-needs payload differences such as non-standard reasoning, cache-control,
-max-token, or tool-result behavior.
-
-Chat Completions and Responses share `SessionAffinityFormat` for configured
-compatible endpoints:
-
-| Format | Chat Completions headers | Responses headers |
-| --- | --- | --- |
-| `Openai` | `session_id`, `x-client-request-id`, `x-session-affinity` | `session_id`, `x-client-request-id` |
-| `OpenaiNosession` | `x-client-request-id`, `x-session-affinity` | `x-client-request-id` |
-| `Openrouter` | `x-session-id` | `x-session-id` |
-
-OpenRouter is detected only for the OpenRouter provider or an
-`openrouter.ai` base URL; otherwise the default format is `Openai`. Chat
-Completions also requires `send_session_affinity_headers = Some(true)`, while
-Responses sends its selected affinity format whenever a session ID is present.
-`CacheRetention::None` suppresses generated affinity headers without changing
-the configured format. The legacy Responses
-`send_session_id_header = Some(false)` setting remains readable and maps to
-`OpenaiNosession`; the legacy `Some(true)` maps to `Openai` so existing
-serialized models keep their behavior. Prefer `session_affinity_format` for new
-configurations.
-
-Per-request `StreamOptions::headers` are applied last and match header names
-case-insensitively. A string value replaces a generated or model header, and a
-`None` value suppresses it. Cache retention is configured explicitly through
-`StreamOptions::cache_retention`; ai.rs intentionally does not read pi-specific
-environment variables such as `PI_CACHE_RETENTION`. Applications can translate
-their own environment policy into this option at their boundary.
-
-Responses compatibility also includes `supports_developer_role` and
-`supports_explicit_prompt_cache_mode`. The latter emits
-`prompt_cache_options: { mode: "explicit" }` only when cache retention is
-`None`. Responses clamps positive `max_tokens` values below the API minimum to
-16 (while zero remains omitted), and accepts `toolChoice` through
-`provider_options` or the typed `OpenAIResponsesOptions::tool_choice` field.
-
-For a server that controls thinking through Jinja chat-template arguments, use
-the generic `ChatTemplate` format. Static strings, JSON numbers, booleans, and
-null values pass through unchanged. `thinking_enabled()` resolves to a boolean;
-`thinking_effort(...)` resolves through the model's `thinking_level_map`.
-
-```rust
-use ai::{
-    ChatTemplateKwargValue, ModelCompat, ModelThinkingLevel,
-    OpenAICompletionsCompat, OpenAIThinkingFormat,
-};
-
-let compat = ModelCompat {
-    openai_completions: OpenAICompletionsCompat {
-        supports_reasoning_effort: Some(false),
-        thinking_format: Some(OpenAIThinkingFormat::ChatTemplate),
-        chat_template_kwargs: [
-            (
-                "enable_thinking".to_string(),
-                ChatTemplateKwargValue::thinking_enabled(),
-            ),
-            (
-                "reasoning_effort".to_string(),
-                ChatTemplateKwargValue::thinking_effort(true),
-            ),
-            ("preserve_thinking".to_string(), true.into()),
-        ]
-        .into_iter()
-        .collect(),
-        ..Default::default()
-    },
-    ..Default::default()
-};
-let mut model = provider
-    .model("local-reasoning-model")
-    .reasoning(true)
-    .compat(compat)
-    .build()?;
-model
-    .thinking_level_map
-    .insert("max".to_string(), Some("maximum".to_string()));
-let requested = ModelThinkingLevel::Max;
-```
-
-Here `omit_when_off = true` omits `reasoning_effort` when thinking is off. If it
-is false, an explicit `thinking_level_map["off"]` string is used. A mapped
-null value omits the variable.
-
-Ant Ling-compatible endpoints use a nested `reasoning: { effort }` object, but
-only for explicitly mapped levels. Opt in without provider-name or base-URL
-detection: set `thinking_format` to `AntLing`, set
-`supports_reasoning_effort` to false, and add the supported strings to the
-model's `thinking_level_map`. These endpoints commonly also set
-`supports_store` and `supports_developer_role` to false, `max_tokens_field` to
-`MaxTokens`, and `supports_long_cache_retention` to false.
-
-### Thread Safety
-
-Provider handles are regular cloneable values. Build them during application
-startup, pass them where needed, and create executable model values with
-`provider.model(id).build()?`.
-
-### Type Safety
-
-Public types are serializable with `serde` where they represent portable
-context or message state.
-
-## Cross-Provider Handoffs
-
-The library supports handoffs between OpenAI, Anthropic, and GitHub
-Copilot-compatible models within the same conversation.
-
-### How It Works
-
-When messages from one provider are sent to a different provider, the crate
-transforms them for compatibility:
-
-- User and tool-result messages are passed through.
-- Assistant messages from the same provider/API are preserved as-is.
-- Assistant messages from different providers have thinking blocks converted to
-  text with `<thinking>` tags where needed.
-- Tool calls and regular text are preserved.
-
-### Example: Multi-Provider Conversation
-
-```rust
-use ai::{complete_simple, providers::{anthropic, openai}, Context, Message, SimpleStreamOptions};
-
-let mut context = Context {
-    messages: vec![Message::user_text("What is 25 * 18?")],
-    ..Default::default()
-};
-
-let anthropic = anthropic::from_env()?;
-let claude = anthropic.model("claude-sonnet-4-5").build()?;
-let claude_response =
-    complete_simple(claude, context.clone(), Some(SimpleStreamOptions::default())).await?;
-context.messages.push(Message::Assistant(claude_response));
-
-let openai = openai::from_env()?;
-let gpt = openai.model("gpt-5.5").build()?;
-context.messages.push(Message::user_text("Is that calculation correct?"));
-let gpt_response =
-    complete_simple(gpt, context.clone(), Some(SimpleStreamOptions::default())).await?;
-context.messages.push(Message::Assistant(gpt_response));
-```
-
-### Provider Compatibility
-
-All active providers can handle shared text, tool calls, tool results including
-images, thinking/reasoning blocks after transformation, and aborted messages
-with partial content.
-
-## Context Serialization
-
-`Context`, `Message`, assistant content, tool calls, and tool results implement
-`Serialize` and `Deserialize`, so context can be persisted or handed to another
-process.
-
-```rust
-use ai::Context;
-
-let serialized = serde_json::to_string(&context)?;
-let restored: Context = serde_json::from_str(&serialized)?;
-```
-
-If the context contains images encoded as base64, those are serialized too.
-Serialized user, assistant, and tool-result messages include stable `role`
-fields, including assistant messages nested in stream events.
-
-## Browser Usage
-
-This Rust crate is server/native focused and does not provide browser-specific
-packaging. Pass API keys explicitly through options or use environment
-variables on the server.
-
-### Browser Compatibility Notes
-
-Not applicable to this Rust crate.
-
-### Environment Variables
-
-| Provider | Environment variables |
-| --- | --- |
-| `openai` | `OPENAI_API_KEY` |
-| `anthropic` | `ANTHROPIC_AUTH_TOKEN` (Bearer), then `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` |
-| `github-copilot` | `COPILOT_GITHUB_TOKEN` |
-
-Explicit API keys and `Authorization` header overrides in `StreamOptions` take
-precedence over environment lookup. `get_env_api_key("anthropic")` intentionally
-does not return `ANTHROPIC_AUTH_TOKEN`, because that value must be sent as
-`Authorization: Bearer` rather than `x-api-key`.
-
-### Checking Environment Variables
-
-```rust
-use ai::get_env_api_key;
-
-let key = get_env_api_key("openai");
-```
-
-## OAuth Providers
-
-The OAuth registry includes:
-
-- **Anthropic** (Claude Pro/Max subscription)
-- **GitHub Copilot** (Copilot subscription)
-
-### CLI Login
-
-This crate exposes login primitives for applications that want to provide their
-own login UI.
-
-### Programmatic OAuth
-
-```rust
-use ai::{get_oauth_provider, OAuthCredentials};
-
-let provider = get_oauth_provider("github-copilot").expect("provider");
-```
-
-### Login Flow Example
-
-Use `login_anthropic` or `login_github_copilot` with `OAuthLoginCallbacks` to
-drive the login UI from your application.
-
-```rust
-use ai::{providers::github_copilot, OAuthLoginCallbacks, Result};
-
-async fn login() -> Result<()> {
-    let callbacks = OAuthLoginCallbacks::builder()
-        .on_device_code(|info| {
-            eprintln!("Open {} and enter {}", info.verification_uri, info.user_code);
-        })
-        .on_prompt(|_| async { Ok(String::new()) })
-        .build();
-
-    let credentials = github_copilot::oauth().login(callbacks).await?;
-    // Persist credentials here.
-
-    Ok(())
-}
-```
-
-### Using OAuth Tokens
-
-Use provider-specific helpers to turn stored credentials into the API key used
-by provider builders or stream options. For GitHub Copilot, the helper refreshes
-expired credentials and returns `new_credentials`; persist those back to your
-auth store.
-
-```rust
-use ai::{providers::github_copilot, OAuthCredentials, Result};
-
-async fn provider_from_stored_credentials(
-    credentials: OAuthCredentials,
-) -> Result<github_copilot::GitHubCopilot> {
-    let oauth_key = github_copilot::get_oauth_api_key(&credentials).await?;
-
-    // Persist oauth_key.new_credentials here.
-
-    github_copilot::builder()
-        .api_key(oauth_key.api_key)
-        .base_url(github_copilot::base_url_for_credentials(
-            &oauth_key.new_credentials,
-        ))
-        .responses()
-        .build()
-}
-```
-
-### Provider Notes
-
-**GitHub Copilot**: OAuth helpers and dynamic request headers are included.
-Some Copilot model ids use vendor names, but they are routed through the active
-OpenAI/Anthropic-compatible APIs in this crate. Other native provider APIs are
-not registered.
-
-**Anthropic**: OAuth follows the Claude Pro/Max OAuth flow.
-
-## Agent Core
-
-Stateful agent support is part of this crate. It runs model turns, executes
-registered tools, appends tool results, and continues until the assistant
-stops, an error occurs, or a hook asks the loop to stop.
-
-### Agent Installation
-
-No separate crate is required. The agent core lives in `ai`.
-
-```bash
-cargo add ai
-```
-
-### Agent Quick Start
-
-```rust
-use ai::{providers::anthropic, Agent, AgentEvent, AgentOptions, AssistantMessageEvent, Result};
+use indexmap::IndexMap;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let anthropic = anthropic::from_env()?;
+    let models = anthropic.models();
     let model = anthropic.model("claude-sonnet-4-5").build()?;
-    let agent = Agent::new(AgentOptions::new(model));
+    let search = Tool::builder("search")
+        .description("Search the docs")
+        .parameters(json!({ "type": "object", "properties": { "q": { "type": "string" } } }))
+        .build()?;
+    let mut context = Context::builder()
+        .system_prompt("You are a support agent.")
+        .message(Message::user_text("Hi"))
+        .build();
+    let reply = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
+    context.messages.push(reply.into());
 
-    agent.set_system_prompt("You are a helpful assistant.").await;
+    // Later: new instructions, a named section and a new tool.
+    context.messages.push(Message::System(SystemMessage {
+        content: "The user is on the Pro plan.".into(),
+        sections: Some(IndexMap::from([(
+            "tone".to_string(),
+            Some("Answer in one sentence.".to_string()),
+        )])),
+        tools_added: Some(vec![search]),
+        ..Default::default()
+    }));
+    context.messages.push(Message::user_text("How do I export data?"));
+    let reply = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
+    context.messages.push(reply.into());
 
-    let subscription = agent.subscribe(async |event, _cancellation_token| {
-        if let AgentEvent::MessageUpdate {
-            assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
-            ..
-        } = event
-        {
-            print!("{delta}");
-        }
-
-        Ok(())
-    });
-
-    agent.prompt_text("Hello!", Vec::new()).await?;
-    subscription.unsubscribe();
-
+    // Remove the tool again.
+    context.messages.push(Message::System(SystemMessage {
+        tools_removed: Some(vec![ToolReference { name: "search".into() }]),
+        ..Default::default()
+    }));
     Ok(())
 }
 ```
 
-### Core Concepts
+Each API sends changes natively where it can (Anthropic tool additions and
+removals, mid-conversation system/developer messages) and otherwise folds
+them into the request the way Pi does. `get_current_system_prompt`,
+`get_current_tools` and `get_tool_state_changes` replay a transcript.
 
-#### AgentMessage vs LLM Message
+## Thinking and reasoning
 
-`AgentMessage` is the same portable `Message` enum used by the shared LLM API.
-It can contain standard LLM messages (`User`, `Assistant`, `ToolResult`) and
-`Custom` app-owned messages.
+`SimpleStreamOptions::reasoning` takes a `ThinkingLevel` (`Minimal`, `Low`,
+`Medium`, `High`, `Xhigh`, `Max`); each API maps it to its own setting
+(effort, budget tokens, `reasoning_effort`, ...). `None` turns reasoning off.
+`get_supported_thinking_levels(&model)` and `clamp_thinking_level` report
+what a model accepts, and `thinking_budgets` overrides the token budgets of
+budget-based APIs. Reasoning streams as `Thinking*` events and ends up as
+`AssistantContent::Thinking` blocks, which are replayed to the same model on
+later turns.
 
-LLMs only understand user, assistant, and tool-result messages. The
-`convert_to_llm` function bridges this gap by filtering or transforming custom
-messages before each provider call.
+## Image input
 
-#### Message Flow
-
-```text
-AgentMessage[] -> transform_context() -> AgentMessage[] -> convert_to_llm() -> Message[] -> LLM
-                    (optional)                           (required)
-```
-
-`transform_context` is intended for pruning, compaction, or external context
-injection. `convert_to_llm` filters or converts app-owned messages.
-
-### Event Flow
-
-The agent emits events for UI updates. Understanding the event sequence helps
-build responsive interfaces.
-
-#### prompt_text() Event Sequence
-
-When you call `prompt_text("Hello")`, the wrapper emits this core sequence:
-
-```text
-prompt_text("Hello")
-|- agent_start
-|- turn_start
-|- message_start   user
-|- message_end     user
-|- message_start   assistant
-|- message_update  assistant delta
-|- message_end     assistant
-|- turn_end
-`- agent_end
-```
-
-#### With Tool Calls
-
-If the assistant calls tools, the loop emits `tool_execution_start`, optional
-`tool_execution_update`, `tool_execution_end`, then a tool-result
-`message_start` / `message_end`. If the batch does not terminate, the next turn
-starts and the model receives the tool results.
-
-Tool execution mode is configurable:
-
-- `Parallel` is the default. Preflight runs sequentially, allowed tools execute
-  concurrently, completion events emit as each tool finalizes, and persisted
-  tool-result messages remain in assistant source order.
-- `Sequential` executes tool calls one by one.
-
-`before_tool_call` runs after `tool_execution_start` and validated argument
-parsing. `after_tool_call` runs after tool execution and before final tool
-events. Tool results can set `terminate = true`; the loop stops early only when
-every finalized result in the batch terminates.
-
-Low-level loop callers can set `should_stop_after_turn` to stop gracefully after
-the current turn completes. It runs after `turn_end`, before steering/follow-up
-queues are polled, and before another model request starts.
-
-#### continue_run() Event Sequence
-
-`continue_run()` resumes from existing context without adding a new message.
-Use it for retries after errors. The last message in context must be a user or
-tool-result message, not an assistant message.
-
-#### Event Types
-
-| Event | Description |
-| --- | --- |
-| `AgentStart` | Agent begins processing |
-| `AgentEnd` | Final event for the run. Awaited subscribers for this event still count toward settlement |
-| `TurnStart` | New turn begins: one LLM call plus tool executions |
-| `TurnEnd` | Turn completes with assistant message and tool results |
-| `MessageStart` | Any message begins: user, assistant, or tool result |
-| `MessageUpdate` | Assistant-only update containing the underlying assistant stream event |
-| `MessageEnd` | Message completes |
-| `ToolExecutionStart` | Tool begins |
-| `ToolExecutionUpdate` | Tool streams progress |
-| `ToolExecutionEnd` | Tool completes |
-
-`Agent::subscribe` listeners are awaited in registration order. `agent_end`
-means no more loop events will be emitted, but `wait_for_idle` and
-`prompt_text` settle only after awaited final listeners finish.
-
-### Agent Options
-
-`AgentOptions` contains:
-
-- `initial_state`: system prompt, model, thinking level, tools, and messages.
-- `convert_to_llm`: converts agent messages to LLM messages.
-- `transform_context`: prunes, compacts, or injects context before conversion.
-- `steering_mode` and `follow_up_mode`: queue handling behavior.
-- `stream_fn`: custom stream function for proxy backends.
-- `session_id`: forwarded through `SimpleStreamOptions`.
-- `tool_execution`: parallel or sequential tool execution.
-- `before_tool_call` and `after_tool_call`: preflight and postprocess hooks.
-- `prepare_next_turn`: updates context, model, or thinking level before another
-  turn starts.
-- `options`: transport, retry, cancellation, payload hooks, provider options,
-  thinking budgets, and API key defaults.
-
-```rust
-use ai::{Agent, AgentOptions, AgentState, ModelThinkingLevel, ToolExecutionMode};
-
-let initial_state = AgentState::builder(model.clone())
-    .system_prompt("You are a helpful assistant.")
-    .thinking_level(ModelThinkingLevel::Medium)
-    .tools(tools)
-    .messages(messages)
-    .build();
-
-let agent = Agent::new(
-    AgentOptions::builder(model)
-        .initial_state(initial_state)
-        .tool_execution(ToolExecutionMode::Parallel)
-        .session_id("session-123")
-        .build(),
-);
-```
-
-### Agent State
-
-`AgentState` contains the system prompt, active model, thinking level, tools,
-message history, streaming status, pending tool call IDs, and the latest error
-message.
-
-```rust
-let state = AgentState::builder(model)
-    .system_prompt("You are a helpful assistant.")
-    .thinking_level(ModelThinkingLevel::Medium)
-    .message(Message::user_text("Hello"))
-    .build();
-```
-
-During streaming, `streaming_message` contains the current partial assistant
-message. `is_streaming` remains true until the run fully settles, including
-awaited `agent_end` subscribers.
-
-### Methods
-
-#### Prompting
-
-```rust
-agent.prompt_text("Hello", Vec::new()).await?;
-agent.prompt_messages(vec![Message::user_text("Hello")]).await?;
-agent.continue_run().await?;
-```
-
-`continue_run` resumes from current context. The last message must be a user or
-tool-result message.
-
-#### State Management
-
-Use the state and option mutation helpers to update system prompt, model,
-thinking level, tools, messages, session ID, queues, hooks, and tool execution
-mode. `reset` returns the agent to its initial state.
-
-```rust
-agent.set_system_prompt("New prompt").await;
-agent.set_model(model).await;
-agent.set_thinking_level(ModelThinkingLevel::Medium).await;
-agent.set_tools(tools).await;
-agent.set_tool_execution(ToolExecutionMode::Sequential).await;
-agent.set_messages(new_messages).await;
-agent.push_message(message).await;
-agent.reset().await;
-```
-
-#### Session and Thinking Budgets
-
-`AgentOptions::session_id` is forwarded to providers that support prompt-cache
-or session affinity behavior. `AgentOptions::options.thinking_budgets` is
-applied by the simple-stream option builder before each model call.
-
-```rust
-agent.set_session_id(Some("session-123".to_string())).await;
-agent.set_thinking_budgets(Some(ThinkingBudgets {
-    minimal: Some(128),
-    low: Some(512),
-    medium: Some(1024),
-    high: Some(2048),
-}));
-```
-
-#### Control
-
-```rust
-agent.abort().await;
-agent.wait_for_idle().await;
-```
-
-#### Events
-
-```rust
-let subscription = agent.subscribe(|event, cancellation_token| async move {
-    if matches!(event, AgentEvent::AgentEnd { .. }) {
-        flush_session_state(cancellation_token).await?;
-    }
-
-    Ok(())
-});
-
-subscription.unsubscribe();
-```
-
-Keep the subscription handle alive while the listener remains registered.
-Dropping the handle also unsubscribes.
-
-### Steering and Follow-up
-
-Steering messages let you interrupt the agent while it is running. Follow-up
-messages let you queue work after the agent would otherwise stop.
-
-When steering messages are detected after a turn completes:
-
-1. All tool calls from the current assistant message have already finished.
-2. Steering messages are injected.
-3. The LLM responds on the next turn.
-
-Follow-up messages are checked only when there are no more tool calls and no
-steering messages.
-
-### Custom Message Types
-
-Use `Message::Custom` for app-specific agent transcript entries. Custom
-messages are retained in agent state, then filtered or converted by
-`convert_to_llm` before provider calls.
-
-### Agent Tools
-
-Agent tools implement the `AgentTool` trait. `definition()` returns the shared
-`Tool` schema, `label()` provides UI text, `execution_mode()` can force a whole
-batch to run sequentially, `prepare_arguments()` can reshape model arguments
-before validation, and `execute()` performs the tool work.
-
-```rust
+```rust,no_run
 use ai::{
-    providers::openai, Agent, AgentOptions, AgentToolBuilder, AgentToolResult, Result,
+    Context, ImageContent, Message, Result, SimpleStreamOptions, UserContent, UserMessage,
+    UserMessageContent, providers::openai,
 };
-use serde_json::{json, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let weather_tool = AgentToolBuilder::new("get_weather")
-        .description("Get current weather for a city.")
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+    let png_base64 = String::from("iVBORw0KGgo...");
+    let context = Context::builder()
+        .message(UserMessage {
+            content: UserMessageContent::Parts(vec![
+                UserContent::text("What is in this image?"),
+                UserContent::Image(ImageContent {
+                    data: png_base64,
+                    mime_type: "image/png".into(),
+                }),
+            ]),
+            timestamp: 0,
+        })
+        .build();
+    openai
+        .models()
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
+    Ok(())
+}
+```
+
+Models without `ModelInput::Image` get a text placeholder instead of the
+image.
+
+## Aborting, errors and debugging
+
+```rust,no_run
+use std::sync::Arc;
+
+use ai::{Context, Message, Result, StopReason, StreamOptions, providers::openai};
+use tokio_util::sync::CancellationToken;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let openai = openai::from_env()?;
+    let model = openai.model("gpt-5.5").build()?;
+    let context = Context::builder().message(Message::user_text("Count to 1000")).build();
+
+    let signal = CancellationToken::new();
+    let options = StreamOptions {
+        signal: Some(signal.clone()),
+        timeout_ms: Some(60_000),
+        max_retries: Some(2),
+        // Inspect (or replace, by returning Some) the provider payload.
+        on_payload: Some(Arc::new(|payload, _model| {
+            eprintln!("payload: {payload}");
+            Box::pin(async { Ok(None) })
+        })),
+        ..Default::default()
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        signal.cancel();
+    });
+
+    let message = openai.models().complete(&model, &context, options).await;
+    match message.stop_reason {
+        StopReason::Aborted => println!("aborted; partial content is kept"),
+        StopReason::Error => println!("failed: {:?}", message.error_message),
+        _ => println!("done"),
+    }
+    Ok(())
+}
+```
+
+An aborted message can stay in the transcript; continue by appending a user
+message. `is_context_overflow(&message, Some(model.context_window))` detects
+context-window errors across providers. `on_response` sees status and headers,
+and `on_provider_stream_event` sees raw provider events.
+
+## Models registry
+
+`Models` is Pi's runtime registry: providers, their catalogs, auth resolution
+(explicit keys, environment, credential stores, OAuth with locked refresh) and
+the stream operations. `builtin_models` registers the built-in providers
+(`anthropic`, `github-copilot`, `openai`, and `openrouter` for images); it
+lives in `ai::providers::all`.
+
+```rust,no_run
+use std::sync::Arc;
+
+use ai::{
+    AuthOperationOptions, Context, CreateModelsOptions, InMemoryCredentialStore, Message, Result,
+    SimpleStreamOptions, providers::all::builtin_models,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let models = builtin_models(CreateModelsOptions {
+        credentials: Some(Arc::new(InMemoryCredentialStore::new())),
+        ..Default::default()
+    });
+
+    for provider in models.get_providers() {
+        println!("{}: {} models", provider.id(), provider.get_models()?.len());
+    }
+    // Models whose provider has usable auth (env, stored key or OAuth).
+    let available = models
+        .get_available(None, AuthOperationOptions::default())
+        .await?;
+    println!("{} available", available.len());
+
+    let model = models.get_model("openai", "gpt-5.5").expect("in the catalog");
+    let context = Context::builder().message(Message::user_text("Hi")).build();
+    let message = models
+        .complete_simple(&model, &context, SimpleStreamOptions::default())
+        .await;
+    println!("{:?}", message.stop_reason);
+    Ok(())
+}
+```
+
+`Models::login(provider, AuthType::OAuth, interaction, LoginOptions::default())`
+runs a provider's login flow with an `AuthInteraction` (prompts plus
+`AuthEvent` notifications such as `DeviceCode`) and stores the credential;
+`logout` removes it. `create_provider(CreateProviderOptions { .. })` builds a
+custom provider from models and `ProviderStreams` implementations, and
+`set_provider` registers it. Static catalog lookups without a registry:
+`ai::providers::all::{get_builtin_model, get_builtin_models,
+get_builtin_providers, get_builtin_image_model, get_builtin_image_models,
+get_builtin_classifier_model, get_builtin_classifier_models}`.
+`calculate_cost`, `models_are_equal` and
+`get_model_type` are the remaining model helpers.
+
+## Faux provider for tests
+
+The faux provider replays scripted assistant messages through the real event
+pipeline, without network. Register `faux.provider` in a `Models` registry:
+
+```rust
+use ai::{
+    Context, FauxMessageOptions, Message, RegisterFauxProviderOptions, SimpleStreamOptions,
+    content_text, create_models, faux_assistant_message, faux_provider,
+};
+
+#[tokio::main]
+async fn main() {
+    let faux = faux_provider(RegisterFauxProviderOptions::default());
+    faux.set_responses([faux_assistant_message("Hello!", FauxMessageOptions::default()).into()]);
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
+
+    let context = Context::builder().message(Message::user_text("Hi")).build();
+    let message = models
+        .complete_simple(&faux.get_model(), &context, SimpleStreamOptions::default())
+        .await;
+    assert_eq!(content_text(&message.content), "Hello!");
+}
+```
+
+Responses can be built with
+`faux_text`, `faux_thinking` and `faux_tool_call`, or computed per request
+with `FauxResponseStep::factory`. `faux.state().call_count` counts requests,
+and `RegisterFauxProviderOptions` sets models, token pacing and deferred
+behavior.
+
+## Agent
+
+`Agent` (Pi's `pi-agent-core`) keeps the transcript, streams assistant turns,
+runs tools, and offers steering and follow-up queues. Pass the stream
+function explicitly, as Pi's coding agent does with `models.streamSimple`:
+`stream_simple_fn(models)` wraps `Models::stream_simple`. Or install one for
+agents that omit it with `set_default_stream_fn`.
+
+```rust
+use ai::{
+    Agent, AgentEvent, AgentOptions, AgentToolBuilder, AgentToolResult, AssistantMessageEvent,
+    FauxMessageOptions, RegisterFauxProviderOptions, create_models, faux_assistant_message,
+    faux_provider, faux_tool_call, stream_simple_fn,
+};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Swap in e.g. `let openai = openai::from_env()?;`, `openai.models()` and
+    // `openai.model("gpt-5.5").build()?`.
+    let faux = faux_provider(RegisterFauxProviderOptions::default());
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
+    faux.set_responses([
+        faux_assistant_message(
+            faux_tool_call("add", json!({ "a": 2, "b": 3 }), None),
+            FauxMessageOptions::default(),
+        )
+        .into(),
+        faux_assistant_message("2 + 3 = 5", FauxMessageOptions::default()).into(),
+    ]);
+
+    let add = AgentToolBuilder::new("add")
+        .description("Add two numbers")
         .parameters(json!({
             "type": "object",
-            "properties": {
-                "city": { "type": "string" }
-            },
-            "required": ["city"]
+            "properties": { "a": { "type": "number" }, "b": { "type": "number" } },
+            "required": ["a", "b"]
         }))
-        .label("Weather")
         .execute(|args| async move {
-            let city = args
-                .get("city")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown city");
-
-            Ok(AgentToolResult::text(format!(
-                "The weather in {city} is 68F and clear."
-            )))
+            let sum = args["a"].as_f64().unwrap_or(0.0) + args["b"].as_f64().unwrap_or(0.0);
+            Ok(AgentToolResult::text(sum.to_string()))
         })
         .build()?;
 
-    let openai = openai::from_env()?;
-    let model = openai.model("gpt-5.5").build()?;
-
     let agent = Agent::new(
-        AgentOptions::builder(model)
-            .tool(weather_tool)
+        AgentOptions::builder(faux.get_model())
+            .system_prompt("You are a calculator.")
+            .tool(add)
+            .stream_fn(stream_simple_fn(models))
             .build(),
     );
 
-    agent
-        .prompt_text("What is the weather in Seattle?", Vec::new())
-        .await?;
+    // Listeners are awaited in order; keep the subscription alive.
+    let _subscription = agent.subscribe(|event, _signal| async move {
+        match event {
+            AgentEvent::MessageUpdate {
+                assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
+                ..
+            } => print!("{delta}"),
+            AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+                println!("{tool_name}({args})")
+            }
+            _ => {}
+        }
+        Ok(())
+    });
 
+    agent.prompt_text("What is 2 + 3?", Vec::new()).await?;
+    // system, user, assistant (tool call), tool result, assistant
+    assert_eq!(agent.messages().len(), 5);
     Ok(())
 }
 ```
 
-Implement `AgentTool` directly when a tool needs state, custom argument
-preparation, an execution mode override, cancellation handling, or streaming
-updates.
+Events per run: `AgentStart`, then per turn `TurnStart`, `MessageStart` /
+`MessageUpdate` / `MessageEnd` for each message, `ToolExecutionStart` /
+`ToolExecutionUpdate` / `ToolExecutionEnd` per tool call, `TurnEnd`, and
+finally `AgentEnd { messages }`.
 
-```rust
-use ai::{AgentTool, AgentToolResult, AgentToolUpdateCallback, Tool};
-use async_trait::async_trait;
-use serde_json::Value;
-use tokio_util::sync::CancellationToken;
+Main methods:
 
-struct WeatherTool;
+- `prompt_text(text, images)`, `prompt_message`, `prompt_messages`,
+  `continue_run()` (from a user or tool-result message);
+- `steer(message)` (delivered after the current tool batch) and
+  `follow_up(message)` (after the run would stop), with
+  `QueueMode::{OneAtATime, All}`, `clear_*_queue`, `peek_queued_messages`;
+- `abort()`, `wait_for_idle()`, `reset()` (keeps the system prompt and tool
+  baseline), `state()`, `messages()`;
+- `set_model`, `set_thinking_level`, `set_tools` (tool changes are announced
+  to the model with a system message), `push_message` (e.g. a
+  `SystemMessage` that changes the prompt), `set_messages`;
+- hooks on `AgentOptions` (and setters on `Agent`): `before_tool_call`,
+  `after_tool_call`, `transform_context`, `convert_to_llm`,
+  `prepare_request`, `prepare_next_turn`, `finish_turn`, `get_api_key`,
+  `on_payload`, ...
 
-#[async_trait]
-impl AgentTool for WeatherTool {
-    fn definition(&self) -> Tool {
-        Tool::builder("get_weather")
-            .description("Get current weather for a city.")
-            .build()
-            .expect("valid weather tool")
+Tools implement `AgentTool` (or use `AgentToolBuilder`). A tool returns
+`Err` or an `AgentToolResult` with `is_error: true` on failure; `terminate:
+true` on every result of a batch ends the run. `execute_with_context` gives
+the tool call id, the abort signal and an update callback for
+`ToolExecutionUpdate` events. `ToolExecutionMode::{Parallel, Sequential}`
+controls batches.
+
+The low-level loop is available as `agent_loop(prompts, AgentContext,
+AgentLoopConfig, signal, stream_fn)` (a stream of `AgentEvent`s whose
+`result()` is the new messages), `agent_loop_continue`, and the
+callback-based `run_agent_loop`. `stream_proxy` streams through a Pi-style
+proxy server, and `run_tool_call` runs a single tool call with the hooks.
+
+## Image generation
+
+```rust,no_run
+use ai::{ImagesContext, ImagesOptions, ImagesStopReason, Result, UserContent, providers};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // OpenRouter (OPENROUTER_API_KEY), Pi's `openrouter-images` API.
+    let openrouter = providers::openrouter::from_env()?;
+    let model = openrouter.model("google/gemini-3-pro-image").build_image()?;
+    let context = ImagesContext::builder()
+        .text("A small watercolor robot reading a book.")
+        .build();
+    let images = openrouter
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
+    if images.stop_reason == ImagesStopReason::Error {
+        eprintln!("{:?}", images.error_message);
+    }
+    for output in images.output {
+        if let UserContent::Image(image) = output {
+            println!("{} ({} base64 bytes)", image.mime_type, image.data.len());
+        }
     }
 
-    fn label(&self) -> &str {
-        "Weather"
-    }
-
-    async fn execute(
-        &self,
-        _tool_call_id: &str,
-        args: Value,
-        _cancellation_token: Option<CancellationToken>,
-        _on_update: Option<AgentToolUpdateCallback>,
-    ) -> ai::AgentResult<AgentToolResult> {
-        let city = args
-            .get("city")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown city");
-
-        Ok(AgentToolResult::text(format!(
-            "The weather in {city} is 68F and clear."
-        )))
-    }
+    // ai.rs extra: OpenAI-compatible /images/generations (`openai-images`),
+    // also for local servers through a custom base URL.
+    let openai = providers::openai::from_env()?;
+    let model = openai.image_model("gpt-image-2").build_image()?;
+    let context = ImagesContext::builder().text("A robot.").build();
+    openai
+        .models()
+        .generate_images(&model, &context, ImagesOptions::default())
+        .await;
+    Ok(())
 }
 ```
 
-#### Agent Tool Error Handling
+`ImagesContext::builder().image(..)` adds input images for editing models.
+`builtin_models(..)` registers OpenRouter's image catalog too
+(`Models::get_model_of_type(ModelType::Image, ..)`), and a custom provider
+adds image APIs through `CreateProviderOptions::images`.
 
-Tool failures should return an error from `execute()`. The loop catches that
-error and reports a tool-result message with `is_error = true`.
+## Classifiers
 
-Return `terminate = true` from `execute()` or `after_tool_call` to hint that
-the agent should stop after the current tool batch. This only takes effect when
-every finalized tool result in the batch is terminating.
+Classifier models answer structured questions about a JSON state instead
+of generating text. They are a model type of their own
+(`ModelType::Classifier`, `ClassifierModel`, `AnyModel::Classifier`), so
+`get_model` and `get_models` never return them. `Models::classify(model,
+context, options)` resolves auth like `stream()`, dispatches to the
+provider that owns the model, and never fails: errors arrive in the
+`ClassifierResult` (`stop_reason` `Error`/`Aborted` plus `error_message`).
 
-### Proxy Usage
-
-For proxy backends, pass a custom `StreamFn` through `AgentOptions::stream_fn`
-or directly to `agent_loop`. The function receives the selected `Model`, the
-converted `Context`, and `SimpleStreamOptions`.
-
-### Low-Level API
-
-Use `agent_loop` or `agent_loop_continue` when you want an event stream, and
-`run_agent_loop` or `run_agent_loop_continue` when you want to await the whole
-loop directly.
-
-```rust
-use futures::StreamExt;
-
+```rust,no_run
 use ai::{
-    agent_loop, agent_loop_continue, providers::openai, AgentContext, AgentLoopConfig, Message,
-    Result,
+    ClassifierAnswer, ClassifierContext, ClassifierOptions, CreateModelsOptions, ModelType,
+    Result, providers::all::builtin_models,
+};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let models = builtin_models(CreateModelsOptions::default());
+    let model = models
+        .get_model_of_type(ModelType::Classifier, "typesafe", "jev-latest")
+        .and_then(|model| model.as_classifier().cloned())
+        .expect("built-in classifier model");
+
+    let context: ClassifierContext = serde_json::from_value(json!({
+        "state": { "message": "Help! My payouts have been failing for 3 days." },
+        "questions": {
+            "urgent": {
+                "type": "bool",
+                "instructions": "Does this convey urgency?",
+                "criteria": { "true": "Explicitly time-sensitive", "false": "No urgency" },
+            },
+            "team": {
+                "type": "choice",
+                "instructions": "Which team should handle this?",
+                "criteria": { "billing": "Payments", "technical": "Bugs" },
+            },
+        },
+    }))?;
+    let result = models
+        .classify(&model, &context, ClassifierOptions::default())
+        .await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
+    }
+    if let Some(ClassifierAnswer::Bool { probability }) = result.answers.get("urgent") {
+        println!("urgent: {probability:.2}");
+    }
+    Ok(())
+}
+```
+
+Questions are `choice` (named options), `score` (ordered levels, answered
+with an expected level and a confidence) or `bool` (a probability).
+`ClassifierOptions::temperature` scales the answer logits where the API can
+apply it (llama.cpp); System One APIs ignore it.
+
+Implementations, keyed by `model.api`:
+
+- `api::typesafe_system_one::typesafe_system_one_api()`
+  (`typesafe-system-one`): TypeSafe's System One protocol, used by the
+  `typesafe` provider (`TYPESAFE_API_KEY`) and by OpenRouter's classifier
+  models.
+- `api::cloudflare_workers_ai_system_one::cloudflare_workers_ai_system_one_api()`
+  (`cloudflare-workers-ai-system-one`): System One models on the Workers AI
+  REST endpoint, used by the `cloudflare-workers-ai` provider
+  (`CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, or a stored credential
+  carrying both).
+- `api::llama_cpp_classify::llama_cpp_classify_api()` (`llama-cpp-classify`):
+  any chat model served by llama.cpp's `llama-server`, answered from
+  next-token log-probabilities of single-token answer labels. No built-in
+  provider uses it; register it on a custom provider through
+  `CreateProviderOptions::classifiers` with a `ClassifierModel` whose
+  `base_url` is the server's `/v1` URL.
+
+## Embeddings (ai.rs extra)
+
+Not in Pi. Embedding models are a model type of their own
+(`ModelType::Embedding`, `EmbeddingModel`, `AnyModel::Embedding`), designed
+like Pi's image models: `Models::embed(model, context, options)` resolves
+auth like `stream()`, dispatches to the provider that owns the model, and
+never fails. Errors arrive in the `EmbeddingsResult` (`stop_reason`
+`Error`/`Aborted` plus `error_message`), and `usage` carries the input
+tokens priced at the model's `cost.input`.
+
+```rust,no_run
+use ai::{
+    CreateModelsOptions, EmbeddingVector, EmbeddingsContext, EmbeddingsOptions, ModelType,
+    Result, providers::all::builtin_models,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let openai = openai::from_env()?;
-    let model = openai.model("gpt-5.5").build()?;
+    let models = builtin_models(CreateModelsOptions::default());
+    let model = models
+        .get_model_of_type(ModelType::Embedding, "openai", "text-embedding-3-small")
+        .and_then(|model| model.as_embedding().cloned())
+        .expect("built-in embedding model");
 
-    let context = AgentContext::builder()
-        .system_prompt("You are helpful.")
-        .build();
-    let config = AgentLoopConfig::new(model);
-    let user_message = Message::user_text("Hello");
-
-    let mut events = agent_loop(
-        vec![user_message.clone()],
-        context.clone(),
-        config.clone(),
-        None,
-        None,
-    );
-    while let Some(event) = events.next().await {
-        println!("{event:?}");
+    let context = EmbeddingsContext {
+        input: vec!["first".to_string(), "second".to_string()],
+    };
+    let options = EmbeddingsOptions {
+        dimensions: Some(256),
+        ..Default::default()
+    };
+    let result = models.embed(&model, &context, options).await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
     }
-
-    let mut context = context;
-    context.messages.push(user_message);
-    let mut events = agent_loop_continue(context, config, None, None)?;
-    while let Some(event) = events.next().await {
-        println!("{event:?}");
+    for embedding in &result.embeddings {
+        if let EmbeddingVector::Float(vector) = embedding {
+            println!("{} dimensions", vector.len());
+        }
     }
-
     Ok(())
 }
 ```
 
-Low-level streams are observational. They preserve event order, but they do not
-wait for async event handling to settle before later producer phases continue.
-Use `Agent` when message processing must be a barrier before tool preflight.
+All strings of `context.input` go in one request and come back in input
+order. `EmbeddingsOptions::dimensions` asks for shorter vectors;
+`provider_options` forwards `encodingFormat` (`"base64"` returns
+`EmbeddingVector::Base64`) and `user`.
 
-## Development
+The built-in catalog has `text-embedding-3-small` (1536 dimensions),
+`text-embedding-3-large` (3072) and `text-embedding-ada-002` (1536) for
+`openai`, and `text-embedding-3-small` for `github-copilot`, all with an
+8192-token input limit. The one implementation is
+`api::openai_embeddings::openai_embeddings_api()` (`openai-embeddings`, the
+OpenAI-compatible `/embeddings` endpoint). A custom provider adds it, or its
+own `ProviderEmbeddings`, through `CreateProviderOptions::embeddings`, and
+lists `EmbeddingModel`s in `models`; an `EmbeddingModel` with an id outside
+the catalog works too, since the provider dispatches on `model.api`. The
+OpenAI provider handle registers it as well, including keyless handles for
+local servers such as Ollama.
 
-```bash
-cargo fmt --all --check
-cargo check -p ai --all-targets
-cargo clippy -p ai --all-targets -- -D warnings
-cargo test -p ai
-cargo test -p ai --lib
-cargo test -p ai --doc
-cargo test -p ai --tests
-cargo test --workspace
+## Durable (feature `durable`, on by default)
+
+`ai::durable` is Pi Durable: conversations whose transcript, tasks,
+submissions and documents live in a `Storage`, so a run survives a crash or
+restart and resumes where it stopped. A `Harness` opens one storage and runs
+the built-in generation, tool and compaction tasks; extensions add tools,
+prompt sections, hooks and tasks through a `Registry`. `ai::chord` holds the
+contexts, JSON deltas and replicated state it builds on.
+
+The example below opens a Harness over memory storage, plays the model with
+the faux provider, offers the `read`, `write`, `edit` and `bash` coding tools
+(`CODING_TOOLS`), and submits input to the root conversation:
+
+```rust
+use std::sync::Arc;
+
+use ai::{
+    FauxMessageOptions, Message, StopReason, content_text, create_models, faux_assistant_message,
+    faux_provider, faux_tool_call,
+};
+# #[cfg(feature = "durable-local-env")]
+use ai::{
+    chord::background_context,
+    durable::{
+        ASSISTANT_ENTRY, MemoryStorage, SubmissionStatus,
+        env::{ExecutionEnv, local::LocalExecutionEnv},
+        harness::{
+            AgentChange, CreateOptions, Harness, HarnessOptions, ModelRef, SubmissionDraft,
+            create_registry,
+        },
+        tools::CODING_TOOLS,
+    },
+};
+
+# #[cfg(not(feature = "durable-local-env"))]
+# fn main() {}
+# #[cfg(feature = "durable-local-env")]
+#[tokio::main]
+async fn main() -> ai::durable::Result<()> {
+    let context = background_context();
+
+    // The faux provider plays the model: one `bash` call, then an answer.
+    let faux = faux_provider(Default::default());
+    faux.set_responses([
+        faux_assistant_message(
+            faux_tool_call("bash", serde_json::json!({ "command": "echo hello" }), Some("call-1")),
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            },
+        )
+        .into(),
+        faux_assistant_message("It printed hello.", FauxMessageOptions::default()).into(),
+    ]);
+    let models = create_models(Default::default());
+    models.set_provider(faux.provider.clone());
+
+    let registry = create_registry();
+    registry.install(CODING_TOOLS.clone())?;
+    let mut options = HarnessOptions::new(models, Arc::new(registry));
+    // Tools reach files and processes only through the environment the Harness builds for each
+    // call, here a local one in the conversation's directory.
+    options.env = Some(Arc::new(|target, _| {
+        let cwd = target.cwd.unwrap_or_else(|| ".".into());
+        let env: Arc<dyn ExecutionEnv> = Arc::new(LocalExecutionEnv::at(cwd));
+        Box::pin(async move { Ok(Some(env)) })
+    }));
+
+    // Memory storage keeps nothing across processes; `open_local_jsonl_storage` or
+    // `open_rusqlite_storage` (feature `durable-sqlite`) persist the session.
+    let harness = Harness::open(Arc::new(MemoryStorage::new()), options, &context).await?;
+    // The root conversation remembers its model and directory.
+    let agent = AgentChange::default()
+        .model(ModelRef::new("faux", "faux-1"))
+        .cwd(std::env::temp_dir().to_string_lossy());
+    let root = harness
+        .root(&context, CreateOptions { agent: Some(agent), init: None })
+        .await?;
+
+    // The input runs as durable tasks: a generation, a `bash` tool task, then a second generation.
+    let submission = root.submit(SubmissionDraft::input("Say hello."), &context).await?;
+    let settled = submission.wait(&context).await?;
+    assert_eq!(settled.status, SubmissionStatus::Done);
+
+    let answer = settled.answer.expect("a done input has an answer");
+    let entry = root
+        .commit(move |tx| async move { tx.entry_of(&ASSISTANT_ENTRY, answer).await }, &context)
+        .await?
+        .expect("the answer entry");
+    if let Some(Message::Assistant(message)) = entry.model.as_deref().and_then(<[_]>::first) {
+        assert_eq!(content_text(&message.content), "It printed hello.");
+    }
+    harness.close(&context).await
+}
 ```
 
-This crate currently keeps Rust test coverage in module-level unit tests under
-`src`; there is no `crates/ai/tests` integration-test directory at the moment.
+Beyond this:
 
-### Adding a New Provider
+- **Storage.** `MemoryStorage`, the portable `JsonlStorage` and
+  `SqliteStorage` cores over any `FileSystem`/database, the local adapters
+  (`open_local_jsonl_storage`, `open_rusqlite_storage`), and a conformance
+  suite for custom backends (`durable-testing`).
+- **Conversations.** `submit` with `when_busy` steering and follow-ups,
+  `configure` (model, thinking level, extensions, tools, instructions,
+  `cwd`), owned child conversations for subagents, `abort`, `fork`,
+  `reset`, `compact`, `context`/`view_state` reads, and `watch_events` for
+  Pi's agent events.
+- **Tasks.** `define_task` state machines with phases, waits
+  (`all_settled`/`fail_fast`), owned work, abort handlers and migrations;
+  `Harness::inspect` and `task_graph` show live work.
+- **Extensions.** `define_extension` with tools (`define_tool`), prompt
+  sections, hooks on the generation and tool tasks, wraps, and documents
+  (`define_doc`) for extension state.
+- **Coding tools.** `create_read_tool`, `create_write_tool`,
+  `create_edit_tool` and `create_bash_tool` (output limits, spill files,
+  a command prefix and a `prepare` hook) over an `ExecutionEnv`.
 
-Adding a new LLM provider generally requires changes across multiple files:
+## Differences from Pi
 
-#### 1. Core Types (`src/types.rs`)
+The port keeps Pi's behavior; these are the deliberate or Rust-forced
+differences. Each is also documented on the module or item involved.
 
-- Add the API identifier if the provider needs a new transport shape.
-- Create provider-specific options where direct provider calls need typed
-  options.
-- Add or extend compatibility metadata only when the payload behavior differs.
-
-#### 2. Provider Implementation (`src/providers/`)
-
-Create a provider module that exports:
-
-- `stream_<provider>()`
-- `stream_simple_<provider>()`
-- Provider-specific options
-- Message conversion from `Context` to provider payload
-- Tool conversion if the provider supports tools
-- Response parsing into standardized assistant events
-
-#### 3. Provider Factory
-
-- Implement `Provider` for the configured provider handle.
-- Return model builders from `model(id)` and future capability builders.
-- Add root-level exports in `src/lib.rs` when the provider should be public.
-
-#### 4. Runtime API
-
-- Implement the capability runtime trait carried by the built model, such as
-  `LanguageModelApi`.
-- Map provider capability, cost, input, context-window, and reasoning metadata
-  onto the shared `Model` type.
-
-#### 5. Tests
-
-Create or update tests for streaming, tool use, token usage, abort behavior,
-context overflow, empty messages, Unicode handling, tool-result edge cases,
-image input/tool-result images if applicable, and cross-provider handoff.
-
-#### 6. Agent Integration
-
-If the provider needs agent-specific behavior, update this crate's agent tests
-and examples directly.
-
-#### 7. Documentation
-
-Update this README with provider scope, authentication, provider-specific
-options, and environment variables.
+- **API shape.** `Models` is the only request entry point, as Pi intends
+  once its temporary `compat` module is gone: the global api-registry,
+  `stream`/`complete`/`stream_simple`/`complete_simple`, `generateImages`,
+  the images api-registry, `registerFauxProvider` and the `getModel`/
+  `getImageModel` aliases are not ported. Rust keeps the 0.7 provider
+  handles (`openai::builder()`, `anthropic::from_env()`,
+  `handle.model(id).build()`), each owning a `Models` (`handle.models()`);
+  a handle also serves Chat Completions and keyless custom base URLs.
+- **Types.** `ModelCompat` is one flat struct. `AgentMessage = Message`
+  (no custom message roles; `Message::Custom` is gone). Pi's open records
+  become `provider_options` maps; optional provider methods become `Option`
+  returns or `supports_*()` probes. Models of unknown types are dropped when
+  a store entry is deserialized or a fetched list goes through
+  `known_models_from_values`.
+- **Classifiers.** `Models::classify` takes a `ClassifierModel`, so Pi's
+  runtime rejection of a chat model cast to a classifier is a type error
+  (`assert_classifier_model` still checks an `AnyModel`). Pi's generic
+  `resolveCloudflareModel` is generic over a `CloudflareModel` trait. The
+  llama.cpp label-token cache keeps resolved IDs instead of promises.
+- **Runtime.** Abort signals are `CancellationToken`s, producers run on
+  `tokio::spawn`, and abandoned operations are dropped. A synchronous throw
+  becomes `Err` or an error stream. The `partial` of an
+  `AssistantMessageEvent` is a snapshot, not a live reference. `AgentEventStream::result()` returns `Err`
+  instead of hanging, and a stream that ends without a terminal event gives
+  `AgentError::StreamClosed`. The default stream function is resolved at run
+  time; `stream_simple_fn(models)` wraps `Models::stream_simple` as a
+  `StreamFn`.
+- **HTTP.** No vendor SDKs: requests are built by hand (reqwest + SSE) the way
+  the SDKs send them, minus `X-Stainless` headers. HTTP errors read
+  `"<status> <body>"`. `fetch` and SDK `client` options become `http_client`.
+- **Auth.** OAuth flows take an injectable `OAuthFetch`, deadlines use the
+  Tokio clock, `PI_OAUTH_CALLBACK_HOST` is read per login, and a failed lazy
+  OAuth load is retried. GitHub Copilot keeps the `ghr_` refresh-token grant.
+  An Anthropic token response without `access_token`, `refresh_token` or a
+  numeric `expires_in` is rejected at once instead of stored with
+  `undefined` fields.
+  Anthropic workload identity federation is not supported yet.
+- **Agent.** `before_tool_call` may mutate arguments
+  (`Arc<Mutex<Value>>`). Loop hooks (`prepare_request`, `finish_turn`,
+  `prepare_next_turn`, `before_tool_call`, `after_tool_call`) receive a
+  clone of the loop's context instead of Pi's live object, so in-place
+  edits do not reach the loop; return an update instead. Tool progress
+  updates go through a channel the loop drains while the tool runs. The
+  proxy pads sparse content indices, reads a missing `usage` as zero usage
+  and reports every abort as "Request aborted by user".
+- **Faux.** Text is chunked by `char`; factories return `Result` and get a
+  state snapshot.
+- **chord.** No JS Proxy: change drafts are owned values diffed at prepare
+  time; diffs use deep equality.
+- **Durable.** Records serialize to Pi's JSON shapes, so stores stay
+  compatible with the TS backends. Rust has no `undefined`: a void task
+  input, checkpoint or result that TS omits reads as `null`, and Rust
+  writes it as `null`. Documents are typed tokens with one
+  address argument, transaction drafts are `DocDraft` handles
+  (`get`/`edit`), and Pi's eager promises are spawned Tokio tasks.
+  Callbacks are `Arc` closures returning `Result`; a panicking phase handler
+  faults its task like a throw. `AgentChange` fields are `Option<Option<_>>`
+  (keep or clear), and settings are a closure read at each resolution. The
+  local environment is POSIX only, and SQLite runs on a dedicated thread
+  through `rusqlite`. The coding tools' edit diff uses `similar`'s Myers
+  diff, whose hunks can differ from jsdiff's on ties; `BashPrepare` takes
+  and returns the execution by value. `CompactionPolicy.reserve_tokens` is
+  an `i64` like Pi's `number`; a negative reserve sends `max_tokens` 0 for
+  the summary request. `ToolExecutionApi::detached` (feature
+  `durable-testing`) runs a tool outside a Harness for tests.
+  `AgentEventStream::snapshot` is the `SnapshotEvent` payload, which
+  serializes without `"type": "snapshot"` (wrap it in
+  `AgentEvent::Snapshot`). Storage cursors must be non-negative.
+- **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot,
+  Cloudflare Workers AI, TypeSafe, and OpenRouter images and classifiers
+  (including the Cloudflare AI Gateway provider; its auth helper is
+  ported); `cloudflare-ai-binding`, which only runs inside the Workers
+  runtime; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses; telemetry
+  contexts; `session-resources`; the TypeBox
+  `StringEnum` helper (tool parameters are plain JSON Schema, so an enum is
+  `{"type": "string", "enum": [...]}`). `pi-mcp` and `pi-codemode` are
+  not ported yet; they are planned for a future release.
+- **ai.rs extras.** Embedding models (`ModelType::Embedding`,
+  `EmbeddingModel`, `Provider::embed`, `Models::embed`,
+  `CreateProviderOptions::embeddings`, the `openai-embeddings` API and its
+  catalog), designed like Pi's image models; `has_known_model_type` knows
+  `embedding`. The `openai-images` API, the provider
+  handles, `github_copilot::get_oauth_api_key`, and `AgentToolBuilder` /
+  `AgentOptions::builder` conveniences. `Debug` output of credentials,
+  options, OAuth requests and responses, PKCE pairs and clients redacts
+  secrets.
 
 ## License
 
