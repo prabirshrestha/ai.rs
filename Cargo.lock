@@ -1335,6 +1335,7 @@ name = "simple-coding-agent"
 version = "0.1.0"
 dependencies = [
  "ai",
+ "async-trait",
  "serde_json",
  "tokio",
 ]
