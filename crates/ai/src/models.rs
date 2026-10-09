@@ -8,13 +8,11 @@
 //!   are paired with a `supports_*` probe (`refresh_models`, deferred calls).
 //! - Requests run on spawned Tokio tasks; abandoned operations are dropped
 //!   (cancelled) instead of continuing in the background.
-//! - Classifier models and `classify()` are not ported.
 //! - Unknown model types cannot be represented by [`AnyModel`], so Pi's
 //!   `hasKnownModelType()` filtering happens when raw models are
 //!   deserialized: [`ModelsStoreEntry`] drops them, and `fetch_models`
 //!   implementations that read JSON use
 //!   [`known_models_from_values`](crate::types::known_models_from_values).
-//!   Classifier models count as unknown.
 //! - ai.rs extra, not in Pi: embedding models (`ModelType::Embedding`),
 //!   [`Provider::embed`], [`Models::embed`] and
 //!   `CreateProviderOptions::embeddings`, designed like the image path
@@ -44,17 +42,18 @@ use crate::models_store::{
     InMemoryModelsStore, ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions,
 };
 use crate::types::{
-    AnyModel, AssistantImages, AssistantMessage, BoxFuture, Context, DeferredCancelOptions,
-    DeferredFetchOptions, DeferredHandle, EmbeddingModel, EmbeddingsContext, EmbeddingsOptions,
-    EmbeddingsResult, ImageModel, ImagesContext, ImagesOptions, Model, ModelCostRates,
-    ModelThinkingLevel, ModelType, ProviderEmbeddings, ProviderEnv, ProviderHeaders,
+    AnyModel, AssistantImages, AssistantMessage, BoxFuture, ClassifierContext, ClassifierModel,
+    ClassifierOptions, ClassifierResult, Context, DeferredCancelOptions, DeferredFetchOptions,
+    DeferredHandle, EmbeddingModel, EmbeddingsContext, EmbeddingsOptions, EmbeddingsResult,
+    ImageModel, ImagesContext, ImagesOptions, Model, ModelCost, ModelCostRates, ModelThinkingLevel,
+    ModelType, ProviderClassifier, ProviderEmbeddings, ProviderEnv, ProviderHeaders,
     ProviderImages, ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StreamOptions,
     TranscriptContext, Usage, UsageCost,
 };
 use crate::utils::abort::{operation_signal, race_with_abort_signal};
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::model_operations::{
-    assert_chat_model, embeddings_error_result, image_error_result,
+    assert_chat_model, classifier_error_result, embeddings_error_result, image_error_result,
 };
 
 use crate::utils::time::now_millis;
@@ -158,6 +157,7 @@ pub type ModelsSimpleStreamOptions = ModelsOptions<SimpleStreamOptions>;
 pub type ModelsDeferredFetchOptions = ModelsOptions<DeferredFetchOptions>;
 pub type ModelsDeferredCancelOptions = ModelsOptions<DeferredCancelOptions>;
 pub type ModelsImagesOptions = ModelsOptions<ImagesOptions>;
+pub type ModelsClassifierOptions = ModelsOptions<ClassifierOptions>;
 /// ai.rs extra: [`EmbeddingsOptions`] plus the `Models` request transforms.
 pub type ModelsEmbeddingsOptions = ModelsOptions<EmbeddingsOptions>;
 
@@ -295,6 +295,30 @@ pub trait Provider: Send + Sync {
         )
     }
 
+    /// Whether [`Provider::classify`] is implemented (providers with
+    /// structured classifier models).
+    fn supports_classify(&self) -> bool {
+        false
+    }
+
+    /// Present when the provider supports structured classifier models.
+    /// Never fails: errors are reported in the result.
+    async fn classify(
+        &self,
+        model: ClassifierModel,
+        _context: ClassifierContext,
+        _options: ClassifierOptions,
+    ) -> ClassifierResult {
+        classifier_error_result(
+            &model,
+            ModelsError::new(
+                ModelsErrorCode::Provider,
+                format!("Provider {} does not support classification", self.id()),
+            ),
+            false,
+        )
+    }
+
     /// Whether [`Provider::embed`] is implemented (providers with embedding
     /// models). ai.rs extra.
     fn supports_embed(&self) -> bool {
@@ -402,6 +426,7 @@ impl_auth_request_options!(ProviderRequestOptions);
 impl_auth_request_options!(SimpleStreamOptions, stream);
 impl_auth_request_options!(DeferredFetchOptions, request);
 impl_auth_request_options!(ImagesOptions);
+impl_auth_request_options!(ClassifierOptions);
 impl_auth_request_options!(EmbeddingsOptions);
 
 /// What [`Models::get_auth`] resolves auth for: a provider id, or a model
@@ -449,6 +474,16 @@ impl From<&ImageModel> for AuthTarget {
     }
 }
 
+impl From<&ClassifierModel> for AuthTarget {
+    fn from(model: &ClassifierModel) -> Self {
+        Self {
+            provider: model.provider.clone(),
+            model_headers: model.headers.clone().map(Into::into),
+            is_model: true,
+        }
+    }
+}
+
 impl From<&EmbeddingModel> for AuthTarget {
     fn from(model: &EmbeddingModel) -> Self {
         Self {
@@ -464,6 +499,7 @@ impl From<&AnyModel> for AuthTarget {
         match model {
             AnyModel::Chat(model) => model.into(),
             AnyModel::Image(model) => model.into(),
+            AnyModel::Classifier(model) => model.into(),
             AnyModel::Embedding(model) => model.into(),
         }
     }
@@ -1492,6 +1528,46 @@ impl Models {
         })
     }
 
+    /// Classify structured state through the owning provider. Never fails:
+    /// errors are reported in the result.
+    pub async fn classify(
+        &self,
+        model: &ClassifierModel,
+        context: &ClassifierContext,
+        options: impl Into<ModelsClassifierOptions>,
+    ) -> ClassifierResult {
+        let options = options.into();
+        let aborted = options
+            .options
+            .signal
+            .clone()
+            .map(|signal| move || signal.is_cancelled());
+        let result = async {
+            let provider = self.require_provider(&model.provider)?;
+            if !provider.supports_classify() {
+                return Err(models_error(
+                    ModelsErrorCode::Provider,
+                    format!(
+                        "Provider {} does not support classification",
+                        model.provider
+                    ),
+                ));
+            }
+            let (base_url, request_options) = self.apply_auth_to(model.into(), options).await?;
+            let mut request_model = model.clone();
+            if let Some(base_url) = base_url {
+                request_model.base_url = base_url;
+            }
+            Ok(provider
+                .classify(request_model, context.clone(), request_options)
+                .await)
+        }
+        .await;
+        result.unwrap_or_else(|error| {
+            classifier_error_result(model, error, aborted.is_some_and(|aborted| aborted()))
+        })
+    }
+
     /// Embed `context.input` through the owning provider with auth resolved
     /// like `stream()`. Never fails: unknown providers, unconfigured auth,
     /// and providers without `embed` return an error [`EmbeddingsResult`].
@@ -1568,6 +1644,8 @@ pub struct CreateProviderOptions {
     pub api: Option<ProviderApi>,
     /// Image-generation implementations keyed by `model.api`.
     pub images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
+    /// Classifier implementations keyed by `model.api`.
+    pub classifiers: Option<IndexMap<String, Arc<dyn ProviderClassifier>>>,
     /// Embeddings implementations keyed by `model.api`. ai.rs extra.
     pub embeddings: Option<IndexMap<String, Arc<dyn ProviderEmbeddings>>>,
 }
@@ -1586,6 +1664,7 @@ struct CreatedProvider {
     single: Option<Arc<dyn ProviderStreams>>,
     by_api: IndexMap<String, Arc<dyn ProviderStreams>>,
     images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
+    classifiers: Option<IndexMap<String, Arc<dyn ProviderClassifier>>>,
     embeddings: Option<IndexMap<String, Arc<dyn ProviderEmbeddings>>>,
     fetch_deferred: bool,
     cancel_deferred: bool,
@@ -1839,6 +1918,36 @@ impl Provider for CreatedProvider {
         }
     }
 
+    fn supports_classify(&self) -> bool {
+        self.classifiers.is_some()
+    }
+
+    async fn classify(
+        &self,
+        model: ClassifierModel,
+        context: ClassifierContext,
+        options: ClassifierOptions,
+    ) -> ClassifierResult {
+        let implementation = self
+            .classifiers
+            .as_ref()
+            .and_then(|classifiers| classifiers.get(&model.api).cloned());
+        match implementation {
+            Some(implementation) => implementation.classify(model, context, options).await,
+            None => {
+                let message = format!(
+                    "Provider {} has no classifier implementation for \"{}\"",
+                    self.id, model.api
+                );
+                classifier_error_result(
+                    &model,
+                    ModelsError::new(ModelsErrorCode::Provider, message),
+                    false,
+                )
+            }
+        }
+    }
+
     fn supports_embed(&self) -> bool {
         self.embeddings.is_some()
     }
@@ -1882,8 +1991,11 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
     };
     let streams: Vec<&Arc<dyn ProviderStreams>> = single.iter().chain(by_api.values()).collect();
     let images = input.images.filter(|images| !images.is_empty());
+    let classifiers = input
+        .classifiers
+        .filter(|classifiers| !classifiers.is_empty());
     let embeddings = input.embeddings.filter(|embeddings| !embeddings.is_empty());
-    if streams.is_empty() && images.is_none() && embeddings.is_none() {
+    if streams.is_empty() && images.is_none() && classifiers.is_none() && embeddings.is_none() {
         return Err(Error::message(format!(
             "Provider {}: at least one of \"api\", \"images\", \"classifiers\", or \"embeddings\" is required.",
             input.id
@@ -1906,6 +2018,7 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
         single,
         by_api,
         images,
+        classifiers,
         embeddings,
         fetch_deferred,
         cancel_deferred,
@@ -1920,16 +2033,22 @@ pub fn has_api(model: &AnyModel, api: &str) -> bool {
 
 /// `calculateCost()`: fill `usage.cost` from the model's rates and return it.
 pub fn calculate_cost(model: &Model, usage: &mut Usage) -> UsageCost {
+    calculate_cost_for(&model.cost, usage)
+}
+
+/// `calculateCost()` for any model type: Pi's `calculateCost(model: AnyModel,
+/// usage)` reads only `model.cost`.
+pub fn calculate_cost_for(cost: &ModelCost, usage: &mut Usage) -> UsageCost {
     let input_tokens =
         u64::from(usage.input) + u64::from(usage.cache_read) + u64::from(usage.cache_write);
     let mut rates = ModelCostRates {
-        input: model.cost.input,
-        output: model.cost.output,
-        cache_read: model.cost.cache_read,
-        cache_write: model.cost.cache_write,
+        input: cost.input,
+        output: cost.output,
+        cache_read: cost.cache_read,
+        cache_write: cost.cache_write,
     };
     let mut matched_threshold: i64 = -1;
-    for tier in model.cost.tiers.iter().flatten() {
+    for tier in cost.tiers.iter().flatten() {
         let threshold = i64::from(tier.input_tokens_above);
         if input_tokens > u64::from(tier.input_tokens_above) && threshold > matched_threshold {
             rates = ModelCostRates {
@@ -4663,6 +4782,7 @@ mod tests {
         };
         assert_eq!(of_type(ModelType::Chat), vec!["c", "typed"]);
         assert_eq!(of_type(ModelType::Image), vec!["i"]);
+        assert!(of_type(ModelType::Classifier).is_empty());
     }
 
     #[tokio::test]
@@ -5305,9 +5425,211 @@ mod tests {
             ["fetched-chat", "fetched-embedding"]
         );
         assert!(matches!(entry.models[1], AnyModel::Embedding(_)));
-        // Classifier models are known to Pi but not ported.
-        assert!(!has_known_model_type(&with_type(chat("c"), "classifier")));
+        assert!(has_known_model_type(&with_type(chat("c"), "classifier")));
         assert!(has_known_model_type(&json!({ "type": null })));
+    }
+
+    // Port of `test/classifier-models.test.ts`.
+
+    use crate::types::{ClassifierAnswer, ClassifierStopReason};
+
+    fn classifier_model(provider: &str, id: &str) -> ClassifierModel {
+        ClassifierModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: "test-classifier".to_string(),
+            provider: provider.to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            model_type: Default::default(),
+            input: vec![ModelInput::Text],
+            input_limits: None,
+            cost: ModelCost::default(),
+            context_window: 1000,
+            headers: None,
+        }
+    }
+
+    fn approval_context() -> ClassifierContext {
+        serde_json::from_value(json!({
+            "state": { "text": "yes" },
+            "questions": {
+                "approved": {
+                    "type": "bool",
+                    "instructions": "Does this express approval?",
+                    "criteria": { "true": "Approval", "false": "No approval" },
+                },
+            },
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn keeps_chat_and_classifier_entries_with_the_same_provider_and_id_separate() {
+        struct Approves;
+
+        #[async_trait]
+        impl ProviderClassifier for Approves {
+            async fn classify(
+                &self,
+                model: ClassifierModel,
+                _: ClassifierContext,
+                _: ClassifierOptions,
+            ) -> ClassifierResult {
+                ClassifierResult {
+                    answers: [(
+                        "approved".to_string(),
+                        ClassifierAnswer::Bool { probability: 0.9 },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..ClassifierResult::empty_for(&model)
+                }
+            }
+        }
+
+        let chat = test_model("test", "shared");
+        let classifier = classifier_model("test", "shared");
+        let provider = create_provider(CreateProviderOptions {
+            id: "test".to_string(),
+            auth: ambient_auth(),
+            models: vec![
+                AnyModel::Chat(chat),
+                AnyModel::Classifier(classifier.clone()),
+            ],
+            api: Some(chat_streams()),
+            classifiers: Some(
+                [(
+                    "test-classifier".to_string(),
+                    Arc::new(Approves) as Arc<dyn ProviderClassifier>,
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        let models = create_models(Default::default());
+        models.set_provider(provider);
+
+        let listed_chat = models.get_model("test", "shared").unwrap();
+        assert_eq!(
+            get_model_type(&AnyModel::Chat(listed_chat)),
+            ModelType::Chat
+        );
+        assert_eq!(
+            models
+                .get_model_of_type(ModelType::Classifier, "test", "shared")
+                .and_then(|model| model.as_classifier().map(|model| model.model_type)),
+            Some(Default::default())
+        );
+        assert_eq!(
+            models.get_models_of_type(ModelType::Classifier, None),
+            vec![AnyModel::Classifier(classifier.clone())]
+        );
+        assert_eq!(models.get_all_models(None).len(), 2);
+        assert_eq!(
+            models
+                .get_available_of_type(ModelType::Classifier, None, Default::default())
+                .await
+                .unwrap(),
+            vec![AnyModel::Classifier(classifier.clone())]
+        );
+        assert_eq!(
+            models
+                .classify(
+                    &classifier,
+                    &approval_context(),
+                    ClassifierOptions::default()
+                )
+                .await
+                .answers["approved"],
+            ClassifierAnswer::Bool { probability: 0.9 }
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_chat_models_at_the_classifier_entry_point_at_runtime() {
+        let chat = test_model("test", "chat");
+        let models = create_models(Default::default());
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "test".to_string(),
+                auth: ambient_auth(),
+                models: vec![AnyModel::Chat(chat.clone())],
+                api: Some(chat_streams()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+
+        // Pi casts a chat model to `ClassifierModel`; the typed signature
+        // rules that out, so the runtime check is exercised on `AnyModel`
+        // and a relabeled model is refused by the chat-only provider.
+        assert_eq!(
+            crate::utils::model_operations::assert_classifier_model(&AnyModel::Chat(chat.clone()))
+                .unwrap_err()
+                .message,
+            "Model test/chat is not a classifier model"
+        );
+        let disguised = ClassifierModel {
+            id: chat.id,
+            provider: chat.provider,
+            api: chat.api,
+            ..classifier_model("test", "chat")
+        };
+        let result = models
+            .classify(
+                &disguised,
+                &approval_context(),
+                ClassifierOptions::default(),
+            )
+            .await;
+        assert_eq!(result.stop_reason, ClassifierStopReason::Error);
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("Provider test does not support classification")
+        );
+    }
+
+    #[test]
+    fn exposes_jev_only_through_classifier_catalog_accessors() {
+        use crate::providers::all::{
+            builtin_models, get_all_builtin_models, get_builtin_classifier_model,
+            get_builtin_classifier_models,
+        };
+        let jev = get_builtin_classifier_model("typesafe", "jev-latest").unwrap();
+        assert_eq!(jev.api, "typesafe-system-one");
+        assert_eq!(jev.provider, "typesafe");
+        assert_eq!(jev.context_window, 64000);
+        assert_eq!(get_builtin_classifier_models("typesafe"), vec![jev.clone()]);
+        assert_eq!(
+            get_all_builtin_models("typesafe"),
+            vec![AnyModel::Classifier(jev.clone())]
+        );
+
+        let models = builtin_models(Default::default());
+        assert!(models.get_model("typesafe", "jev-latest").is_none());
+        assert_eq!(
+            models.get_model_of_type(ModelType::Classifier, "typesafe", "jev-latest"),
+            Some(AnyModel::Classifier(jev))
+        );
+    }
+
+    #[test]
+    fn routes_openrouter_classifier_models_through_the_system_one_api() {
+        use crate::providers::all::{builtin_models, get_builtin_classifier_models};
+        let models = builtin_models(Default::default());
+        let classifiers = get_builtin_classifier_models("openrouter");
+        assert!(!classifiers.is_empty());
+        for model in classifiers {
+            assert_eq!(model.api, "typesafe-system-one");
+            assert_eq!(model.base_url, "https://openrouter.ai/api/v1");
+            assert!(models.get_model("openrouter", &model.id).is_none());
+            assert_eq!(
+                models.get_model_of_type(ModelType::Classifier, "openrouter", &model.id),
+                Some(AnyModel::Classifier(model))
+            );
+        }
     }
 
     // Embeddings (ai.rs extra), mirroring the image tests above.
@@ -5632,17 +5954,18 @@ mod tests {
     #[test]
     fn keeps_existing_built_in_and_compat_model_reads_chat_only() {
         use crate::providers::all::{
-            get_all_builtin_models, get_builtin_image_model, get_builtin_image_models,
-            get_builtin_models,
+            get_all_builtin_models, get_builtin_classifier_models, get_builtin_image_model,
+            get_builtin_image_models, get_builtin_models,
         };
         let chat = get_builtin_models("openrouter");
         let images = get_builtin_image_models("openrouter");
+        let classifiers = get_builtin_classifier_models("openrouter");
         let all = get_all_builtin_models("openrouter");
         assert!(
             all.iter()
                 .any(|model| is_model_type(model, ModelType::Image))
         );
-        assert_eq!(chat.len() + images.len(), all.len());
+        assert_eq!(chat.len() + images.len() + classifiers.len(), all.len());
         assert_eq!(
             get_builtin_image_model("openrouter", "black-forest-labs/flux.2-pro")
                 .unwrap()

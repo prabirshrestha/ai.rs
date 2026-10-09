@@ -1,6 +1,6 @@
 //! Port of `providers/all.ts` for the in-scope providers (anthropic,
-//! github-copilot, openai, and openrouter for image models only). Classifier
-//! getters are not ported. The embedding getters
+//! cloudflare-workers-ai, github-copilot, openai, openrouter for image and
+//! classifier models only, and typesafe). The embedding getters
 //! (`get_builtin_embedding_model(s)`) are ai.rs extras.
 
 use std::sync::Arc;
@@ -9,25 +9,56 @@ use indexmap::IndexMap;
 
 use super::anthropic::anthropic_provider;
 use super::catalog::{
-    anthropic_models, github_copilot_embedding_models, github_copilot_models,
-    openai_embedding_models, openai_models, openrouter_image_models,
+    anthropic_models, cloudflare_workers_ai_classifier_models, cloudflare_workers_ai_models,
+    github_copilot_embedding_models, github_copilot_models, openai_embedding_models, openai_models,
+    openrouter_classifier_models, openrouter_image_models, typesafe_classifier_models,
 };
+use super::cloudflare_workers_ai::cloudflare_workers_ai_provider;
 use super::github_copilot::github_copilot_provider;
 use super::openai::openai_provider;
 use super::openrouter::openrouter_provider;
+use super::typesafe::typesafe_provider;
 use crate::models::{CreateModelsOptions, Models, Provider, create_models};
-use crate::types::{AnyModel, EmbeddingModel, ImageModel, Model};
+use crate::types::{AnyModel, ClassifierModel, EmbeddingModel, ImageModel, Model};
 
 /// Providers present in the generated catalog (`BuiltinProvider`).
-pub const BUILTIN_PROVIDERS: [&str; 4] = ["anthropic", "github-copilot", "openai", "openrouter"];
+pub const BUILTIN_PROVIDERS: [&str; 6] = [
+    "anthropic",
+    "cloudflare-workers-ai",
+    "github-copilot",
+    "openai",
+    "openrouter",
+    "typesafe",
+];
 
 fn catalog(provider: &str) -> Option<&'static IndexMap<String, Model>> {
     match provider {
         "anthropic" => Some(anthropic_models()),
+        "cloudflare-workers-ai" => Some(cloudflare_workers_ai_models()),
         "github-copilot" => Some(github_copilot_models()),
         "openai" => Some(openai_models()),
         _ => None,
     }
+}
+
+fn classifier_catalog(provider: &str) -> Option<&'static IndexMap<String, ClassifierModel>> {
+    match provider {
+        "cloudflare-workers-ai" => Some(cloudflare_workers_ai_classifier_models()),
+        "openrouter" => Some(openrouter_classifier_models()),
+        "typesafe" => Some(typesafe_classifier_models()),
+        _ => None,
+    }
+}
+
+/// Typed read of one generated built-in classifier model.
+pub fn get_builtin_classifier_model(provider: &str, model_id: &str) -> Option<ClassifierModel> {
+    classifier_catalog(provider)?.get(model_id).cloned()
+}
+
+pub fn get_builtin_classifier_models(provider: &str) -> Vec<ClassifierModel> {
+    classifier_catalog(provider)
+        .map(|models| models.values().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn image_catalog(provider: &str) -> Option<&'static IndexMap<String, ImageModel>> {
@@ -93,6 +124,11 @@ pub fn get_all_builtin_models(provider: &str) -> Vec<AnyModel> {
                 .map(AnyModel::Image),
         )
         .chain(
+            get_builtin_classifier_models(provider)
+                .into_iter()
+                .map(AnyModel::Classifier),
+        )
+        .chain(
             get_builtin_embedding_models(provider)
                 .into_iter()
                 .map(AnyModel::Embedding),
@@ -104,9 +140,11 @@ pub fn get_all_builtin_models(provider: &str) -> Vec<AnyModel> {
 pub fn builtin_providers() -> Vec<Arc<dyn Provider>> {
     vec![
         anthropic_provider(),
+        cloudflare_workers_ai_provider(),
         github_copilot_provider(),
         openai_provider(),
         openrouter_provider(),
+        typesafe_provider(),
     ]
 }
 
@@ -146,6 +184,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             BUILTIN_PROVIDERS.to_vec()
         );
-        assert_eq!(models.get_models(None).len(), 16 + 34 + 44);
+        assert_eq!(models.get_models(None).len(), 16 + 18 + 34 + 44);
     }
 }

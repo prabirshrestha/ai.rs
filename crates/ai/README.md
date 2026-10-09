@@ -32,6 +32,7 @@ adaptations and the few intentional differences are listed in
 - [Faux provider for tests](#faux-provider-for-tests)
 - [Agent](#agent)
 - [Image generation](#image-generation)
+- [Classifiers](#classifiers)
 - [Embeddings (ai.rs extra)](#embeddings-ai-rs-extra)
 - [Durable (feature `durable`, on by default)](#durable-feature-durable-on-by-default)
 - [Differences from Pi](#differences-from-pi)
@@ -46,10 +47,14 @@ adaptations and the few intentional differences are listed in
 | Auth | API keys from the environment or explicit, credential stores, OAuth for Anthropic (Claude Pro/Max) and GitHub Copilot (device code) |
 | Tests | the faux provider (scripted responses, no network) |
 | Image generation | OpenAI-compatible `/images/generations` (`openai-images`, ai.rs extra) and OpenRouter (`openrouter-images`) |
+| Classifiers | `ModelType::Classifier` models and `Models::classify`: TypeSafe and OpenRouter (`typesafe-system-one`), Cloudflare Workers AI (`cloudflare-workers-ai-system-one`), and llama.cpp's `llama-server` (`llama-cpp-classify`) |
+| Cloudflare Workers AI | chat models over `openai-completions` and System One classifiers, with the account ID from `CLOUDFLARE_ACCOUNT_ID` |
 | Embeddings | `ModelType::Embedding` models and `Models::embed`, OpenAI-compatible `/embeddings` (`openai-embeddings`) for OpenAI and GitHub Copilot (ai.rs extra, not in Pi) |
 
 Other Pi providers (Google, Bedrock, Mistral, xAI, OpenRouter chat, Codex,
-...) and classifier models are not ported.
+the Cloudflare AI Gateway, ...) are not ported. Pi's `pi-mcp` and
+`pi-codemode` packages are not ported yet; they are planned for a future
+release.
 
 Crate features:
 
@@ -650,7 +655,8 @@ runs a provider's login flow with an `AuthInteraction` (prompts plus
 custom provider from models and `ProviderStreams` implementations, and
 `set_provider` registers it. Static catalog lookups without a registry:
 `ai::providers::all::{get_builtin_model, get_builtin_models,
-get_builtin_providers, get_builtin_image_model, get_builtin_image_models}`.
+get_builtin_providers, get_builtin_image_model, get_builtin_image_models,
+get_builtin_classifier_model, get_builtin_classifier_models}`.
 `calculate_cost`, `models_are_equal` and
 `get_model_type` are the remaining model helpers.
 
@@ -839,6 +845,82 @@ async fn main() -> Result<()> {
 `builtin_models(..)` registers OpenRouter's image catalog too
 (`Models::get_model_of_type(ModelType::Image, ..)`), and a custom provider
 adds image APIs through `CreateProviderOptions::images`.
+
+## Classifiers
+
+Classifier models answer structured questions about a JSON state instead
+of generating text. They are a model type of their own
+(`ModelType::Classifier`, `ClassifierModel`, `AnyModel::Classifier`), so
+`get_model` and `get_models` never return them. `Models::classify(model,
+context, options)` resolves auth like `stream()`, dispatches to the
+provider that owns the model, and never fails: errors arrive in the
+`ClassifierResult` (`stop_reason` `Error`/`Aborted` plus `error_message`).
+
+```rust,no_run
+use ai::{
+    ClassifierAnswer, ClassifierContext, ClassifierOptions, CreateModelsOptions, ModelType,
+    Result, providers::all::builtin_models,
+};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let models = builtin_models(CreateModelsOptions::default());
+    let model = models
+        .get_model_of_type(ModelType::Classifier, "typesafe", "jev-latest")
+        .and_then(|model| model.as_classifier().cloned())
+        .expect("built-in classifier model");
+
+    let context: ClassifierContext = serde_json::from_value(json!({
+        "state": { "message": "Help! My payouts have been failing for 3 days." },
+        "questions": {
+            "urgent": {
+                "type": "bool",
+                "instructions": "Does this convey urgency?",
+                "criteria": { "true": "Explicitly time-sensitive", "false": "No urgency" },
+            },
+            "team": {
+                "type": "choice",
+                "instructions": "Which team should handle this?",
+                "criteria": { "billing": "Payments", "technical": "Bugs" },
+            },
+        },
+    }))?;
+    let result = models
+        .classify(&model, &context, ClassifierOptions::default())
+        .await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
+    }
+    if let Some(ClassifierAnswer::Bool { probability }) = result.answers.get("urgent") {
+        println!("urgent: {probability:.2}");
+    }
+    Ok(())
+}
+```
+
+Questions are `choice` (named options), `score` (ordered levels, answered
+with an expected level and a confidence) or `bool` (a probability).
+`ClassifierOptions::temperature` scales the answer logits where the API can
+apply it (llama.cpp); System One APIs ignore it.
+
+Implementations, keyed by `model.api`:
+
+- `api::typesafe_system_one::typesafe_system_one_api()`
+  (`typesafe-system-one`): TypeSafe's System One protocol, used by the
+  `typesafe` provider (`TYPESAFE_API_KEY`) and by OpenRouter's classifier
+  models.
+- `api::cloudflare_workers_ai_system_one::cloudflare_workers_ai_system_one_api()`
+  (`cloudflare-workers-ai-system-one`): System One models on the Workers AI
+  REST endpoint, used by the `cloudflare-workers-ai` provider
+  (`CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, or a stored credential
+  carrying both).
+- `api::llama_cpp_classify::llama_cpp_classify_api()` (`llama-cpp-classify`):
+  any chat model served by llama.cpp's `llama-server`, answered from
+  next-token log-probabilities of single-token answer labels. No built-in
+  provider uses it; register it on a custom provider through
+  `CreateProviderOptions::classifiers` with a `ClassifierModel` whose
+  `base_url` is the server's `/v1` URL.
 
 ## Embeddings (ai.rs extra)
 
@@ -1034,9 +1116,14 @@ differences. Each is also documented on the module or item involved.
 - **Types.** `ModelCompat` is one flat struct. `AgentMessage = Message`
   (no custom message roles; `Message::Custom` is gone). Pi's open records
   become `provider_options` maps; optional provider methods become `Option`
-  returns or `supports_*()` probes. Models of unknown types (classifiers
-  included) are dropped when a store entry is deserialized or a fetched list
-  goes through `known_models_from_values`.
+  returns or `supports_*()` probes. Models of unknown types are dropped when
+  a store entry is deserialized or a fetched list goes through
+  `known_models_from_values`.
+- **Classifiers.** `Models::classify` takes a `ClassifierModel`, so Pi's
+  runtime rejection of a chat model cast to a classifier is a type error
+  (`assert_classifier_model` still checks an `AnyModel`). Pi's generic
+  `resolveCloudflareModel` is generic over a `CloudflareModel` trait. The
+  llama.cpp label-token cache keeps resolved IDs instead of promises.
 - **Runtime.** Abort signals are `CancellationToken`s, producers run on
   `tokio::spawn`, and abandoned operations are dropped. A synchronous throw
   becomes `Err` or an error stream. The `partial` of an
@@ -1086,11 +1173,15 @@ differences. Each is also documented on the module or item involved.
   `AgentEventStream::snapshot` is the `SnapshotEvent` payload, which
   serializes without `"type": "snapshot"` (wrap it in
   `AgentEvent::Snapshot`). Storage cursors must be non-negative.
-- **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot and
-  OpenRouter images; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses;
-  classifiers; telemetry contexts; `session-resources`; the TypeBox
+- **Not ported.** Providers other than OpenAI, Anthropic, GitHub Copilot,
+  Cloudflare Workers AI, TypeSafe, and OpenRouter images and classifiers
+  (including the Cloudflare AI Gateway provider; its auth helper is
+  ported); `cloudflare-ai-binding`, which only runs inside the Workers
+  runtime; OpenAI ChatGPT/Codex OAuth; Azure OpenAI Responses; telemetry
+  contexts; `session-resources`; the TypeBox
   `StringEnum` helper (tool parameters are plain JSON Schema, so an enum is
-  `{"type": "string", "enum": [...]}`).
+  `{"type": "string", "enum": [...]}`). `pi-mcp` and `pi-codemode` are
+  not ported yet; they are planned for a future release.
 - **ai.rs extras.** Embedding models (`ModelType::Embedding`,
   `EmbeddingModel`, `Provider::embed`, `Models::embed`,
   `CreateProviderOptions::embeddings`, the `openai-embeddings` API and its

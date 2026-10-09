@@ -1,28 +1,29 @@
-//! Port of `providers/openrouter.ts` restricted to image generation, plus the
-//! pre-1.0 [`OpenRouter`] image handle.
+//! Port of `providers/openrouter.ts` restricted to image generation and the
+//! TypeSafe System One classifiers, plus the pre-1.0 [`OpenRouter`] image
+//! handle.
 //!
-//! Divergences from Pi's `openrouterProvider()`: only the image models
-//! (`OPENROUTER_IMAGE_MODELS`) and the `openrouter-images` implementation are
-//! included. OpenRouter chat models (Anthropic Messages / Chat Completions),
-//! the TypeSafe System One classifiers, and the OpenRouter OAuth login are out
-//! of scope; auth is `OPENROUTER_API_KEY`.
+//! Divergences from Pi's `openrouterProvider()`: the OpenRouter chat models
+//! (Anthropic Messages / Chat Completions) and the OpenRouter OAuth login are
+//! out of scope; auth is `OPENROUTER_API_KEY`.
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use super::catalog::openrouter_image_models;
+use super::catalog::{openrouter_classifier_models, openrouter_image_models};
 use super::handle::{HandleAuth, HandleImages, clean_key};
 use super::model_builder::ImageModelBuilder;
 use crate::Result;
 use crate::api::openrouter_images::openrouter_images_api;
+use crate::api::typesafe_system_one::typesafe_system_one_api;
 use crate::auth::{ProviderAuth, env_api_key_auth, models_error};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, Models, Provider, create_models, create_provider,
 };
 use crate::types::{
-    AnyModel, ImageModel, ImageModelType, KnownImageApi, ModelInput, ModelOutput, ProviderImages,
+    AnyModel, ImageModel, ImageModelType, KnownClassifierApi, KnownImageApi, ModelInput,
+    ModelOutput, ProviderImages,
 };
 use crate::utils::models_error::ModelsErrorCode;
 
@@ -40,7 +41,7 @@ fn images(
     .collect()
 }
 
-/// `openrouterProvider()` (image models only).
+/// `openrouterProvider()` (image and classifier models only).
 pub fn openrouter_provider() -> Arc<dyn Provider> {
     create_provider(CreateProviderOptions {
         id: DEFAULT_PROVIDER_ID.to_string(),
@@ -57,8 +58,23 @@ pub fn openrouter_provider() -> Arc<dyn Provider> {
             .values()
             .cloned()
             .map(AnyModel::Image)
+            .chain(
+                openrouter_classifier_models()
+                    .values()
+                    .cloned()
+                    .map(AnyModel::Classifier),
+            )
             .collect(),
         images: Some(images(|api| api)),
+        // OpenRouter serves TypeSafe's System One protocol at /api/v1/systemone.
+        classifiers: Some(
+            [(
+                KnownClassifierApi::TypesafeSystemOne.as_str().to_string(),
+                typesafe_system_one_api(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
         ..Default::default()
     })
     .expect("the OpenRouter provider has an images implementation")
@@ -245,13 +261,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_lists_only_image_models() {
+    fn provider_lists_only_image_and_classifier_models() {
         let provider = openrouter_provider();
         assert!(provider.get_models().unwrap().is_empty());
         let all = provider.get_all_models().unwrap();
-        assert_eq!(all.len(), openrouter_image_models().len());
-        assert!(all.iter().all(|model| model.api() == "openrouter-images"));
+        assert_eq!(
+            all.len(),
+            openrouter_image_models().len() + openrouter_classifier_models().len()
+        );
+        assert!(all.iter().all(|model| match model {
+            AnyModel::Image(model) => model.api == "openrouter-images",
+            AnyModel::Classifier(model) => model.api == "typesafe-system-one",
+            _ => false,
+        }));
         assert!(provider.supports_generate_images());
+        assert!(provider.supports_classify());
     }
 
     #[test]

@@ -509,6 +509,22 @@ pub(crate) mod test_support {
         format!("http://{addr}/v1")
     }
 
+    /// Read requests and never answer them, for timeout tests. Returns the
+    /// base URL.
+    pub async fn serve_silent() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = read_request(&mut socket).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                });
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
     #[derive(Debug, Clone)]
     pub struct CapturedRequest {
         pub path: String,
@@ -550,6 +566,15 @@ pub(crate) mod test_support {
             }
         }
 
+        /// `Response.json(value)`.
+        pub fn json(value: Value) -> Self {
+            Self::status(
+                200,
+                &[("content-type", "application/json")],
+                value.to_string(),
+            )
+        }
+
         pub fn status(status: u16, headers: &[(&str, &str)], body: impl Into<String>) -> Self {
             Self {
                 status,
@@ -570,46 +595,59 @@ pub(crate) mod test_support {
     impl MockServer {
         /// Serve `responses` in order; once they run out, the last one repeats.
         pub async fn start(responses: Vec<MockResponse>) -> Self {
+            let queue = Mutex::new(VecDeque::from(responses));
+            let last: Mutex<Option<MockResponse>> = Mutex::new(None);
+            Self::start_with(move |_| match queue.lock().pop_front() {
+                Some(response) => {
+                    *last.lock() = Some(response.clone());
+                    response
+                }
+                None => last
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| MockResponse::sse(&[])),
+            })
+            .await
+        }
+
+        /// Answer every request with `handler(request)`.
+        pub async fn start_with(
+            handler: impl Fn(&CapturedRequest) -> MockResponse + Send + Sync + 'static,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let captured = Arc::clone(&requests);
-            let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
+            let handler = Arc::new(handler);
             tokio::spawn(async move {
-                let mut last: Option<MockResponse> = None;
                 loop {
                     let Ok((mut socket, _)) = listener.accept().await else {
                         break;
                     };
-                    let Some(request) = read_request(&mut socket).await else {
-                        continue;
-                    };
-                    captured.lock().push(request);
-                    let response = {
-                        let mut queue = queue.lock();
-                        match queue.pop_front() {
-                            Some(response) => {
-                                last = Some(response.clone());
-                                response
-                            }
-                            None => last.clone().unwrap_or_else(|| MockResponse::sse(&[])),
+                    let captured = Arc::clone(&captured);
+                    let handler = Arc::clone(&handler);
+                    tokio::spawn(async move {
+                        let Some(request) = read_request(&mut socket).await else {
+                            return;
+                        };
+                        let response = handler(&request);
+                        captured.lock().push(request);
+                        let reason = match response.status {
+                            200 => "OK",
+                            _ => "Error",
+                        };
+                        let mut raw = format!("HTTP/1.1 {} {reason}\r\n", response.status);
+                        for (name, value) in &response.headers {
+                            raw.push_str(&format!("{name}: {value}\r\n"));
                         }
-                    };
-                    let reason = match response.status {
-                        200 => "OK",
-                        _ => "Error",
-                    };
-                    let mut raw = format!("HTTP/1.1 {} {reason}\r\n", response.status);
-                    for (name, value) in &response.headers {
-                        raw.push_str(&format!("{name}: {value}\r\n"));
-                    }
-                    raw.push_str(&format!(
-                        "content-length: {}\r\nconnection: close\r\n\r\n{}",
-                        response.body.len(),
-                        response.body
-                    ));
-                    let _ = socket.write_all(raw.as_bytes()).await;
-                    let _ = socket.shutdown().await;
+                        raw.push_str(&format!(
+                            "content-length: {}\r\nconnection: close\r\n\r\n{}",
+                            response.body.len(),
+                            response.body
+                        ));
+                        let _ = socket.write_all(raw.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    });
                 }
             });
             Self {

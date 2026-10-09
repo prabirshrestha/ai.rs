@@ -23,6 +23,7 @@ pub use crate::utils::event_stream::AssistantMessageEventStream;
 
 pub type Api = String;
 pub type ImageApi = String;
+pub type ClassifierApi = String;
 /// ai.rs extra, not in Pi: the API id of an embedding model.
 pub type EmbeddingApi = String;
 pub type ProviderId = String;
@@ -42,6 +43,25 @@ impl KnownImageApi {
         match self {
             Self::OpenrouterImages => "openrouter-images",
             Self::OpenaiImages => "openai-images",
+        }
+    }
+}
+
+/// Classifier APIs with a built-in implementation (`KnownClassifierApi`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownClassifierApi {
+    TypesafeSystemOne,
+    CloudflareWorkersAiSystemOne,
+    LlamaCppClassify,
+}
+
+impl KnownClassifierApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypesafeSystemOne => "typesafe-system-one",
+            Self::CloudflareWorkersAiSystemOne => "cloudflare-workers-ai-system-one",
+            Self::LlamaCppClassify => "llama-cpp-classify",
         }
     }
 }
@@ -1785,13 +1805,14 @@ pub enum ModelInput {
 
 pub type ModelOutput = ModelInput;
 
-/// What a catalog entry is for (`ModelType`). Classifier models are not
-/// ported. `Embedding` is an ai.rs extra, not in Pi.
+/// What a catalog entry is for (`ModelType`). Decides which `Models`
+/// operation accepts it. `Embedding` is an ai.rs extra, not in Pi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
     Chat,
     Image,
+    Classifier,
     Embedding,
 }
 
@@ -1801,6 +1822,7 @@ impl ModelType {
         match self {
             Self::Chat => "chat",
             Self::Image => "image",
+            Self::Classifier => "classifier",
             Self::Embedding => "embedding",
         }
     }
@@ -1905,8 +1927,38 @@ pub enum ImageModelType {
     Image,
 }
 
+/// Structured classifier model: usable with `Models::classify()` only
+/// (`ClassifierModel<TApi>`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierModel {
+    pub id: String,
+    pub name: String,
+    pub api: ClassifierApi,
+    pub provider: ProviderId,
+    pub base_url: String,
+    #[serde(rename = "type")]
+    pub model_type: ClassifierModelType,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    pub cost: ModelCost,
+    pub context_window: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+}
+
+/// The `"classifier"` discriminator of [`ClassifierModel`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClassifierModelType {
+    #[default]
+    Classifier,
+}
+
 /// Embedding model: usable with `Models::embed()` only. ai.rs extra, not in
-/// Pi; shaped like Pi's `ImageModel` and `ClassifierModel` (`BaseModel` plus
+/// Pi; shaped like [`ImageModel`] and [`ClassifierModel`] (`BaseModel` plus
 /// the type's own fields).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1949,6 +2001,7 @@ pub enum EmbeddingModelType {
 pub enum AnyModel {
     Chat(Model),
     Image(ImageModel),
+    Classifier(ClassifierModel),
     Embedding(EmbeddingModel),
 }
 
@@ -1962,6 +2015,9 @@ impl<'de> Deserialize<'de> for AnyModel {
             Some("image") => serde_json::from_value(value)
                 .map(Self::Image)
                 .map_err(de::Error::custom),
+            Some("classifier") => serde_json::from_value(value)
+                .map(Self::Classifier)
+                .map_err(de::Error::custom),
             Some("embedding") => serde_json::from_value(value)
                 .map(Self::Embedding)
                 .map_err(de::Error::custom),
@@ -1973,17 +2029,16 @@ impl<'de> Deserialize<'de> for AnyModel {
 }
 
 /// Pi's `hasKnownModelType()` on a raw model: a model without a `type` (or
-/// with `type: null`) is a chat model; `chat`, `image` and `embedding` are
-/// known.
-///
-/// Divergence: Pi also knows `classifier`. Classifier models are not ported,
-/// so they are treated like any other type this version does not know.
-/// `embedding` is an ai.rs extra.
+/// with `type: null`) is a chat model; `chat`, `image`, `classifier` and
+/// `embedding` are known. `embedding` is an ai.rs extra.
 pub fn has_known_model_type(model: &Value) -> bool {
     match model.get("type") {
         None | Some(Value::Null) => true,
         Some(Value::String(model_type)) => {
-            matches!(model_type.as_str(), "chat" | "image" | "embedding")
+            matches!(
+                model_type.as_str(),
+                "chat" | "image" | "classifier" | "embedding"
+            )
         }
         Some(_) => false,
     }
@@ -2020,6 +2075,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.id,
             Self::Image(model) => &model.id,
+            Self::Classifier(model) => &model.id,
             Self::Embedding(model) => &model.id,
         }
     }
@@ -2028,6 +2084,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.provider,
             Self::Image(model) => &model.provider,
+            Self::Classifier(model) => &model.provider,
             Self::Embedding(model) => &model.provider,
         }
     }
@@ -2036,6 +2093,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.api,
             Self::Image(model) => &model.api,
+            Self::Classifier(model) => &model.api,
             Self::Embedding(model) => &model.api,
         }
     }
@@ -2044,6 +2102,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.base_url,
             Self::Image(model) => &model.base_url,
+            Self::Classifier(model) => &model.base_url,
             Self::Embedding(model) => &model.base_url,
         }
     }
@@ -2051,21 +2110,28 @@ impl AnyModel {
     pub fn as_chat(&self) -> Option<&Model> {
         match self {
             Self::Chat(model) => Some(model),
-            Self::Image(_) | Self::Embedding(_) => None,
+            Self::Image(_) | Self::Classifier(_) | Self::Embedding(_) => None,
         }
     }
 
     pub fn as_image(&self) -> Option<&ImageModel> {
         match self {
             Self::Image(model) => Some(model),
-            Self::Chat(_) | Self::Embedding(_) => None,
+            Self::Chat(_) | Self::Classifier(_) | Self::Embedding(_) => None,
+        }
+    }
+
+    pub fn as_classifier(&self) -> Option<&ClassifierModel> {
+        match self {
+            Self::Classifier(model) => Some(model),
+            Self::Chat(_) | Self::Image(_) | Self::Embedding(_) => None,
         }
     }
 
     pub fn as_embedding(&self) -> Option<&EmbeddingModel> {
         match self {
             Self::Embedding(model) => Some(model),
-            Self::Chat(_) | Self::Image(_) => None,
+            Self::Chat(_) | Self::Image(_) | Self::Classifier(_) => None,
         }
     }
 }
@@ -2079,6 +2145,12 @@ impl From<Model> for AnyModel {
 impl From<ImageModel> for AnyModel {
     fn from(value: ImageModel) -> Self {
         Self::Image(value)
+    }
+}
+
+impl From<ClassifierModel> for AnyModel {
+    fn from(value: ClassifierModel) -> Self {
+        Self::Classifier(value)
     }
 }
 
@@ -2238,6 +2310,173 @@ pub trait ProviderImages: Send + Sync {
         context: ImagesContext,
         options: ImagesOptions,
     ) -> AssistantImages;
+}
+
+/// `ClassifierBoolQuestion.criteria`: what `true` and `false` mean.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifierBoolCriteria {
+    #[serde(rename = "true")]
+    pub true_: String,
+    #[serde(rename = "false")]
+    pub false_: String,
+}
+
+/// `ClassifierQuestion`: `choice` (criteria keyed by answer), `score`
+/// (ordered levels) or `bool`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ClassifierQuestion {
+    Choice {
+        instructions: String,
+        criteria: IndexMap<String, String>,
+    },
+    Score {
+        instructions: String,
+        criteria: Vec<String>,
+    },
+    Bool {
+        instructions: String,
+        criteria: ClassifierBoolCriteria,
+    },
+}
+
+impl ClassifierQuestion {
+    pub fn instructions(&self) -> &str {
+        match self {
+            Self::Choice { instructions, .. }
+            | Self::Score { instructions, .. }
+            | Self::Bool { instructions, .. } => instructions,
+        }
+    }
+}
+
+/// `ClassifierContext`: the state to judge and the questions about it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassifierContext {
+    /// `JsonObject`.
+    pub state: serde_json::Map<String, Value>,
+    pub questions: IndexMap<String, ClassifierQuestion>,
+}
+
+/// `ClassifierAnswer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ClassifierAnswer {
+    Choice {
+        choice: String,
+        probabilities: IndexMap<String, f64>,
+        confidence: f64,
+    },
+    Score {
+        score: f64,
+        confidence: f64,
+    },
+    Bool {
+        probability: f64,
+    },
+}
+
+/// `ClassifierStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClassifierStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `ClassifierResult`. Failures are reported in-band (`stop_reason`
+/// error/aborted plus `error_message`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierResult {
+    pub api: ClassifierApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub answers: IndexMap<String, ClassifierAnswer>,
+    /// Token usage and its cost at the model's catalog price, when the
+    /// service reports token counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: ClassifierStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl ClassifierResult {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &ClassifierModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            answers: IndexMap::new(),
+            usage: None,
+            stop_reason: ClassifierStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for classifier requests (`ProviderRequestOptions<ClassifierModel>`).
+pub type ClassifierPayloadHook =
+    Arc<dyn Fn(Value, &ClassifierModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for classifier requests.
+pub type ClassifierResponseHook =
+    Arc<dyn Fn(ProviderResponse, &ClassifierModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `ClassifierOptions`.
+#[derive(Clone, Default)]
+pub struct ClassifierOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<ClassifierPayloadHook>,
+    pub on_response: Option<ClassifierResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Divides the answer logits by this value before they are normalized
+    /// into probabilities. Values above 1 soften the distribution; values
+    /// below 1 sharpen it. Must be positive. APIs that cannot apply it
+    /// ignore it.
+    pub temperature: Option<f64>,
+}
+
+impl fmt::Debug for ClassifierOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClassifierOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("temperature", &self.temperature)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderClassifier`: the uniform contract implemented by classifier API
+/// modules. Never fails: errors are reported in the result.
+#[async_trait::async_trait]
+pub trait ProviderClassifier: Send + Sync {
+    async fn classify(
+        &self,
+        model: ClassifierModel,
+        context: ClassifierContext,
+        options: ClassifierOptions,
+    ) -> ClassifierResult;
 }
 
 // Embeddings: ai.rs extra, not in Pi. The types mirror the image-generation

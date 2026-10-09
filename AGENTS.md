@@ -25,10 +25,15 @@ Module layout of `crates/ai/src` (mirrors Pi's package folders):
   + `openai_responses_shared`, `openai_completions`, `openai_prompt_cache`,
   `openai_client`, `transform_messages`, `simple_options`,
   `constrained_sampling`, `github_copilot_headers`, `openrouter_images`,
-  `openai_images` and `openai_embeddings` (ai.rs extras)).
+  the classifier APIs `system_one_shared`, `typesafe_system_one`,
+  `cloudflare_workers_ai_system_one` and `llama_cpp_classify`, `cloudflare`
+  (endpoint constants), `openai_images` and `openai_embeddings` (ai.rs
+  extras)).
 - `src/providers/`: providers and the pre-1.0 handles (`openai`, `anthropic`,
-  `github_copilot`, `openrouter` (image models only), `faux`, `all`,
-  `catalog`, `model_builder`); catalog JSON in `providers/data/`.
+  `github_copilot`, `openrouter` (image and classifier models only),
+  `cloudflare_workers_ai` + `cloudflare_auth` + `cloudflare_stream`,
+  `typesafe`, `faux`, `all`, `catalog`, `model_builder`); catalog JSON in
+  `providers/data/`.
 - `src/auth/`: auth types, credential stores, resolution with locked
   refresh; `src/auth/oauth/`: Anthropic and GitHub Copilot OAuth flows,
   device code, callback server, PKCE.
@@ -44,10 +49,13 @@ Module layout of `crates/ai/src` (mirrors Pi's package folders):
   next to the code (`durable/harness/tests/`, `durable/tools/tests.rs`).
 
 Scope: chat through OpenAI (Responses and Chat Completions), Anthropic
-(Messages) and GitHub Copilot, plus the faux provider for tests; image
-generation through OpenAI-compatible `/images/generations` and OpenRouter;
-embeddings as an ai.rs extra. Other Pi providers and classifiers are not
-ported.
+(Messages), GitHub Copilot and Cloudflare Workers AI, plus the faux provider
+for tests; image generation through OpenAI-compatible `/images/generations`
+and OpenRouter; classifiers through TypeSafe/OpenRouter and Cloudflare
+Workers AI (System One) and llama.cpp; embeddings as an ai.rs extra. Other
+Pi providers (including the Cloudflare AI Gateway) are not ported. `pi-mcp`
+and `pi-codemode` are not ported yet; they are planned for a future
+release.
 
 The root `README.md` is intentionally short. The detailed crate documentation
 lives in `crates/ai/README.md`, which is also the crate-level rustdoc

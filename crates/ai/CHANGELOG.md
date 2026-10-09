@@ -106,6 +106,19 @@ Agent:
   run like a thrown error in Pi. `ai::agent::ThinkingLevel` is Pi's agent
   thinking level (with `off`).
 - OpenRouter image models in the builtin providers.
+- Classifier models, ported from Pi: `ModelType::Classifier`,
+  `ClassifierModel`, `AnyModel::Classifier`, `ClassifierContext`/
+  `ClassifierQuestion`/`ClassifierAnswer`/`ClassifierResult`,
+  `ClassifierOptions` (with `temperature`), `ProviderClassifier`,
+  `CreateProviderOptions::classifiers`, `Provider::classify`,
+  `Models::classify` and `get_builtin_classifier_model(s)`. APIs:
+  `typesafe_system_one_api()`, `cloudflare_workers_ai_system_one_api()` and
+  `llama_cpp_classify_api()`.
+- Providers `typesafe` (System One classifiers) and `cloudflare-workers-ai`
+  (chat models over Chat Completions plus System One classifiers, with
+  `cloudflare_workers_ai_auth()` and the `cloudflare_streams`/
+  `cloudflare_classifier` endpoint wrappers) in the builtin providers.
+  OpenRouter adds its TypeSafe classifier models.
 - Embedding models (ai.rs extra): `ModelType::Embedding`, `EmbeddingModel`,
   `AnyModel::Embedding`, `ProviderEmbeddings`,
   `CreateProviderOptions::embeddings`, `Provider::embed`, `Models::embed`,
@@ -119,3 +132,9 @@ Agent:
   views and agent events; the `read`, `write`, `edit` and `bash` coding
   tools (`CODING_TOOLS`) over an `ExecutionEnv`; and a storage conformance
   suite (`durable-testing`).
+
+### Not ported yet
+
+- Pi's `pi-mcp` and `pi-codemode` packages are planned for a future release.
+- The Cloudflare AI Gateway provider and `cloudflare-ai-binding` (Workers
+  runtime only) are not ported.

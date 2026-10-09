@@ -2,13 +2,12 @@
 //! (`{ api: { "<type>:<id>": model } }`) into id-keyed catalogs.
 //!
 //! Pi's mapped catalog types have no Rust equivalent; catalogs are ordered
-//! maps from model id to model. Classifier catalogs are not ported; embedding
-//! catalogs are an ai.rs extra.
+//! maps from model id to model. Embedding catalogs are an ai.rs extra.
 
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use crate::types::{EmbeddingModel, ImageModel, Model, ModelType};
+use crate::types::{ClassifierModel, EmbeddingModel, ImageModel, Model, ModelType};
 
 /// Generated catalog groups, keyed by api and then by `"<type>:<id>"`.
 pub type ModelGroups = IndexMap<String, IndexMap<String, Value>>;
@@ -43,6 +42,19 @@ pub fn flatten_image_model_catalog(
         .into_iter()
         .map(|model| {
             serde_json::from_value::<ImageModel>(model).map(|model| (model.id.clone(), model))
+        })
+        .collect()
+}
+
+/// `flattenClassifierModelCatalog()`.
+pub fn flatten_classifier_model_catalog(
+    _provider: &str,
+    groups: &ModelGroups,
+) -> serde_json::Result<IndexMap<String, ClassifierModel>> {
+    flatten_model_catalog(groups, ModelType::Classifier)
+        .into_iter()
+        .map(|model| {
+            serde_json::from_value::<ClassifierModel>(model).map(|model| (model.id.clone(), model))
         })
         .collect()
 }
@@ -93,5 +105,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let classifier_groups: ModelGroups = serde_json::from_value(json!({
+            "test-classifier": {
+                "classifier:d": { "type": "classifier", "id": "d", "name": "D", "api": "test-classifier", "provider": "p", "baseUrl": "", "input": ["text"], "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }, "contextWindow": 1000 }
+            }
+        }))
+        .unwrap();
+        let classifiers = flatten_classifier_model_catalog("p", &classifier_groups).unwrap();
+        assert_eq!(classifiers.keys().collect::<Vec<_>>(), vec!["d"]);
     }
 }

@@ -1,7 +1,7 @@
 # ai.rs
 
 LLM library for Rust with streaming, tool calling, a models registry with
-OAuth, image generation, embeddings, and an agent loop. It is a 1:1 port of
+OAuth, image generation, classifiers, embeddings, and an agent loop. It is a 1:1 port of
 [`pi`](https://github.com/earendil-works/pi)'s `pi-ai` and `pi-agent-core`
 1.0.2.
 
