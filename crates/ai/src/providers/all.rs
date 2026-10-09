@@ -1,6 +1,7 @@
 //! Port of `providers/all.ts` for the in-scope providers (anthropic,
 //! github-copilot, openai, and openrouter for image models only). Classifier
-//! getters are not ported.
+//! getters are not ported. The embedding getters
+//! (`get_builtin_embedding_model(s)`) are ai.rs extras.
 
 use std::sync::Arc;
 
@@ -8,13 +9,14 @@ use indexmap::IndexMap;
 
 use super::anthropic::anthropic_provider;
 use super::catalog::{
-    anthropic_models, github_copilot_models, openai_models, openrouter_image_models,
+    anthropic_models, github_copilot_embedding_models, github_copilot_models,
+    openai_embedding_models, openai_models, openrouter_image_models,
 };
 use super::github_copilot::github_copilot_provider;
 use super::openai::openai_provider;
 use super::openrouter::openrouter_provider;
 use crate::models::{CreateModelsOptions, Models, Provider, create_models};
-use crate::types::{AnyModel, ImageModel, Model};
+use crate::types::{AnyModel, EmbeddingModel, ImageModel, Model};
 
 /// Providers present in the generated catalog (`BuiltinProvider`).
 pub const BUILTIN_PROVIDERS: [&str; 4] = ["anthropic", "github-copilot", "openai", "openrouter"];
@@ -33,6 +35,26 @@ fn image_catalog(provider: &str) -> Option<&'static IndexMap<String, ImageModel>
         "openrouter" => Some(openrouter_image_models()),
         _ => None,
     }
+}
+
+fn embedding_catalog(provider: &str) -> Option<&'static IndexMap<String, EmbeddingModel>> {
+    match provider {
+        "github-copilot" => Some(github_copilot_embedding_models()),
+        "openai" => Some(openai_embedding_models()),
+        _ => None,
+    }
+}
+
+/// Read of one built-in embedding model. ai.rs extra.
+pub fn get_builtin_embedding_model(provider: &str, model_id: &str) -> Option<EmbeddingModel> {
+    embedding_catalog(provider)?.get(model_id).cloned()
+}
+
+/// The built-in embedding models of a provider. ai.rs extra.
+pub fn get_builtin_embedding_models(provider: &str) -> Vec<EmbeddingModel> {
+    embedding_catalog(provider)
+        .map(|models| models.values().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Read of one generated built-in image model.
@@ -69,6 +91,11 @@ pub fn get_all_builtin_models(provider: &str) -> Vec<AnyModel> {
             get_builtin_image_models(provider)
                 .into_iter()
                 .map(AnyModel::Image),
+        )
+        .chain(
+            get_builtin_embedding_models(provider)
+                .into_iter()
+                .map(AnyModel::Embedding),
         )
         .collect()
 }

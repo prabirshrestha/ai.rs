@@ -90,23 +90,34 @@ async fn main() -> Result<()> {
 
 ### Embeddings
 
-Use `embed` for one string and `embed_many` for multiple strings. Embeddings
-are an ai.rs extra (not in Pi).
+Embedding models are a `Models` model type (`ModelType::Embedding`), used
+with `Models::embed` like image models with `Models::generate_images`.
+Embeddings are an ai.rs extra (not in Pi).
 
 ```rust,no_run
-use ai::{Result, embed, embed_many, providers::openai};
+use ai::{
+    CreateModelsOptions, EmbeddingsContext, EmbeddingsOptions, ModelType, Result,
+    providers::all::builtin_models,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let openai = openai::from_env()?;
-    let model = openai
-        .embedding_model("text-embedding-3-small")
-        .build_embedding()?;
+    let models = builtin_models(CreateModelsOptions::default());
+    let model = models
+        .get_model_of_type(ModelType::Embedding, "openai", "text-embedding-3-small")
+        .and_then(|model| model.as_embedding().cloned())
+        .expect("built-in embedding model");
 
-    let one = embed(model.clone(), "hello", None).await?;
-    let batch = embed_many(model, ["first", "second"], None).await?;
-
-    println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
+    let context = EmbeddingsContext {
+        input: vec!["first".to_string(), "second".to_string()],
+    };
+    let result = models
+        .embed(&model, &context, EmbeddingsOptions::default())
+        .await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
+    }
+    println!("{} embeddings", result.embeddings.len());
     Ok(())
 }
 ```

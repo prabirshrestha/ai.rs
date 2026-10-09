@@ -3,31 +3,36 @@
 //! The ChatGPT subscription OAuth (`lazyOAuth(loadOpenAIChatGPTOAuth)`) is not
 //! ported; the provider offers api-key auth only.
 //!
-//! ai.rs extras on the handle, not in Pi: [`OpenAi::image_model`]
-//! (OpenAI-compatible `/images/generations`, api `openai-images`) and
-//! [`OpenAi::embedding_model`] (`/embeddings`, see [`crate::embeddings`]).
+//! ai.rs extras, not in Pi: the embedding models (`text-embedding-3-small`,
+//! `text-embedding-3-large`, `text-embedding-ada-002`, api
+//! `openai-embeddings`) served through [`openai_embeddings_api`], and on the
+//! handle [`OpenAi::image_model`] (OpenAI-compatible
+//! `/images/generations`, api `openai-images`). Handles also serve the
+//! embedding models, keyless ones included.
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use super::catalog::openai_models;
-use super::handle::{HandleAuth, HandleImages, HandleStreams, clean_key};
+use super::catalog::{openai_embedding_models, openai_models};
+use super::handle::{HandleAuth, HandleEmbeddings, HandleImages, HandleStreams, clean_key};
 use super::model_builder::{ImageModelBuilder, ModelBuilder};
 use crate::api::openai_completions::openai_completions_api;
+use crate::api::openai_embeddings::openai_embeddings_api;
 use crate::api::openai_images::openai_images_api;
 use crate::api::openai_responses::openai_responses_api;
 use crate::auth::{ProviderAuth, env_api_key_auth};
-use crate::embeddings::{EmbeddingBinding, EmbeddingModelBuilder, bound_embedding_model};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, Models, Provider, ProviderApi, create_models,
     create_provider,
 };
 use crate::types::{
-    AnyModel, AssistantImages, ImageModel, ImageModelType, ImagesContext, ImagesOptions, KnownApi,
-    KnownImageApi, Model, ModelInput, ModelOutput, ProviderHeaders, ProviderImages,
-    ProviderStreams, SimpleStreamOptions, StreamOptions, TranscriptContext,
+    AnyModel, AssistantImages, EmbeddingModel, EmbeddingsContext, EmbeddingsOptions,
+    EmbeddingsResult, ImageModel, ImageModelType, ImagesContext, ImagesOptions, KnownApi,
+    KnownEmbeddingApi, KnownImageApi, Model, ModelInput, ModelOutput, ProviderEmbeddings,
+    ProviderHeaders, ProviderImages, ProviderStreams, SimpleStreamOptions, StreamOptions,
+    TranscriptContext,
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
 use crate::utils::headers::has_non_empty_header;
@@ -51,8 +56,22 @@ pub fn openai_provider() -> Arc<dyn Provider> {
             .values()
             .cloned()
             .map(AnyModel::Chat)
+            .chain(
+                openai_embedding_models()
+                    .values()
+                    .cloned()
+                    .map(AnyModel::Embedding),
+            )
             .collect(),
         api: Some(ProviderApi::Single(openai_responses_api())),
+        embeddings: Some(
+            [(
+                KnownEmbeddingApi::OpenaiEmbeddings.as_str().to_string(),
+                openai_embeddings_api(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
         ..Default::default()
     })
     .expect("the OpenAI provider has an API implementation")
@@ -88,8 +107,6 @@ pub struct OpenAi {
     base_url: String,
     api: OpenAiApi,
     models: Models,
-    http_client: Option<reqwest::Client>,
-    keyless: bool,
 }
 
 impl OpenAi {
@@ -155,21 +172,6 @@ impl OpenAi {
             ..Default::default()
         })
     }
-
-    /// ai.rs extra: an OpenAI-compatible embedding model (`/embeddings`).
-    pub fn embedding_model(&self, id: &str) -> EmbeddingModelBuilder {
-        bound_embedding_model(
-            id,
-            &self.provider_id,
-            &self.base_url,
-            None,
-            EmbeddingBinding {
-                models: self.models.clone(),
-                http_client: self.http_client.clone(),
-                keyless: self.keyless,
-            },
-        )
-    }
 }
 
 /// `openai::builder()`.
@@ -190,6 +192,7 @@ pub fn from_env() -> Result<OpenAi> {
 struct KeylessStreams {
     inner: Arc<dyn ProviderStreams>,
     images: Option<Arc<dyn ProviderImages>>,
+    embeddings: Option<Arc<dyn ProviderEmbeddings>>,
 }
 
 impl KeylessStreams {
@@ -197,6 +200,7 @@ impl KeylessStreams {
         Arc::new(Self {
             inner,
             images: None,
+            embeddings: None,
         })
     }
 
@@ -204,7 +208,31 @@ impl KeylessStreams {
         Arc::new(Self {
             inner: openai_responses_api(),
             images: Some(images),
+            embeddings: None,
         })
+    }
+
+    fn wrap_embeddings(embeddings: Arc<dyn ProviderEmbeddings>) -> Arc<dyn ProviderEmbeddings> {
+        Arc::new(Self {
+            inner: openai_responses_api(),
+            images: None,
+            embeddings: Some(embeddings),
+        })
+    }
+
+    /// Without a key or an `Authorization` header: a placeholder key and a
+    /// suppressed `Authorization` header.
+    fn apply_keyless(api_key: &mut Option<String>, headers: &mut Option<ProviderHeaders>) {
+        let has_key = api_key.as_deref().is_some_and(|key| !key.is_empty());
+        let has_authorization = headers
+            .as_ref()
+            .is_some_and(|headers| has_non_empty_header(headers, "authorization"));
+        if !has_key && !has_authorization {
+            *api_key = Some(KEYLESS_API_KEY.to_string());
+            headers
+                .get_or_insert_with(ProviderHeaders::new)
+                .insert("Authorization", None::<String>);
+        }
     }
 
     fn apply(options: &mut StreamOptions) {
@@ -237,25 +265,28 @@ impl ProviderImages for KeylessStreams {
         context: ImagesContext,
         mut options: ImagesOptions,
     ) -> AssistantImages {
-        let has_key = options
-            .api_key
-            .as_deref()
-            .is_some_and(|key| !key.is_empty());
-        let has_authorization = options
-            .headers
-            .as_ref()
-            .is_some_and(|headers| has_non_empty_header(headers, "authorization"));
-        if !has_key && !has_authorization {
-            options.api_key = Some(KEYLESS_API_KEY.to_string());
-            options
-                .headers
-                .get_or_insert_with(ProviderHeaders::new)
-                .insert("Authorization", None::<String>);
-        }
+        Self::apply_keyless(&mut options.api_key, &mut options.headers);
         self.images
             .as_ref()
             .expect("keyless images adapter wraps an images implementation")
             .generate_images(model, context, options)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderEmbeddings for KeylessStreams {
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        context: EmbeddingsContext,
+        mut options: EmbeddingsOptions,
+    ) -> EmbeddingsResult {
+        Self::apply_keyless(&mut options.api_key, &mut options.headers);
+        self.embeddings
+            .as_ref()
+            .expect("keyless embeddings adapter wraps an embeddings implementation")
+            .embed(model, context, options)
             .await
     }
 }
@@ -351,6 +382,13 @@ impl OpenAiBuilder {
                     ..model.clone()
                 })
             })
+            .chain(openai_embedding_models().values().map(|model| {
+                AnyModel::Embedding(EmbeddingModel {
+                    provider: provider_id.clone(),
+                    base_url: base_url.clone(),
+                    ..model.clone()
+                })
+            }))
             .collect();
         let wrap = |api: Arc<dyn ProviderStreams>| {
             let api = if keyless {
@@ -383,6 +421,17 @@ impl OpenAiBuilder {
         )]
         .into_iter()
         .collect();
+        let embeddings_api = if keyless {
+            KeylessStreams::wrap_embeddings(openai_embeddings_api())
+        } else {
+            openai_embeddings_api()
+        };
+        let embeddings = [(
+            KnownEmbeddingApi::OpenaiEmbeddings.as_str().to_string(),
+            HandleEmbeddings::wrap(embeddings_api, &self.http_client),
+        )]
+        .into_iter()
+        .collect();
         let provider = create_provider(CreateProviderOptions {
             id: provider_id.clone(),
             name: Some("OpenAI".to_string()),
@@ -394,6 +443,7 @@ impl OpenAiBuilder {
             models,
             api: Some(ProviderApi::ByApi(streams)),
             images: Some(images),
+            embeddings: Some(embeddings),
             ..Default::default()
         })?;
         let collection = create_models(CreateModelsOptions::default());
@@ -403,8 +453,6 @@ impl OpenAiBuilder {
             base_url,
             api: self.api,
             models: collection,
-            http_client: self.http_client,
-            keyless,
         })
     }
 }
@@ -578,6 +626,113 @@ mod tests {
         assert_eq!(request.path, "/v1/images/generations");
         assert_eq!(request.header("authorization"), Some("Bearer test-key"));
         assert_eq!(request.body["prompt"], "A tiny robot");
+    }
+
+    #[test]
+    fn openai_provider_lists_embedding_models() {
+        let provider = openai_provider();
+        let embeddings: Vec<_> = provider
+            .get_all_models()
+            .unwrap()
+            .into_iter()
+            .filter_map(|model| model.as_embedding().cloned())
+            .collect();
+        assert_eq!(
+            embeddings
+                .iter()
+                .map(|model| (model.id.as_str(), model.dimensions))
+                .collect::<Vec<_>>(),
+            [
+                ("text-embedding-3-small", 1536),
+                ("text-embedding-3-large", 3072),
+                ("text-embedding-ada-002", 1536),
+            ]
+        );
+        assert!(provider.supports_embed());
+        assert_eq!(provider.get_models().unwrap().len(), openai_models().len());
+    }
+
+    #[tokio::test]
+    async fn keyless_handles_embed_without_authorization() {
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        let server = MockServer::start(vec![images_response(serde_json::json!({
+            "data": [{ "embedding": [0.25], "index": 0 }],
+        }))])
+        .await;
+        let ollama = builder()
+            .provider_id("ollama")
+            .base_url(server.url.clone())
+            .build()
+            .unwrap();
+        // Custom ids work like catalog ones: the provider dispatches on `api`.
+        let model = EmbeddingModel {
+            id: "nomic-embed-text".to_string(),
+            name: "nomic-embed-text".to_string(),
+            api: KnownEmbeddingApi::OpenaiEmbeddings.as_str().to_string(),
+            provider: "ollama".to_string(),
+            base_url: server.url.clone(),
+            input: vec![ModelInput::Text],
+            ..Default::default()
+        };
+        let output = ollama
+            .models()
+            .embed(
+                &model,
+                &EmbeddingsContext {
+                    input: vec!["hello".to_string()],
+                },
+                EmbeddingsOptions::default(),
+            )
+            .await;
+        assert_eq!(output.error_message, None);
+        assert_eq!(
+            output.embeddings,
+            vec![crate::types::EmbeddingVector::Float(vec![0.25])]
+        );
+        let request = server.last();
+        assert_eq!(request.path, "/v1/embeddings");
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(request.body["model"], "nomic-embed-text");
+    }
+
+    #[tokio::test]
+    async fn handles_list_and_serve_catalog_embedding_models() {
+        let server = MockServer::start(vec![images_response(serde_json::json!({
+            "data": [{ "embedding": [0.5], "index": 0 }],
+        }))])
+        .await;
+        let handle = builder()
+            .api_key(Some("test-key"))
+            .base_url(server.url.clone())
+            .build()
+            .unwrap();
+        let model = handle
+            .models()
+            .get_model_of_type(
+                crate::types::ModelType::Embedding,
+                "openai",
+                "text-embedding-3-small",
+            )
+            .and_then(|model| model.as_embedding().cloned())
+            .unwrap();
+        assert_eq!(model.base_url, server.url);
+        let output = handle
+            .models()
+            .embed(
+                &model,
+                &EmbeddingsContext {
+                    input: vec!["hello".to_string()],
+                },
+                EmbeddingsOptions::default(),
+            )
+            .await;
+        assert_eq!(output.error_message, None);
+        assert_eq!(
+            server.last().header("authorization"),
+            Some("Bearer test-key")
+        );
     }
 
     #[tokio::test]

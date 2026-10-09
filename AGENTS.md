@@ -10,7 +10,8 @@ packages under `examples/` (`examples/simple-coding-agent`).
 `ai` is a 1:1 port of Pi's `@earendil-works/pi-ai` and
 `@earendil-works/pi-agent-core` **1.0.2**, tracking Pi commit
 `200387122ca450d6387f033949423114a270b96c`. Pi is the source of truth; the
-ai.rs-specific API (provider handles that own a `Models`, embeddings) sits on
+ai.rs-specific API (provider handles that own a `Models`, the embedding model
+type) sits on
 top of the ported core. As in Pi 1.0, the `Models` registry is the only
 request entry point; Pi's temporary global `compat` API is not ported.
 
@@ -18,7 +19,8 @@ Module layout of `crates/ai/src` (mirrors Pi's package folders):
 
 - Root modules: `types` (Pi `types.ts`), `models` (the `Models` registry,
   `Provider`, `create_provider`), `models_store`, `model_catalog`,
-  `env_api_keys`, `error`, and `embeddings` (ai.rs extra, not in Pi).
+  `env_api_keys` and `error`. Embedding models (`ModelType::Embedding`,
+  `Models::embed`) are an ai.rs extra, not in Pi.
 - `src/api/`: API implementations (`anthropic_messages`, `openai_responses`
   + `openai_responses_shared`, `openai_completions`, `openai_prompt_cache`,
   `openai_client`, `transform_messages`, `simple_options`,

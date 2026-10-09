@@ -3,6 +3,14 @@
 //! (`providers/data/*.json`), embedded at compile time and flattened with
 //! `flatten_chat_model_catalog()` on first use.
 //!
+//! ai.rs extra, not in Pi: the embedding catalogs
+//! (`data/openai-embeddings.json`, `data/github-copilot-embeddings.json`),
+//! hand-written in the same grouped format. The OpenAI prices (input, per
+//! million tokens) are from OpenAI's model pages, the default dimensions
+//! and the 8192-token input limit from OpenAI's embeddings guide and the
+//! `text-embedding-ada-002` announcement. The Copilot entry repeats the
+//! OpenAI numbers, like Pi's Copilot catalog lists API-equivalent prices.
+//!
 //! OpenRouter ships only its image catalog (`OPENROUTER_IMAGE_MODELS`, the
 //! `openrouter-images` group of Pi's `openrouter.json`): OpenRouter chat and
 //! classifier models are out of scope.
@@ -11,8 +19,11 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 
-use crate::model_catalog::{ModelGroups, flatten_chat_model_catalog, flatten_image_model_catalog};
-use crate::types::{ImageModel, Model};
+use crate::model_catalog::{
+    ModelGroups, flatten_chat_model_catalog, flatten_embedding_model_catalog,
+    flatten_image_model_catalog,
+};
+use crate::types::{EmbeddingModel, ImageModel, Model};
 
 fn load(provider: &str, json: &str) -> IndexMap<String, Model> {
     let groups: ModelGroups =
@@ -34,6 +45,22 @@ static OPENROUTER_IMAGE_MODELS: LazyLock<IndexMap<String, ImageModel>> = LazyLoc
         .expect("generated model catalog matches ImageModel")
 });
 
+fn load_embeddings(provider: &str, json: &str) -> IndexMap<String, EmbeddingModel> {
+    let groups: ModelGroups = serde_json::from_str(json).expect("model catalog is valid JSON");
+    flatten_embedding_model_catalog(provider, &groups)
+        .expect("model catalog matches EmbeddingModel")
+}
+
+static OPENAI_EMBEDDING_MODELS: LazyLock<IndexMap<String, EmbeddingModel>> =
+    LazyLock::new(|| load_embeddings("openai", include_str!("data/openai-embeddings.json")));
+static GITHUB_COPILOT_EMBEDDING_MODELS: LazyLock<IndexMap<String, EmbeddingModel>> =
+    LazyLock::new(|| {
+        load_embeddings(
+            "github-copilot",
+            include_str!("data/github-copilot-embeddings.json"),
+        )
+    });
+
 /// `ANTHROPIC_MODELS`.
 pub fn anthropic_models() -> &'static IndexMap<String, Model> {
     &ANTHROPIC_MODELS
@@ -47,6 +74,16 @@ pub fn openai_models() -> &'static IndexMap<String, Model> {
 /// `GITHUB_COPILOT_MODELS`.
 pub fn github_copilot_models() -> &'static IndexMap<String, Model> {
     &GITHUB_COPILOT_MODELS
+}
+
+/// OpenAI embedding models. ai.rs extra.
+pub fn openai_embedding_models() -> &'static IndexMap<String, EmbeddingModel> {
+    &OPENAI_EMBEDDING_MODELS
+}
+
+/// GitHub Copilot embedding models. ai.rs extra.
+pub fn github_copilot_embedding_models() -> &'static IndexMap<String, EmbeddingModel> {
+    &GITHUB_COPILOT_EMBEDDING_MODELS
 }
 
 /// `OPENROUTER_IMAGE_MODELS`.
@@ -117,7 +154,30 @@ mod tests {
                 normalize_numbers(value.clone())
             );
         }
+        for (json, models) in [
+            (
+                include_str!("data/openai-embeddings.json"),
+                openai_embedding_models(),
+            ),
+            (
+                include_str!("data/github-copilot-embeddings.json"),
+                github_copilot_embedding_models(),
+            ),
+        ] {
+            let groups: ModelGroups = serde_json::from_str(json).unwrap();
+            let raw: Vec<&Value> = groups.values().flat_map(|models| models.values()).collect();
+            assert_eq!(raw.len(), models.len());
+            for value in raw {
+                let model = &models[value["id"].as_str().unwrap()];
+                assert_eq!(
+                    normalize_numbers(serde_json::to_value(model).unwrap()),
+                    normalize_numbers(value.clone())
+                );
+            }
+        }
         assert_eq!(openrouter_image_models().len(), 59);
+        assert_eq!(openai_embedding_models().len(), 3);
+        assert_eq!(github_copilot_embedding_models().len(), 1);
         assert_eq!(anthropic_models().len(), 16);
         assert_eq!(openai_models().len(), 44);
         assert_eq!(github_copilot_models().len(), 34);

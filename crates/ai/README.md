@@ -46,7 +46,7 @@ adaptations and the few intentional differences are listed in
 | Auth | API keys from the environment or explicit, credential stores, OAuth for Anthropic (Claude Pro/Max) and GitHub Copilot (device code) |
 | Tests | the faux provider (scripted responses, no network) |
 | Image generation | OpenAI-compatible `/images/generations` (`openai-images`, ai.rs extra) and OpenRouter (`openrouter-images`) |
-| Embeddings | OpenAI-compatible `/embeddings` through the OpenAI and GitHub Copilot handles (ai.rs extra, not in Pi) |
+| Embeddings | `ModelType::Embedding` models and `Models::embed`, OpenAI-compatible `/embeddings` (`openai-embeddings`) for OpenAI and GitHub Copilot (ai.rs extra, not in Pi) |
 
 Other Pi providers (Google, Bedrock, Mistral, xAI, OpenRouter chat, Codex,
 ...) and classifier models are not ported.
@@ -842,28 +842,64 @@ adds image APIs through `CreateProviderOptions::images`.
 
 ## Embeddings (ai.rs extra)
 
-Not in Pi. OpenAI-compatible `/embeddings` through the OpenAI and GitHub
-Copilot handles; auth resolves like chat requests.
+Not in Pi. Embedding models are a model type of their own
+(`ModelType::Embedding`, `EmbeddingModel`, `AnyModel::Embedding`), designed
+like Pi's image models: `Models::embed(model, context, options)` resolves
+auth like `stream()`, dispatches to the provider that owns the model, and
+never fails. Errors arrive in the `EmbeddingsResult` (`stop_reason`
+`Error`/`Aborted` plus `error_message`), and `usage` carries the input
+tokens priced at the model's `cost.input`.
 
 ```rust,no_run
-use ai::{EmbeddingVector, Result, embed, embed_many, providers::openai};
+use ai::{
+    CreateModelsOptions, EmbeddingVector, EmbeddingsContext, EmbeddingsOptions, ModelType,
+    Result, providers::all::builtin_models,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let openai = openai::from_env()?;
-    let model = openai
-        .embedding_model("text-embedding-3-small")
-        .build_embedding()?;
+    let models = builtin_models(CreateModelsOptions::default());
+    let model = models
+        .get_model_of_type(ModelType::Embedding, "openai", "text-embedding-3-small")
+        .and_then(|model| model.as_embedding().cloned())
+        .expect("built-in embedding model");
 
-    let one = embed(model.clone(), "hello", None).await?;
-    if let EmbeddingVector::Float(vector) = &one.embedding {
-        println!("{} dimensions", vector.len());
+    let context = EmbeddingsContext {
+        input: vec!["first".to_string(), "second".to_string()],
+    };
+    let options = EmbeddingsOptions {
+        dimensions: Some(256),
+        ..Default::default()
+    };
+    let result = models.embed(&model, &context, options).await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
     }
-    let batch = embed_many(model, ["first", "second"], None).await?;
-    println!("{} embeddings", batch.embeddings.len());
+    for embedding in &result.embeddings {
+        if let EmbeddingVector::Float(vector) = embedding {
+            println!("{} dimensions", vector.len());
+        }
+    }
     Ok(())
 }
 ```
+
+All strings of `context.input` go in one request and come back in input
+order. `EmbeddingsOptions::dimensions` asks for shorter vectors;
+`provider_options` forwards `encodingFormat` (`"base64"` returns
+`EmbeddingVector::Base64`) and `user`.
+
+The built-in catalog has `text-embedding-3-small` (1536 dimensions),
+`text-embedding-3-large` (3072) and `text-embedding-ada-002` (1536) for
+`openai`, and `text-embedding-3-small` for `github-copilot`, all with an
+8192-token input limit. The one implementation is
+`api::openai_embeddings::openai_embeddings_api()` (`openai-embeddings`, the
+OpenAI-compatible `/embeddings` endpoint). A custom provider adds it, or its
+own `ProviderEmbeddings`, through `CreateProviderOptions::embeddings`, and
+lists `EmbeddingModel`s in `models`; an `EmbeddingModel` with an id outside
+the catalog works too, since the provider dispatches on `model.api`. The
+OpenAI provider handle registers it as well, including keyless handles for
+local servers such as Ollama.
 
 ## Durable (feature `durable`, on by default)
 
@@ -1055,7 +1091,11 @@ differences. Each is also documented on the module or item involved.
   classifiers; telemetry contexts; `session-resources`; the TypeBox
   `StringEnum` helper (tool parameters are plain JSON Schema, so an enum is
   `{"type": "string", "enum": [...]}`).
-- **ai.rs extras.** `embeddings`, the `openai-images` API, the provider
+- **ai.rs extras.** Embedding models (`ModelType::Embedding`,
+  `EmbeddingModel`, `Provider::embed`, `Models::embed`,
+  `CreateProviderOptions::embeddings`, the `openai-embeddings` API and its
+  catalog), designed like Pi's image models; `has_known_model_type` knows
+  `embedding`. The `openai-images` API, the provider
   handles, `github_copilot::get_oauth_api_key`, and `AgentToolBuilder` /
   `AgentOptions::builder` conveniences. `Debug` output of credentials,
   options, OAuth requests and responses, PKCE pairs and clients redacts

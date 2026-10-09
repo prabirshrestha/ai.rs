@@ -15,6 +15,11 @@
 //!   implementations that read JSON use
 //!   [`known_models_from_values`](crate::types::known_models_from_values).
 //!   Classifier models count as unknown.
+//! - ai.rs extra, not in Pi: embedding models (`ModelType::Embedding`),
+//!   [`Provider::embed`], [`Models::embed`] and
+//!   `CreateProviderOptions::embeddings`, designed like the image path
+//!   (`generate_images`). `create_provider()` accepts `embeddings` as the
+//!   only implementation map, and its error message names it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -40,14 +45,17 @@ use crate::models_store::{
 };
 use crate::types::{
     AnyModel, AssistantImages, AssistantMessage, BoxFuture, Context, DeferredCancelOptions,
-    DeferredFetchOptions, DeferredHandle, ImageModel, ImagesContext, ImagesOptions, Model,
-    ModelCostRates, ModelThinkingLevel, ModelType, ProviderEnv, ProviderHeaders, ProviderImages,
-    ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StreamOptions, TranscriptContext,
-    Usage, UsageCost,
+    DeferredFetchOptions, DeferredHandle, EmbeddingModel, EmbeddingsContext, EmbeddingsOptions,
+    EmbeddingsResult, ImageModel, ImagesContext, ImagesOptions, Model, ModelCostRates,
+    ModelThinkingLevel, ModelType, ProviderEmbeddings, ProviderEnv, ProviderHeaders,
+    ProviderImages, ProviderRequestOptions, ProviderStreams, SimpleStreamOptions, StreamOptions,
+    TranscriptContext, Usage, UsageCost,
 };
 use crate::utils::abort::{operation_signal, race_with_abort_signal};
 use crate::utils::event_stream::AssistantMessageEventStream;
-use crate::utils::model_operations::{assert_chat_model, image_error_result};
+use crate::utils::model_operations::{
+    assert_chat_model, embeddings_error_result, image_error_result,
+};
 
 use crate::utils::time::now_millis;
 use crate::utils::transcript::normalize_context;
@@ -150,6 +158,8 @@ pub type ModelsSimpleStreamOptions = ModelsOptions<SimpleStreamOptions>;
 pub type ModelsDeferredFetchOptions = ModelsOptions<DeferredFetchOptions>;
 pub type ModelsDeferredCancelOptions = ModelsOptions<DeferredCancelOptions>;
 pub type ModelsImagesOptions = ModelsOptions<ImagesOptions>;
+/// ai.rs extra: [`EmbeddingsOptions`] plus the `Models` request transforms.
+pub type ModelsEmbeddingsOptions = ModelsOptions<EmbeddingsOptions>;
 
 /// A provider is the concrete runtime unit. It owns id/name/base metadata,
 /// auth methods, model listing, and the operations its models support.
@@ -284,6 +294,30 @@ pub trait Provider: Send + Sync {
             false,
         )
     }
+
+    /// Whether [`Provider::embed`] is implemented (providers with embedding
+    /// models). ai.rs extra.
+    fn supports_embed(&self) -> bool {
+        false
+    }
+
+    /// Present when the provider supports embedding models. Never fails:
+    /// errors are reported in the result. ai.rs extra.
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        _context: EmbeddingsContext,
+        _options: EmbeddingsOptions,
+    ) -> EmbeddingsResult {
+        embeddings_error_result(
+            &model,
+            ModelsError::new(
+                ModelsErrorCode::Provider,
+                format!("Provider {} does not support embeddings", self.id()),
+            ),
+            false,
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -368,6 +402,7 @@ impl_auth_request_options!(ProviderRequestOptions);
 impl_auth_request_options!(SimpleStreamOptions, stream);
 impl_auth_request_options!(DeferredFetchOptions, request);
 impl_auth_request_options!(ImagesOptions);
+impl_auth_request_options!(EmbeddingsOptions);
 
 /// What [`Models::get_auth`] resolves auth for: a provider id, or a model
 /// (provider auth plus the model's static headers).
@@ -414,11 +449,22 @@ impl From<&ImageModel> for AuthTarget {
     }
 }
 
+impl From<&EmbeddingModel> for AuthTarget {
+    fn from(model: &EmbeddingModel) -> Self {
+        Self {
+            provider: model.provider.clone(),
+            model_headers: model.headers.clone().map(Into::into),
+            is_model: true,
+        }
+    }
+}
+
 impl From<&AnyModel> for AuthTarget {
     fn from(model: &AnyModel) -> Self {
         match model {
             AnyModel::Chat(model) => model.into(),
             AnyModel::Image(model) => model.into(),
+            AnyModel::Embedding(model) => model.into(),
         }
     }
 }
@@ -1445,6 +1491,45 @@ impl Models {
             image_error_result(model, error, aborted.is_some_and(|aborted| aborted()))
         })
     }
+
+    /// Embed `context.input` through the owning provider with auth resolved
+    /// like `stream()`. Never fails: unknown providers, unconfigured auth,
+    /// and providers without `embed` return an error [`EmbeddingsResult`].
+    /// ai.rs extra, the embedding counterpart of [`Models::generate_images`].
+    pub async fn embed(
+        &self,
+        model: &EmbeddingModel,
+        context: &EmbeddingsContext,
+        options: impl Into<ModelsEmbeddingsOptions>,
+    ) -> EmbeddingsResult {
+        let options = options.into();
+        let aborted = options
+            .options
+            .signal
+            .clone()
+            .map(|signal| move || signal.is_cancelled());
+        let result = async {
+            let provider = self.require_provider(&model.provider)?;
+            if !provider.supports_embed() {
+                return Err(models_error(
+                    ModelsErrorCode::Provider,
+                    format!("Provider {} does not support embeddings", model.provider),
+                ));
+            }
+            let (base_url, request_options) = self.apply_auth_to(model.into(), options).await?;
+            let mut request_model = model.clone();
+            if let Some(base_url) = base_url {
+                request_model.base_url = base_url;
+            }
+            Ok(provider
+                .embed(request_model, context.clone(), request_options)
+                .await)
+        }
+        .await;
+        result.unwrap_or_else(|error| {
+            embeddings_error_result(model, error, aborted.is_some_and(|aborted| aborted()))
+        })
+    }
 }
 
 /// `fetchModels`: fetch a dynamic model overlay of every type.
@@ -1483,6 +1568,8 @@ pub struct CreateProviderOptions {
     pub api: Option<ProviderApi>,
     /// Image-generation implementations keyed by `model.api`.
     pub images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
+    /// Embeddings implementations keyed by `model.api`. ai.rs extra.
+    pub embeddings: Option<IndexMap<String, Arc<dyn ProviderEmbeddings>>>,
 }
 
 struct CreatedProvider {
@@ -1499,6 +1586,7 @@ struct CreatedProvider {
     single: Option<Arc<dyn ProviderStreams>>,
     by_api: IndexMap<String, Arc<dyn ProviderStreams>>,
     images: Option<IndexMap<String, Arc<dyn ProviderImages>>>,
+    embeddings: Option<IndexMap<String, Arc<dyn ProviderEmbeddings>>>,
     fetch_deferred: bool,
     cancel_deferred: bool,
 }
@@ -1750,6 +1838,36 @@ impl Provider for CreatedProvider {
             }
         }
     }
+
+    fn supports_embed(&self) -> bool {
+        self.embeddings.is_some()
+    }
+
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        context: EmbeddingsContext,
+        options: EmbeddingsOptions,
+    ) -> EmbeddingsResult {
+        let implementation = self
+            .embeddings
+            .as_ref()
+            .and_then(|embeddings| embeddings.get(&model.api).cloned());
+        match implementation {
+            Some(implementation) => implementation.embed(model, context, options).await,
+            None => {
+                let message = format!(
+                    "Provider {} has no embeddings implementation for \"{}\"",
+                    self.id, model.api
+                );
+                embeddings_error_result(
+                    &model,
+                    ModelsError::new(ModelsErrorCode::Provider, message),
+                    false,
+                )
+            }
+        }
+    }
 }
 
 /// Builds a provider from parts. Built-in provider factories go through this.
@@ -1764,9 +1882,10 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
     };
     let streams: Vec<&Arc<dyn ProviderStreams>> = single.iter().chain(by_api.values()).collect();
     let images = input.images.filter(|images| !images.is_empty());
-    if streams.is_empty() && images.is_none() {
+    let embeddings = input.embeddings.filter(|embeddings| !embeddings.is_empty());
+    if streams.is_empty() && images.is_none() && embeddings.is_none() {
         return Err(Error::message(format!(
-            "Provider {}: at least one of \"api\", \"images\", or \"classifiers\" is required.",
+            "Provider {}: at least one of \"api\", \"images\", \"classifiers\", or \"embeddings\" is required.",
             input.id
         )));
     }
@@ -1787,6 +1906,7 @@ pub fn create_provider(input: CreateProviderOptions) -> Result<Arc<dyn Provider>
         single,
         by_api,
         images,
+        embeddings,
         fetch_deferred,
         cancel_deferred,
     }))
@@ -1925,8 +2045,9 @@ mod tests {
         OAuthCredential,
     };
     use crate::types::{
-        AssistantContent, AssistantMessageEvent, Message, ModelCost, ModelCostTier, ModelInput,
-        StopReason, UserMessage, has_known_model_type, known_models_from_values,
+        AssistantContent, AssistantMessageEvent, EmbeddingsStopReason, Message, ModelCost,
+        ModelCostTier, ModelInput, StopReason, UserMessage, has_known_model_type,
+        known_models_from_values,
     };
     use crate::utils::event_stream::AssistantMessageEventStream;
     use futures::StreamExt;
@@ -4422,7 +4543,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             error.to_string(),
-            "Provider empty: at least one of \"api\", \"images\", or \"classifiers\" is required."
+            "Provider empty: at least one of \"api\", \"images\", \"classifiers\", or \"embeddings\" is required."
         );
     }
 
@@ -4470,6 +4591,20 @@ mod tests {
             base_url: "https://example.test/v1".to_string(),
             input: vec![ModelInput::Text],
             output: vec![ModelInput::Image],
+            ..Default::default()
+        }
+    }
+
+    fn embedding_model(provider: &str, id: &str) -> EmbeddingModel {
+        EmbeddingModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: "test-embeddings".to_string(),
+            provider: provider.to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            input: vec![ModelInput::Text],
+            context_window: 8192,
+            dimensions: 3,
             ..Default::default()
         }
     }
@@ -5064,7 +5199,7 @@ mod tests {
                     ..Default::default()
                 })
             };
-        let message = "at least one of \"api\", \"images\", or \"classifiers\"";
+        let message = "at least one of \"api\", \"images\", \"classifiers\", or \"embeddings\"";
         for result in [
             create(None, None),
             create(Some(ProviderApi::ByApi(IndexMap::new())), None),
@@ -5079,6 +5214,7 @@ mod tests {
     {
         let chat = |id: &str| serde_json::to_value(test_model("dyn", id)).unwrap();
         let image = |id: &str| serde_json::to_value(image_model("dyn", id)).unwrap();
+        let embedding = |id: &str| serde_json::to_value(embedding_model("dyn", id)).unwrap();
         let with_type = |mut model: Value, model_type: &str| {
             model["type"] = json!(model_type);
             model
@@ -5088,7 +5224,8 @@ mod tests {
             "models": [
                 chat("stored-chat"),
                 image("stored-image"),
-                with_type(chat("future-embedding"), "embedding"),
+                embedding("stored-embedding"),
+                with_type(chat("future-audio"), "audio"),
                 with_type(image("future-video"), "video"),
             ],
         }))
@@ -5134,10 +5271,20 @@ mod tests {
             })
             .await;
         assert!(restored.errors.is_empty());
-        assert_eq!(ids(&models), ["stored-chat", "stored-image"]);
+        assert_eq!(
+            ids(&models),
+            ["stored-chat", "stored-image", "stored-embedding"]
+        );
+        assert_eq!(
+            models
+                .get_model_of_type(ModelType::Embedding, "dyn", "stored-embedding")
+                .and_then(|model| model.as_embedding().map(|model| model.dimensions)),
+            Some(3)
+        );
 
         *fetched.lock() = vec![
             chat("fetched-chat"),
+            embedding("fetched-embedding"),
             with_type(image("fetched-video"), "video"),
         ];
         let refreshed = models
@@ -5147,7 +5294,7 @@ mod tests {
             })
             .await;
         assert!(refreshed.errors.is_empty());
-        assert_eq!(ids(&models), ["fetched-chat"]);
+        assert_eq!(ids(&models), ["fetched-chat", "fetched-embedding"]);
         let entry = models_store
             .read("dyn", Default::default())
             .await
@@ -5155,11 +5302,273 @@ mod tests {
             .unwrap();
         assert_eq!(
             entry.models.iter().map(AnyModel::id).collect::<Vec<_>>(),
-            ["fetched-chat"]
+            ["fetched-chat", "fetched-embedding"]
         );
+        assert!(matches!(entry.models[1], AnyModel::Embedding(_)));
         // Classifier models are known to Pi but not ported.
         assert!(!has_known_model_type(&with_type(chat("c"), "classifier")));
         assert!(has_known_model_type(&json!({ "type": null })));
+    }
+
+    // Embeddings (ai.rs extra), mirroring the image tests above.
+
+    type EmbeddingCalls = Arc<Mutex<Vec<(EmbeddingModel, EmbeddingsOptions)>>>;
+
+    fn recording_embeddings(calls: &EmbeddingCalls) -> Arc<dyn ProviderEmbeddings> {
+        struct Recording(EmbeddingCalls);
+
+        #[async_trait]
+        impl ProviderEmbeddings for Recording {
+            async fn embed(
+                &self,
+                model: EmbeddingModel,
+                context: EmbeddingsContext,
+                options: EmbeddingsOptions,
+            ) -> EmbeddingsResult {
+                let result = EmbeddingsResult {
+                    embeddings: context
+                        .input
+                        .iter()
+                        .map(|input| crate::types::EmbeddingVector::Float(vec![input.len() as f32]))
+                        .collect(),
+                    ..EmbeddingsResult::empty_for(&model)
+                };
+                self.0.lock().push((model, options));
+                result
+            }
+        }
+
+        Arc::new(Recording(calls.clone()))
+    }
+
+    fn embedding_test_provider(
+        id: &str,
+        env_var: Option<&'static str>,
+        calls: &EmbeddingCalls,
+        embedding_apis: &[&str],
+    ) -> Arc<dyn Provider> {
+        create_provider(CreateProviderOptions {
+            id: id.to_string(),
+            auth: env_var_auth(env_var),
+            models: vec![
+                AnyModel::Chat(test_model(id, "chat")),
+                AnyModel::Image(image_model(id, "image")),
+                AnyModel::Embedding(embedding_model(id, "model-a")),
+            ],
+            embeddings: Some(
+                embedding_apis
+                    .iter()
+                    .map(|api| (api.to_string(), recording_embeddings(calls)))
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn embedding_of(models: &Models, provider: &str, id: &str) -> EmbeddingModel {
+        models
+            .get_model_of_type(ModelType::Embedding, provider, id)
+            .and_then(|model| model.as_embedding().cloned())
+            .unwrap()
+    }
+
+    fn embeddings_context() -> EmbeddingsContext {
+        EmbeddingsContext {
+            input: vec!["a".to_string(), "bcd".to_string()],
+        }
+    }
+
+    #[tokio::test]
+    async fn lists_embedding_models_through_typed_accessors_and_resolves_auth() {
+        let calls = EmbeddingCalls::default();
+        let models = create_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[("TEST_KEY", "env-key")])),
+            ..Default::default()
+        });
+        models.set_provider(embedding_test_provider(
+            "p1",
+            Some("TEST_KEY"),
+            &calls,
+            &["test-embeddings"],
+        ));
+        let ids = |list: Vec<AnyModel>| {
+            list.iter()
+                .map(|model| model.id().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(models.get_models_of_type(ModelType::Embedding, None)),
+            ["model-a"]
+        );
+        assert_eq!(
+            ids(models.get_all_models(Some("p1"))),
+            ["chat", "image", "model-a"]
+        );
+        assert_eq!(
+            models
+                .get_models(Some("p1"))
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat"]
+        );
+        assert!(
+            models
+                .get_model_of_type(ModelType::Embedding, "p1", "chat")
+                .is_none()
+        );
+        assert_eq!(
+            ids(models
+                .get_available_of_type(ModelType::Embedding, None, Default::default())
+                .await
+                .unwrap()),
+            ["model-a"]
+        );
+
+        let model = embedding_of(&models, "p1", "model-a");
+        let result = models
+            .embed(&model, &embeddings_context(), EmbeddingsOptions::default())
+            .await;
+        assert_eq!(result.stop_reason, EmbeddingsStopReason::Stop);
+        assert_eq!(result.embeddings.len(), 2);
+        assert_eq!(calls.lock()[0].1.api_key.as_deref(), Some("env-key"));
+
+        let transform: HeadersTransform = Arc::new(|mut headers: ProviderHeaders| {
+            headers.insert("x-extra", Some("2".to_string()));
+            Box::pin(async move { Ok(headers) })
+        });
+        models
+            .embed(
+                &model,
+                &embeddings_context(),
+                ModelsOptions {
+                    options: EmbeddingsOptions {
+                        api_key: Some("explicit".to_string()),
+                        ..Default::default()
+                    },
+                    transform_headers: Some(transform),
+                },
+            )
+            .await;
+        let calls = calls.lock();
+        assert_eq!(calls[1].1.api_key.as_deref(), Some("explicit"));
+        assert_eq!(
+            calls[1].1.headers,
+            Some([("x-extra", Some("2".to_string()))].into_iter().collect())
+        );
+    }
+
+    #[tokio::test]
+    async fn embeddings_return_error_results_instead_of_rejecting() {
+        let models = create_models(CreateModelsOptions {
+            auth_context: Some(fake_auth_context(&[])),
+            ..Default::default()
+        });
+        let ghost = models
+            .embed(
+                &embedding_model("ghost", "m"),
+                &embeddings_context(),
+                EmbeddingsOptions::default(),
+            )
+            .await;
+        assert_eq!(ghost.stop_reason, EmbeddingsStopReason::Error);
+        assert_eq!(ghost.provider, "ghost");
+        assert_eq!(ghost.api, "test-embeddings");
+        assert!(ghost.embeddings.is_empty());
+        assert_eq!(
+            ghost.error_message.as_deref(),
+            Some("Unknown provider: ghost")
+        );
+
+        let calls = EmbeddingCalls::default();
+        models.set_provider(embedding_test_provider(
+            "p1",
+            Some("MISSING"),
+            &calls,
+            &["test-embeddings"],
+        ));
+        let model = embedding_of(&models, "p1", "model-a");
+        let unconfigured = models
+            .embed(&model, &embeddings_context(), EmbeddingsOptions::default())
+            .await;
+        assert_eq!(unconfigured.stop_reason, EmbeddingsStopReason::Error);
+        assert_eq!(
+            unconfigured.error_message.as_deref(),
+            Some("Provider is not configured: p1")
+        );
+
+        let signal = CancellationToken::new();
+        signal.cancel();
+        let cancelled = models
+            .embed(
+                &model,
+                &embeddings_context(),
+                EmbeddingsOptions {
+                    signal: Some(signal),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(cancelled.stop_reason, EmbeddingsStopReason::Aborted);
+        assert!(calls.lock().is_empty());
+
+        models.set_provider(
+            create_provider(CreateProviderOptions {
+                id: "chat-only".to_string(),
+                auth: ambient_auth(),
+                models: vec![AnyModel::Embedding(embedding_model("chat-only", "e"))],
+                api: Some(chat_streams()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let unsupported = models
+            .embed(
+                &embedding_of(&models, "chat-only", "e"),
+                &embeddings_context(),
+                EmbeddingsOptions::default(),
+            )
+            .await;
+        assert_eq!(
+            unsupported.error_message.as_deref(),
+            Some("Provider chat-only does not support embeddings")
+        );
+
+        models.set_provider(embedding_test_provider(
+            "wrong-api",
+            None,
+            &calls,
+            &["other-embeddings"],
+        ));
+        let missing_api = models
+            .embed(
+                &embedding_of(&models, "wrong-api", "model-a"),
+                &embeddings_context(),
+                EmbeddingsOptions::default(),
+            )
+            .await;
+        assert_eq!(missing_api.stop_reason, EmbeddingsStopReason::Error);
+        assert_eq!(
+            missing_api.error_message.as_deref(),
+            Some("Provider wrong-api has no embeddings implementation for \"test-embeddings\"")
+        );
+        assert!(calls.lock().is_empty());
+
+        // `embeddings` alone is enough for create_provider.
+        assert!(
+            create_provider(CreateProviderOptions {
+                id: "embeddings-only".to_string(),
+                auth: ambient_auth(),
+                embeddings: Some(
+                    [("test-embeddings".to_string(), recording_embeddings(&calls))]
+                        .into_iter()
+                        .collect()
+                ),
+                ..Default::default()
+            })
+            .is_ok()
+        );
     }
 
     #[tokio::test]

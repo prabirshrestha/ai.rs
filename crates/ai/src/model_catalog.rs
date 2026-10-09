@@ -2,21 +2,19 @@
 //! (`{ api: { "<type>:<id>": model } }`) into id-keyed catalogs.
 //!
 //! Pi's mapped catalog types have no Rust equivalent; catalogs are ordered
-//! maps from model id to model. Classifier catalogs are not ported.
+//! maps from model id to model. Classifier catalogs are not ported; embedding
+//! catalogs are an ai.rs extra.
 
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use crate::types::{ImageModel, Model, ModelType};
+use crate::types::{EmbeddingModel, ImageModel, Model, ModelType};
 
 /// Generated catalog groups, keyed by api and then by `"<type>:<id>"`.
 pub type ModelGroups = IndexMap<String, IndexMap<String, Value>>;
 
 fn flatten_model_catalog(groups: &ModelGroups, model_type: ModelType) -> Vec<Value> {
-    let type_name = match model_type {
-        ModelType::Chat => "chat",
-        ModelType::Image => "image",
-    };
+    let type_name = model_type.as_str();
     groups
         .values()
         .flat_map(|models| models.values())
@@ -49,6 +47,20 @@ pub fn flatten_image_model_catalog(
         .collect()
 }
 
+/// Flatten the embedding models of a catalog. ai.rs extra, like
+/// `flattenImageModelCatalog()`.
+pub fn flatten_embedding_model_catalog(
+    _provider: &str,
+    groups: &ModelGroups,
+) -> serde_json::Result<IndexMap<String, EmbeddingModel>> {
+    flatten_model_catalog(groups, ModelType::Embedding)
+        .into_iter()
+        .map(|model| {
+            serde_json::from_value::<EmbeddingModel>(model).map(|model| (model.id.clone(), model))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -68,5 +80,18 @@ mod tests {
         assert_eq!(chat.keys().collect::<Vec<_>>(), vec!["a"]);
         let images = flatten_image_model_catalog("p", &groups).unwrap();
         assert_eq!(images.keys().collect::<Vec<_>>(), vec!["b"]);
+        let embedding_groups: ModelGroups = serde_json::from_value(json!({
+            "test-embeddings": {
+                "embedding:c": { "type": "embedding", "id": "c", "name": "C", "api": "test-embeddings", "provider": "p", "baseUrl": "", "input": ["text"], "cost": { "input": 0.02, "output": 0, "cacheRead": 0, "cacheWrite": 0 }, "contextWindow": 8192, "dimensions": 1536 }
+            }
+        }))
+        .unwrap();
+        let embeddings = flatten_embedding_model_catalog("p", &embedding_groups).unwrap();
+        assert_eq!(embeddings.keys().collect::<Vec<_>>(), vec!["c"]);
+        assert!(
+            flatten_chat_model_catalog("p", &embedding_groups)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

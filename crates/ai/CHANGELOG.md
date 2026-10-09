@@ -45,11 +45,24 @@ Providers and models:
   `ProviderCapabilities` and the old `Provider` trait are gone. The new
   `Provider` trait and the `Models` registry (`create_models`,
   `create_provider`, credential stores, `get_auth`, `login`) follow Pi.
-- `OpenAiApi` drops `Embeddings`/`Images`: use `OpenAi::embedding_model` and
-  `OpenAi::image_model`. The `.images()` builder flag is gone.
+- `OpenAiApi` drops `Embeddings`/`Images`: use `OpenAi::image_model` for
+  images and the embedding model type for embeddings. The `.images()` builder flag is gone.
 - `from_env()` errors are `Error::Models` (`ModelsErrorCode::Auth`); HTTP
   errors are `Error::ProviderHttp` and read `"<status> <body>"`.
 - `AssistantImages.usage` is an `Option`, and image outputs are `UserContent`.
+- Embeddings are a `Models` model type (ai.rs extra, designed like Pi's image
+  models). The free `embed`/`embed_many` functions, `OpenAi::embedding_model`/
+  `GitHubCopilot::embedding_model`, `EmbeddingModelBuilder`, `EmbeddingOptions`,
+  `Embedding`, `EmbeddingBatch`, `EmbeddingUsage`, `EmbeddingEncodingFormat`
+  and the `ai::embeddings` module are removed. Look the model up with
+  `models.get_model_of_type(ModelType::Embedding, "openai",
+  "text-embedding-3-small")` (or build an `EmbeddingModel`) and call
+  `Models::embed(&model, &EmbeddingsContext { input }, EmbeddingsOptions)`,
+  which returns an `EmbeddingsResult` with errors in-band and `usage` priced
+  from the catalog. `encoding_format` and `user` move to
+  `EmbeddingsOptions::provider_options` (`encodingFormat`, `user`). Without a
+  key, `openai-embeddings` fails like `openai-images` unless the provider
+  allows keyless requests (the OpenAI handle with a custom base URL does).
 - OAuth moved to `ai::auth::oauth` (re-exported at the root): `OAuthProvider`,
   `OAuthProviderInterface`, `poll_oauth_device_code_flow`,
   `get_oauth_providers`, `refresh_oauth_token` and the provider structs are
@@ -93,6 +106,12 @@ Agent:
   run like a thrown error in Pi. `ai::agent::ThinkingLevel` is Pi's agent
   thinking level (with `off`).
 - OpenRouter image models in the builtin providers.
+- Embedding models (ai.rs extra): `ModelType::Embedding`, `EmbeddingModel`,
+  `AnyModel::Embedding`, `ProviderEmbeddings`,
+  `CreateProviderOptions::embeddings`, `Provider::embed`, `Models::embed`,
+  `openai_embeddings_api()`, and catalog entries for OpenAI
+  (`text-embedding-3-small`, `text-embedding-3-large`,
+  `text-embedding-ada-002`) and GitHub Copilot (`text-embedding-3-small`).
 - `ai::durable` (feature `durable`, on by default): Pi Durable 1.0.2, with
   `ai::chord`. Durable conversations, tasks, submissions and documents over
   memory, JSONL (`durable-local-env`) or SQLite (`durable-sqlite`) storage;

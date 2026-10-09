@@ -11,8 +11,9 @@
 //! the rest Chat Completions. The [`GitHubCopilot`] handle falls back to the
 //! same family rules for ids missing from the catalog.
 //!
-//! ai.rs extras, not in Pi: the [`GitHubCopilot`] handle (including
-//! [`GitHubCopilot::embedding_model`], see [`crate::embeddings`]) and
+//! ai.rs extras, not in Pi: the `text-embedding-3-small` embedding model
+//! (`openai-embeddings`, with Copilot's static headers), the
+//! [`GitHubCopilot`] handle and
 //! [`get_oauth_api_key`] (pre-1.0 helper that refreshes an expired stored
 //! credential and returns the request token).
 
@@ -23,12 +24,13 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::catalog::github_copilot_models;
-use super::handle::{HandleAuth, HandleStreams, clean_key};
+use super::catalog::{github_copilot_embedding_models, github_copilot_models};
+use super::handle::{HandleAuth, HandleEmbeddings, HandleStreams, clean_key};
 use super::model_builder::ModelBuilder;
 use crate::Result;
 use crate::api::anthropic_messages::anthropic_messages_api;
 use crate::api::openai_completions::openai_completions_api;
+use crate::api::openai_embeddings::openai_embeddings_api;
 use crate::api::openai_responses::openai_responses_api;
 use crate::auth::oauth::load_github_copilot_oauth;
 pub use crate::auth::oauth::{
@@ -40,13 +42,15 @@ use crate::auth::{
     Credential, LazyOAuthInput, OAuthAuth, OAuthCredential, ProviderAuth, env_api_key_auth,
     lazy_oauth, models_error,
 };
-use crate::embeddings::{EmbeddingBinding, EmbeddingModelBuilder, bound_embedding_model};
 use crate::env_api_keys::get_env_api_key;
 use crate::models::{
     CreateModelsOptions, CreateProviderOptions, FilterModels, Models, Provider, ProviderApi,
     create_models, create_provider,
 };
-use crate::types::{AnyModel, KnownApi, Model, ModelInput, ProviderStreams};
+use crate::types::{
+    AnyModel, EmbeddingModel, KnownApi, KnownEmbeddingApi, Model, ModelInput, ProviderEmbeddings,
+    ProviderStreams,
+};
 use crate::utils::models_error::ModelsErrorCode;
 use crate::utils::time::now_millis;
 
@@ -148,6 +152,18 @@ fn copilot_apis(
     )
 }
 
+/// The embeddings implementations (ai.rs extra).
+fn copilot_embeddings(
+    wrap: impl Fn(Arc<dyn ProviderEmbeddings>) -> Arc<dyn ProviderEmbeddings>,
+) -> IndexMap<String, Arc<dyn ProviderEmbeddings>> {
+    [(
+        KnownEmbeddingApi::OpenaiEmbeddings.as_str().to_string(),
+        wrap(openai_embeddings_api()),
+    )]
+    .into_iter()
+    .collect()
+}
+
 /// `githubCopilotProvider()`.
 pub fn github_copilot_provider() -> Arc<dyn Provider> {
     github_copilot_provider_with_oauth(github_copilot_provider_oauth())
@@ -172,9 +188,16 @@ pub(crate) fn github_copilot_provider_with_oauth(oauth: Arc<dyn OAuthAuth>) -> A
             .values()
             .cloned()
             .map(AnyModel::Chat)
+            .chain(
+                github_copilot_embedding_models()
+                    .values()
+                    .cloned()
+                    .map(AnyModel::Embedding),
+            )
             .collect(),
         filter_models: Some(filter),
         api: Some(copilot_apis(|api| api)),
+        embeddings: Some(copilot_embeddings(|embeddings| embeddings)),
         ..Default::default()
     })
     .expect("the GitHub Copilot provider has API implementations")
@@ -239,7 +262,6 @@ pub struct GitHubCopilot {
     base_url: String,
     api: Option<GitHubCopilotApi>,
     models: Models,
-    http_client: Option<reqwest::Client>,
 }
 
 impl GitHubCopilot {
@@ -292,26 +314,6 @@ impl GitHubCopilot {
             model.api = api.id().to_string();
         }
         ModelBuilder::new(model)
-    }
-
-    /// ai.rs extra: an OpenAI-compatible embedding model served by Copilot
-    /// (`/embeddings`) with Copilot's static headers. OAuth credentials
-    /// resolve the per-account base URL like chat requests.
-    pub fn embedding_model(&self, id: &str) -> EmbeddingModelBuilder {
-        bound_embedding_model(
-            id,
-            &self.provider_id,
-            &self.base_url,
-            github_copilot_models()
-                .values()
-                .next()
-                .and_then(|model| model.headers.clone()),
-            EmbeddingBinding {
-                models: self.models.clone(),
-                http_client: self.http_client.clone(),
-                keyless: false,
-            },
-        )
     }
 }
 
@@ -399,9 +401,15 @@ impl GitHubCopilotBuilder {
                     ..model.clone()
                 })
             })
+            .chain(github_copilot_embedding_models().values().map(|model| {
+                AnyModel::Embedding(EmbeddingModel {
+                    provider: provider_id.clone(),
+                    base_url: base_url.clone(),
+                    ..model.clone()
+                })
+            }))
             .collect();
         let http_client = self.http_client;
-        let handle_client = http_client.clone();
         let filter: FilterModels = Arc::new(filter_available_models);
         let provider = create_provider(CreateProviderOptions {
             id: provider_id.clone(),
@@ -414,6 +422,9 @@ impl GitHubCopilotBuilder {
             models,
             filter_models: Some(filter),
             api: Some(copilot_apis(|api| HandleStreams::wrap(api, &http_client))),
+            embeddings: Some(copilot_embeddings(|embeddings| {
+                HandleEmbeddings::wrap(embeddings, &http_client)
+            })),
             ..Default::default()
         })?;
         let collection = create_models(CreateModelsOptions::default());
@@ -423,7 +434,6 @@ impl GitHubCopilotBuilder {
             base_url,
             api: self.api,
             models: collection,
-            http_client: handle_client,
         })
     }
 }

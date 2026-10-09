@@ -23,6 +23,8 @@ pub use crate::utils::event_stream::AssistantMessageEventStream;
 
 pub type Api = String;
 pub type ImageApi = String;
+/// ai.rs extra, not in Pi: the API id of an embedding model.
+pub type EmbeddingApi = String;
 pub type ProviderId = String;
 
 /// Image APIs with a built-in implementation (`KnownImageApi`).
@@ -40,6 +42,22 @@ impl KnownImageApi {
         match self {
             Self::OpenrouterImages => "openrouter-images",
             Self::OpenaiImages => "openai-images",
+        }
+    }
+}
+
+/// Embedding APIs with a built-in implementation. ai.rs extra, not in Pi:
+/// `OpenaiEmbeddings` is the OpenAI-compatible `/embeddings` endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnownEmbeddingApi {
+    OpenaiEmbeddings,
+}
+
+impl KnownEmbeddingApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiEmbeddings => "openai-embeddings",
         }
     }
 }
@@ -1768,12 +1786,24 @@ pub enum ModelInput {
 pub type ModelOutput = ModelInput;
 
 /// What a catalog entry is for (`ModelType`). Classifier models are not
-/// ported.
+/// ported. `Embedding` is an ai.rs extra, not in Pi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
     Chat,
     Image,
+    Embedding,
+}
+
+impl ModelType {
+    /// The serialized `type` name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Image => "image",
+            Self::Embedding => "embedding",
+        }
+    }
 }
 
 /// Chat model: usable with `Models::stream()` and friends (`Model<Api>`).
@@ -1875,14 +1905,51 @@ pub enum ImageModelType {
     Image,
 }
 
+/// Embedding model: usable with `Models::embed()` only. ai.rs extra, not in
+/// Pi; shaped like Pi's `ImageModel` and `ClassifierModel` (`BaseModel` plus
+/// the type's own fields).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModel {
+    pub id: String,
+    pub name: String,
+    pub api: EmbeddingApi,
+    pub provider: ProviderId,
+    pub base_url: String,
+    #[serde(rename = "type")]
+    pub model_type: EmbeddingModelType,
+    #[serde(default)]
+    pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
+    /// Price per million input tokens in `cost.input`; the other rates are 0.
+    pub cost: ModelCost,
+    /// Maximum tokens per input string.
+    pub context_window: u32,
+    /// Length of the returned vectors when the request does not ask for
+    /// other `dimensions`.
+    pub dimensions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<IndexMap<String, String>>,
+}
+
+/// The `"embedding"` discriminator of [`EmbeddingModel`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingModelType {
+    #[default]
+    Embedding,
+}
+
 /// Anything a provider can list (`AnyModel`). Narrow with
-/// `is_model_type()`.
+/// `is_model_type()`. `Embedding` is an ai.rs extra.
 #[allow(clippy::large_enum_variant)] // mirrors Pi's plain unions
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum AnyModel {
     Chat(Model),
     Image(ImageModel),
+    Embedding(EmbeddingModel),
 }
 
 impl<'de> Deserialize<'de> for AnyModel {
@@ -1895,6 +1962,9 @@ impl<'de> Deserialize<'de> for AnyModel {
             Some("image") => serde_json::from_value(value)
                 .map(Self::Image)
                 .map_err(de::Error::custom),
+            Some("embedding") => serde_json::from_value(value)
+                .map(Self::Embedding)
+                .map_err(de::Error::custom),
             _ => serde_json::from_value(value)
                 .map(Self::Chat)
                 .map_err(de::Error::custom),
@@ -1903,14 +1973,18 @@ impl<'de> Deserialize<'de> for AnyModel {
 }
 
 /// Pi's `hasKnownModelType()` on a raw model: a model without a `type` (or
-/// with `type: null`) is a chat model; `chat` and `image` are known.
+/// with `type: null`) is a chat model; `chat`, `image` and `embedding` are
+/// known.
 ///
 /// Divergence: Pi also knows `classifier`. Classifier models are not ported,
 /// so they are treated like any other type this version does not know.
+/// `embedding` is an ai.rs extra.
 pub fn has_known_model_type(model: &Value) -> bool {
     match model.get("type") {
         None | Some(Value::Null) => true,
-        Some(Value::String(model_type)) => matches!(model_type.as_str(), "chat" | "image"),
+        Some(Value::String(model_type)) => {
+            matches!(model_type.as_str(), "chat" | "image" | "embedding")
+        }
         Some(_) => false,
     }
 }
@@ -1946,6 +2020,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.id,
             Self::Image(model) => &model.id,
+            Self::Embedding(model) => &model.id,
         }
     }
 
@@ -1953,6 +2028,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.provider,
             Self::Image(model) => &model.provider,
+            Self::Embedding(model) => &model.provider,
         }
     }
 
@@ -1960,6 +2036,7 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.api,
             Self::Image(model) => &model.api,
+            Self::Embedding(model) => &model.api,
         }
     }
 
@@ -1967,20 +2044,28 @@ impl AnyModel {
         match self {
             Self::Chat(model) => &model.base_url,
             Self::Image(model) => &model.base_url,
+            Self::Embedding(model) => &model.base_url,
         }
     }
 
     pub fn as_chat(&self) -> Option<&Model> {
         match self {
             Self::Chat(model) => Some(model),
-            Self::Image(_) => None,
+            Self::Image(_) | Self::Embedding(_) => None,
         }
     }
 
     pub fn as_image(&self) -> Option<&ImageModel> {
         match self {
             Self::Image(model) => Some(model),
-            Self::Chat(_) => None,
+            Self::Chat(_) | Self::Embedding(_) => None,
+        }
+    }
+
+    pub fn as_embedding(&self) -> Option<&EmbeddingModel> {
+        match self {
+            Self::Embedding(model) => Some(model),
+            Self::Chat(_) | Self::Image(_) => None,
         }
     }
 }
@@ -1994,6 +2079,12 @@ impl From<Model> for AnyModel {
 impl From<ImageModel> for AnyModel {
     fn from(value: ImageModel) -> Self {
         Self::Image(value)
+    }
+}
+
+impl From<EmbeddingModel> for AnyModel {
+    fn from(value: EmbeddingModel) -> Self {
+        Self::Embedding(value)
     }
 }
 
@@ -2147,6 +2238,141 @@ pub trait ProviderImages: Send + Sync {
         context: ImagesContext,
         options: ImagesOptions,
     ) -> AssistantImages;
+}
+
+// Embeddings: ai.rs extra, not in Pi. The types mirror the image-generation
+// ones above (`ImagesContext` -> `EmbeddingsContext`, `AssistantImages` ->
+// `EmbeddingsResult`, `ProviderImages` -> `ProviderEmbeddings`).
+
+/// `EmbeddingsContext`: the strings to embed, in order. One request embeds
+/// them all.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingsContext {
+    pub input: Vec<String>,
+}
+
+/// A float vector, or a base64 string when the request asks for
+/// `encodingFormat: "base64"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingVector {
+    Float(Vec<f32>),
+    Base64(String),
+}
+
+/// `EmbeddingsStopReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmbeddingsStopReason {
+    Stop,
+    Error,
+    Aborted,
+}
+
+/// `EmbeddingsResult`: the result of an embeddings request, one vector per
+/// input string in input order. Failures are reported in-band (`stop_reason`
+/// error/aborted plus `error_message`), like [`AssistantImages`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingsResult {
+    pub api: EmbeddingApi,
+    pub provider: ProviderId,
+    pub model: String,
+    pub embeddings: Vec<EmbeddingVector>,
+    /// The model id the provider reports, when it differs from `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
+    /// Token usage and its cost at the model's catalog price, when the
+    /// service reports token counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    pub stop_reason: EmbeddingsStopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+impl EmbeddingsResult {
+    /// An empty `stop` result for `model`, stamped now.
+    pub fn empty_for(model: &EmbeddingModel) -> Self {
+        Self {
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            embeddings: Vec::new(),
+            response_model: None,
+            usage: None,
+            stop_reason: EmbeddingsStopReason::Stop,
+            error_message: None,
+            timestamp: crate::utils::time::now_millis(),
+        }
+    }
+}
+
+/// `onPayload` for embeddings requests (`ProviderRequestOptions<EmbeddingModel>`).
+pub type EmbeddingsPayloadHook =
+    Arc<dyn Fn(Value, &EmbeddingModel) -> BoxFuture<Result<Option<Value>>> + Send + Sync>;
+/// `onResponse` for embeddings requests.
+pub type EmbeddingsResponseHook =
+    Arc<dyn Fn(ProviderResponse, &EmbeddingModel) -> BoxFuture<Result<()>> + Send + Sync>;
+
+/// `EmbeddingsOptions`: request options for embeddings, shaped like
+/// [`ImagesOptions`]. API-specific options go in `provider_options`.
+#[derive(Clone, Default)]
+pub struct EmbeddingsOptions {
+    pub signal: Option<CancellationToken>,
+    pub api_key: Option<String>,
+    /// Optional HTTP client for provider requests (Pi's `fetch` option).
+    pub http_client: Option<reqwest::Client>,
+    pub env: Option<ProviderEnv>,
+    pub on_payload: Option<EmbeddingsPayloadHook>,
+    pub on_response: Option<EmbeddingsResponseHook>,
+    pub headers: Option<ProviderHeaders>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub max_retry_delay_ms: Option<u64>,
+    /// Optional metadata to include in API requests. Providers extract the
+    /// fields they understand and ignore the rest.
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    /// Requested vector length, for models that can shorten their output.
+    /// APIs that cannot apply it ignore it.
+    pub dimensions: Option<u32>,
+    /// API-specific options.
+    pub provider_options: serde_json::Map<String, Value>,
+}
+
+impl fmt::Debug for EmbeddingsOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbeddingsOptions")
+            .field("signal", &self.signal)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .as_ref()
+                    .map(crate::utils::headers::redacted_provider_headers),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("dimensions", &self.dimensions)
+            .field("provider_options", &self.provider_options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `ProviderEmbeddings`: the uniform contract of an embeddings API
+/// implementation, like [`ProviderImages`]. Never fails: errors are reported
+/// in the result.
+#[async_trait::async_trait]
+pub trait ProviderEmbeddings: Send + Sync {
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        context: EmbeddingsContext,
+        options: EmbeddingsOptions,
+    ) -> EmbeddingsResult;
 }
 
 #[cfg(test)]
@@ -2548,5 +2774,22 @@ mod tests {
         }))
         .unwrap();
         assert!(image.as_image().is_some());
+        let embedding: AnyModel = serde_json::from_value(json!({
+            "id": "e", "name": "E", "api": "openai-embeddings", "provider": "openai",
+            "baseUrl": "https://x", "type": "embedding", "input": ["text"],
+            "cost": { "input": 0.02, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 8192, "dimensions": 1536
+        }))
+        .unwrap();
+        let model = embedding.as_embedding().unwrap();
+        assert_eq!(model.dimensions, 1536);
+        assert_eq!(model.context_window, 8192);
+        assert!(has_known_model_type(
+            &serde_json::to_value(&embedding).unwrap()
+        ));
+        assert_eq!(
+            serde_json::to_value(&embedding).unwrap()["type"],
+            "embedding"
+        );
     }
 }

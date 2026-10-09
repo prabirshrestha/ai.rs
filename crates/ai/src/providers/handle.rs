@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::auth::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ModelAuth};
 use crate::types::{
-    AssistantImages, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, ImageModel,
-    ImagesContext, ImagesOptions, Model, ProviderHeaders, ProviderImages, ProviderStreams,
+    AssistantImages, DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, EmbeddingModel,
+    EmbeddingsContext, EmbeddingsOptions, EmbeddingsResult, ImageModel, ImagesContext,
+    ImagesOptions, Model, ProviderEmbeddings, ProviderHeaders, ProviderImages, ProviderStreams,
     SimpleStreamOptions, StreamOptions, TranscriptContext,
 };
 use crate::utils::event_stream::AssistantMessageEventStream;
@@ -177,6 +178,40 @@ impl ProviderImages for HandleImages {
             options.http_client.clone_from(&self.http_client);
         }
         self.inner.generate_images(model, context, options).await
+    }
+}
+
+/// Adds the handle's HTTP client to embeddings requests that do not bring
+/// their own.
+pub(crate) struct HandleEmbeddings {
+    pub inner: Arc<dyn ProviderEmbeddings>,
+    pub http_client: Option<reqwest::Client>,
+}
+
+impl HandleEmbeddings {
+    pub fn wrap(
+        inner: Arc<dyn ProviderEmbeddings>,
+        http_client: &Option<reqwest::Client>,
+    ) -> Arc<dyn ProviderEmbeddings> {
+        Arc::new(Self {
+            inner,
+            http_client: http_client.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl ProviderEmbeddings for HandleEmbeddings {
+    async fn embed(
+        &self,
+        model: EmbeddingModel,
+        context: EmbeddingsContext,
+        mut options: EmbeddingsOptions,
+    ) -> EmbeddingsResult {
+        if options.http_client.is_none() {
+            options.http_client.clone_from(&self.http_client);
+        }
+        self.inner.embed(model, context, options).await
     }
 }
 

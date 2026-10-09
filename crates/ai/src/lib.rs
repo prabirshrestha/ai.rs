@@ -12,7 +12,6 @@ pub mod auth;
 pub mod chord;
 #[cfg(feature = "durable")]
 pub mod durable;
-pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
 pub mod model_catalog;
@@ -51,10 +50,6 @@ pub use auth::{
     CredentialStore, InMemoryCredentialStore, LoginOptions, ModelAuth, OAuthAuth, OAuthCredential,
     OAuthCredentials, ProviderAuth, ProviderAuthInteraction, default_provider_auth_context,
     env_api_key_auth,
-};
-pub use embeddings::{
-    Embedding, EmbeddingBatch, EmbeddingEncodingFormat, EmbeddingModel, EmbeddingModelBuilder,
-    EmbeddingOptions, EmbeddingUsage, EmbeddingVector, embed, embed_many,
 };
 pub use env_api_keys::{find_env_keys, get_env_api_key};
 pub use error::{Error, Result};

@@ -1,7 +1,11 @@
 //! Port of `utils/model-operations.ts` (chat and image models; classifier
-//! models are not ported).
+//! models are not ported). The embedding helpers are ai.rs extras, shaped
+//! like the image ones.
 
-use crate::types::{AnyModel, AssistantImages, ImageModel, ImagesStopReason, Model, ModelType};
+use crate::types::{
+    AnyModel, AssistantImages, EmbeddingModel, EmbeddingsResult, EmbeddingsStopReason, ImageModel,
+    ImagesStopReason, Model, ModelType,
+};
 use crate::utils::models_error::{ModelsError, ModelsErrorCode};
 
 /// The type of a model. Models without `type` are chat models.
@@ -9,6 +13,7 @@ pub fn get_model_type(model: &AnyModel) -> ModelType {
     match model {
         AnyModel::Chat(model) => model.model_type.unwrap_or(ModelType::Chat),
         AnyModel::Image(_) => ModelType::Image,
+        AnyModel::Embedding(_) => ModelType::Embedding,
     }
 }
 
@@ -62,6 +67,38 @@ pub fn image_error_result(
     }
 }
 
+pub fn assert_embedding_model(model: &AnyModel) -> Result<&EmbeddingModel, ModelsError> {
+    match model {
+        AnyModel::Embedding(embedding) => Ok(embedding),
+        _ => Err(ModelsError::new(
+            ModelsErrorCode::Provider,
+            format!(
+                "Model {}/{} is not an embedding model",
+                model.provider(),
+                model.id()
+            ),
+        )),
+    }
+}
+
+/// An error (or aborted) [`EmbeddingsResult`] for `model`, like
+/// [`image_error_result`].
+pub fn embeddings_error_result(
+    model: &EmbeddingModel,
+    error: impl std::fmt::Display,
+    aborted: bool,
+) -> EmbeddingsResult {
+    EmbeddingsResult {
+        stop_reason: if aborted {
+            EmbeddingsStopReason::Aborted
+        } else {
+            EmbeddingsStopReason::Error
+        },
+        error_message: Some(error.to_string()),
+        ..EmbeddingsResult::empty_for(model)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +119,10 @@ mod tests {
         let image = AnyModel::Image(ImageModel::default());
         assert_eq!(get_model_type(&image), ModelType::Image);
         assert!(assert_chat_model(&image).is_err());
+        let embedding = AnyModel::Embedding(EmbeddingModel::default());
+        assert_eq!(get_model_type(&embedding), ModelType::Embedding);
+        assert!(assert_embedding_model(&embedding).is_ok());
+        assert!(assert_embedding_model(&image).is_err());
+        assert!(assert_image_model(&embedding).is_err());
     }
 }
