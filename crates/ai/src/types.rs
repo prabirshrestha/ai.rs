@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
@@ -300,6 +301,262 @@ pub struct EmbeddingOptions {
     pub dimensions: Option<u32>,
     pub encoding_format: Option<EmbeddingEncodingFormat>,
     pub user: Option<String>,
+    /// Overrides the model's `compat.openai_embeddings.media_format` for
+    /// this call.
+    pub media_format: Option<EmbeddingMediaFormat>,
+}
+
+impl EmbeddingOptions {
+    pub fn builder() -> EmbeddingOptionsBuilder {
+        EmbeddingOptionsBuilder::default()
+    }
+}
+
+/// Builds [`EmbeddingOptions`].
+///
+/// ```
+/// use ai::{EmbeddingEncodingFormat, EmbeddingOptions};
+///
+/// let options = EmbeddingOptions::builder()
+///     .dimensions(512)
+///     .encoding_format(EmbeddingEncodingFormat::Float)
+///     .timeout_ms(30_000)
+///     .build();
+/// assert_eq!(options.dimensions, Some(512));
+/// ```
+#[derive(Clone, Default)]
+pub struct EmbeddingOptionsBuilder {
+    options: EmbeddingOptions,
+}
+
+impl EmbeddingOptionsBuilder {
+    /// Asks for vectors of this size (models trained with Matryoshka
+    /// representation learning).
+    pub fn dimensions(mut self, dimensions: u32) -> Self {
+        self.options.dimensions = Some(dimensions);
+        self
+    }
+
+    pub fn encoding_format(mut self, encoding_format: EmbeddingEncodingFormat) -> Self {
+        self.options.encoding_format = Some(encoding_format);
+        self
+    }
+
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.options.user = Some(user.into());
+        self
+    }
+
+    /// Overrides the model's media format for this call.
+    pub fn media_format(mut self, media_format: EmbeddingMediaFormat) -> Self {
+        self.options.media_format = Some(media_format);
+        self
+    }
+
+    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.options.base.api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.options.base.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.options.base.max_retries = Some(max_retries);
+        self
+    }
+
+    pub fn headers(mut self, headers: ProviderHeaders) -> Self {
+        self.options.base.headers = headers;
+        self
+    }
+
+    pub fn cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.options.base.cancellation_token = Some(token);
+        self
+    }
+
+    pub fn http_client(mut self, http_client: reqwest::Client) -> Self {
+        self.options.base.http_client = Some(http_client);
+        self
+    }
+
+    pub fn build(self) -> EmbeddingOptions {
+        self.options
+    }
+}
+
+/// One thing to embed: text, or the encoded bytes of an image or a sound.
+///
+/// Images and audio need an embedding model that declares them in
+/// `Model.input` (see [`ModelBuilder::input`](crate::ModelBuilder::input)).
+#[derive(Clone, PartialEq, Eq)]
+pub enum EmbeddingInput {
+    Text(String),
+    /// An encoded image (PNG, JPEG, WebP, ...) and its `image/*` MIME type.
+    Image {
+        data: Bytes,
+        mime_type: String,
+    },
+    /// An encoded sound (WAV, MP3, ...) and its `audio/*` MIME type.
+    Audio {
+        data: Bytes,
+        mime_type: String,
+    },
+}
+
+impl EmbeddingInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    pub fn image(data: impl Into<Bytes>, mime_type: impl Into<String>) -> Self {
+        Self::Image {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+
+    pub fn audio(data: impl Into<Bytes>, mime_type: impl Into<String>) -> Self {
+        Self::Audio {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+
+    /// The model input this needs.
+    #[must_use]
+    pub fn modality(&self) -> ModelInput {
+        match self {
+            Self::Text(_) => ModelInput::Text,
+            Self::Image { .. } => ModelInput::Image,
+            Self::Audio { .. } => ModelInput::Audio,
+        }
+    }
+
+    /// Bytes of content: UTF-8 text, or the encoded media before base64.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Image { data, .. } | Self::Audio { data, .. } => data.len(),
+        }
+    }
+
+    /// Checks what the server would reject anyway: empty content, or a MIME
+    /// type that does not match the kind.
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        let (kind, mime_type, prefix) = match self {
+            Self::Text(text) if text.is_empty() => {
+                return Err(crate::Error::Validation(
+                    "embedding text input is empty".to_string(),
+                ));
+            }
+            Self::Text(_) => return Ok(()),
+            Self::Image { mime_type, .. } => ("image", mime_type, "image/"),
+            Self::Audio { mime_type, .. } => ("audio", mime_type, "audio/"),
+        };
+        if self.byte_len() == 0 {
+            return Err(crate::Error::Validation(format!(
+                "embedding {kind} input is empty"
+            )));
+        }
+        let essence = mime_type.split(';').next().unwrap_or_default().trim();
+        if !essence.to_ascii_lowercase().starts_with(prefix) || mime_type.contains(',') {
+            return Err(crate::Error::Validation(format!(
+                "embedding {kind} input has MIME type {mime_type:?}, expected {prefix}*"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for EmbeddingInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            Self::Image { data, mime_type } => f
+                .debug_struct("Image")
+                .field("mime_type", mime_type)
+                .field("bytes", &data.len())
+                .finish(),
+            Self::Audio { data, mime_type } => f
+                .debug_struct("Audio")
+                .field("mime_type", mime_type)
+                .field("bytes", &data.len())
+                .finish(),
+        }
+    }
+}
+
+impl From<String> for EmbeddingInput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for EmbeddingInput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<&String> for EmbeddingInput {
+    fn from(text: &String) -> Self {
+        Self::Text(text.clone())
+    }
+}
+
+impl From<Box<str>> for EmbeddingInput {
+    fn from(text: Box<str>) -> Self {
+        Self::Text(text.into())
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for EmbeddingInput {
+    fn from(text: std::borrow::Cow<'_, str>) -> Self {
+        Self::Text(text.into_owned())
+    }
+}
+
+/// A chat image (base64) as an embedding input.
+impl TryFrom<ImageContent> for EmbeddingInput {
+    type Error = crate::Error;
+
+    fn try_from(image: ImageContent) -> crate::Result<Self> {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(image.data.as_bytes())
+            .map_err(|error| {
+                crate::Error::Validation(format!("image data is not base64: {error}"))
+            })?;
+        Ok(Self::image(data, image.mime_type))
+    }
+}
+
+/// The request shape for image and audio inputs. OpenAI's API has none, so
+/// servers differ. Set it on the model with
+/// [`ModelBuilder::embedding_media_format`](crate::ModelBuilder::embedding_media_format).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmbeddingMediaFormat {
+    /// llama.cpp's `llama-server` (also through LiteLLM, which passes the
+    /// items on): every input is an `input` item, text as a string and media
+    /// as OpenAI chat content parts, `{"content": [{"type": "image_url", ...}]}`
+    /// or `input_audio`.
+    #[default]
+    ContentParts,
+    /// vLLM: every input, text too, is one conversation in a batched
+    /// `messages` list, `[[{"role": "user", "content": [part]}], ...]`, so
+    /// text and media get the same chat template.
+    ChatMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,22 +568,29 @@ pub enum EmbeddingVector {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingUsage {
+    #[serde(default)]
     pub prompt_tokens: u32,
+    #[serde(default)]
     pub total_tokens: u32,
+    /// Prompt tokens the server served from its cache, when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Embedding {
     pub embedding: EmbeddingVector,
     pub model: String,
-    pub usage: EmbeddingUsage,
+    /// `None` when the server sent no `usage`.
+    pub usage: Option<EmbeddingUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingBatch {
     pub embeddings: Vec<EmbeddingVector>,
     pub model: String,
-    pub usage: EmbeddingUsage,
+    /// `None` when the server sent no `usage`.
+    pub usage: Option<EmbeddingUsage>,
 }
 
 #[derive(Clone, Default)]
@@ -1163,6 +1427,7 @@ impl ContextBuilder {
 pub enum ModelInput {
     Text,
     Image,
+    Audio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1335,6 +1600,17 @@ pub struct ModelCompat {
     pub openai_responses: OpenAIResponsesCompat,
     #[serde(flatten)]
     pub anthropic_messages: AnthropicMessagesCompat,
+    #[serde(flatten)]
+    pub openai_embeddings: OpenAIEmbeddingsCompat,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIEmbeddingsCompat {
+    /// How this server takes image and audio embedding inputs. `None` is
+    /// `ContentParts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_media_format: Option<EmbeddingMediaFormat>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2119,6 +2395,7 @@ mod tests {
                 supports_tool_references: Some(true),
                 ..Default::default()
             },
+            openai_embeddings: OpenAIEmbeddingsCompat::default(),
         };
         let value = serde_json::to_value(&compat).unwrap();
         assert_eq!(value["deferredToolsMode"], json!("kimi"));

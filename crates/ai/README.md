@@ -569,7 +569,7 @@ requests use `ImagesStopReason::Aborted`.
 
 ## Embeddings
 
-Use `embed` for one string and `embed_many` for multiple strings. Both call
+Use `embed` for one input and `embed_many` for multiple inputs. Both call
 the OpenAI-compatible `/embeddings` endpoint. A single input is sent upstream
 as a one-item array for compatibility with providers that reject scalar input.
 
@@ -586,6 +586,55 @@ async fn main() -> Result<()> {
     let one = embed(model.clone(), "hello", None).await?;
     let batch = embed_many(model, ["first", "second"], None).await?;
     println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
+    Ok(())
+}
+```
+
+`embed` and `embed_many` return `usage: None` when the server sends no
+`usage` object. Options have a builder:
+`EmbeddingOptions::builder().dimensions(512).timeout_ms(30_000).build()`.
+
+### Images and audio
+
+Multimodal embedding models (EmbeddingGemma 2, Qwen3-VL-Embedding) also embed
+images and audio into the same space as text. Declare the inputs on the
+model; `embed_many` rejects image or audio input for a model that does not
+declare it, before any request. OpenAI's API has no request shape for media,
+so `embedding_media_format` says which one the server uses:
+
+- `ContentParts` (default): llama.cpp's `llama-server`, also through LiteLLM.
+  Each media input is an `input` item of OpenAI chat content parts
+  (`image_url`, `input_audio`) next to the text strings.
+- `ChatMessages`: vLLM. Every input, text too, is one conversation in a
+  batched `messages` list, so text and media get the same chat template.
+
+Calls with only text use the plain `input` array in both formats.
+
+```rust
+use ai::{EmbeddingInput, EmbeddingMediaFormat, ModelInput, embed_many, providers::openai};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let server = openai::builder()
+        .base_url("http://localhost:8080/v1")
+        .build()?;
+    let model = server
+        .embedding_model("embeddinggemma-2")
+        .input(vec![ModelInput::Text, ModelInput::Image, ModelInput::Audio])
+        .embedding_media_format(EmbeddingMediaFormat::ContentParts)
+        .build_embedding()?;
+
+    let photo = std::fs::read("photo.jpg")?;
+    let batch = embed_many(
+        model,
+        [
+            EmbeddingInput::text("a red bicycle"),
+            EmbeddingInput::image(photo, "image/jpeg"),
+        ],
+        None,
+    )
+    .await?;
+    println!("{} vectors", batch.embeddings.len());
     Ok(())
 }
 ```
