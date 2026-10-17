@@ -1,3 +1,5 @@
+//! `Date.now()`.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_millis() -> u64 {

@@ -1,0 +1,560 @@
+{
+	"seqs": {
+		"root": 1,
+		"task": 2,
+		"documents": 3,
+		"deltas": 4,
+		"checkpoint": 5,
+		"tail": 6,
+		"fork": 7
+	},
+	"minted": 16,
+	"conversation4": {
+		"id": 4,
+		"parent": {
+			"conversationId": 1,
+			"at": 2
+		}
+	},
+	"conversation6": {
+		"id": 6,
+		"owner": {
+			"conversationId": 1,
+			"taskId": 5
+		}
+	},
+	"scanConversations": {
+		"items": [
+			{
+				"id": 1
+			},
+			{
+				"id": 4,
+				"parent": {
+					"conversationId": 1,
+					"at": 2
+				}
+			}
+		],
+		"next": {
+			"after": 4
+		}
+	},
+	"scanConversationsByTask": {
+		"items": [
+			{
+				"id": 6,
+				"owner": {
+					"conversationId": 1,
+					"taskId": 5
+				}
+			}
+		]
+	},
+	"entry2": {
+		"entry": {
+			"id": 2,
+			"conversationId": 1,
+			"kind": "pi.user",
+			"model": [
+				{
+					"role": "user",
+					"content": "hi",
+					"timestamp": 1
+				}
+			],
+			"data": {
+				"text": "hi"
+			}
+		},
+		"commitSeq": 1
+	},
+	"entry2InFork": {
+		"entry": {
+			"id": 2,
+			"conversationId": 1,
+			"kind": "pi.user",
+			"model": [
+				{
+					"role": "user",
+					"content": "hi",
+					"timestamp": 1
+				}
+			],
+			"data": {
+				"text": "hi"
+			}
+		},
+		"commitSeq": 1
+	},
+	"entry3InFork": null,
+	"scanForkEntries": {
+		"items": [
+			{
+				"id": 15,
+				"conversationId": 4,
+				"kind": "fork.marker",
+				"head": 7
+			},
+			{
+				"id": 7,
+				"conversationId": 4,
+				"kind": "fork.entry",
+				"data": {
+					"é": [
+						"😀",
+						1.5,
+						true
+					]
+				},
+				"byTaskId": 5
+			},
+			{
+				"id": 2,
+				"conversationId": 1,
+				"kind": "pi.user",
+				"model": [
+					{
+						"role": "user",
+						"content": "hi",
+						"timestamp": 1
+					}
+				],
+				"data": {
+					"text": "hi"
+				}
+			}
+		]
+	},
+	"rootHeadMarker": {
+		"id": 3,
+		"conversationId": 1,
+		"kind": "marker",
+		"head": 2,
+		"data": null
+	},
+	"forkHeadMarkerBefore": null,
+	"task5": {
+		"id": 5,
+		"conversationId": 1,
+		"kind": "fixture.task",
+		"version": 2,
+		"input": {
+			"prompt": "héllo 😀"
+		},
+		"background": false,
+		"abortRequested": false,
+		"state": {
+			"status": "terminal",
+			"outcome": {
+				"status": "completed",
+				"result": {
+					"ok": "✓"
+				}
+			}
+		}
+	},
+	"terminalTasks": {
+		"items": [
+			{
+				"id": 5,
+				"conversationId": 1,
+				"kind": "fixture.task",
+				"version": 2,
+				"input": {
+					"prompt": "héllo 😀"
+				},
+				"background": false,
+				"abortRequested": false,
+				"state": {
+					"status": "terminal",
+					"outcome": {
+						"status": "completed",
+						"result": {
+							"ok": "✓"
+						}
+					}
+				}
+			}
+		]
+	},
+	"submission8": {
+		"id": 8,
+		"conversationId": 1,
+		"requestId": "req-é\u0000",
+		"type": "input",
+		"status": "done",
+		"entry": 2,
+		"answer": 3
+	},
+	"submissionByRequest": {
+		"id": 8,
+		"conversationId": 1,
+		"requestId": "req-é\u0000",
+		"type": "input",
+		"status": "done",
+		"entry": 2,
+		"answer": 3
+	},
+	"doneSubmissions": {
+		"items": [
+			{
+				"id": 8,
+				"conversationId": 1,
+				"requestId": "req-é\u0000",
+				"type": "input",
+				"status": "done",
+				"entry": 2,
+				"answer": 3
+			},
+			{
+				"id": 9,
+				"conversationId": 1,
+				"type": "write",
+				"status": "done",
+				"entry": 3
+			}
+		]
+	},
+	"findHistoryCurrent": {
+		"id": 10,
+		"kind": "fixture.history",
+		"scope": {
+			"kind": "conversation",
+			"conversationId": 1
+		},
+		"history": "rewindable",
+		"fork": "asOf",
+		"createdAt": 3
+	},
+	"findFamilyMember": {
+		"id": 12,
+		"kind": "fixture.family",
+		"key": "member/é",
+		"scope": {
+			"kind": "task",
+			"taskId": 5
+		},
+		"createdAt": 3
+	},
+	"findRetiredBefore": {
+		"id": 13,
+		"kind": "fixture.retired",
+		"scope": {
+			"kind": "session"
+		},
+		"createdAt": 3,
+		"retiredAt": 4
+	},
+	"findRetiredAfter": null,
+	"historyAtDocuments": {
+		"record": {
+			"id": 10,
+			"kind": "fixture.history",
+			"scope": {
+				"kind": "conversation",
+				"conversationId": 1
+			},
+			"history": "rewindable",
+			"fork": "asOf",
+			"createdAt": 3
+		},
+		"version": 1,
+		"value": {
+			"count": 0,
+			"text": "ab",
+			"rows": []
+		},
+		"deltasSinceBase": 0
+	},
+	"historyAtDeltas": {
+		"record": {
+			"id": 10,
+			"kind": "fixture.history",
+			"scope": {
+				"kind": "conversation",
+				"conversationId": 1
+			},
+			"history": "rewindable",
+			"fork": "asOf",
+			"createdAt": 3
+		},
+		"version": 1,
+		"value": {
+			"count": 1,
+			"text": "ab😀cd",
+			"rows": [
+				{
+					"id": 1
+				},
+				{
+					"id": 2
+				}
+			]
+		},
+		"deltasSinceBase": 1
+	},
+	"historyCurrent": {
+		"record": {
+			"id": 10,
+			"kind": "fixture.history",
+			"scope": {
+				"kind": "conversation",
+				"conversationId": 1
+			},
+			"history": "rewindable",
+			"fork": "asOf",
+			"createdAt": 3
+		},
+		"version": 1,
+		"value": {
+			"text": "😀cd",
+			"rows": [
+				{
+					"id": 1
+				},
+				{
+					"id": 2
+				}
+			]
+		},
+		"deltasSinceBase": 1
+	},
+	"sessionCurrent": {
+		"record": {
+			"id": 11,
+			"kind": "fixture.session",
+			"scope": {
+				"kind": "session"
+			},
+			"createdAt": 3
+		},
+		"version": 4,
+		"value": {
+			"n": 2,
+			"migrated": true
+		},
+		"deltasSinceBase": 0
+	},
+	"copiedCurrent": {
+		"record": {
+			"id": 14,
+			"kind": "fixture.history",
+			"scope": {
+				"kind": "conversation",
+				"conversationId": 4
+			},
+			"history": "rewindable",
+			"fork": "asOf",
+			"createdAt": 7
+		},
+		"version": 1,
+		"value": {
+			"count": 1,
+			"text": "ab😀cd",
+			"rows": [
+				{
+					"id": 1
+				},
+				{
+					"id": 2
+				}
+			]
+		},
+		"deltasSinceBase": 0
+	},
+	"sessionDocuments": {
+		"items": [
+			{
+				"id": 11,
+				"kind": "fixture.session",
+				"scope": {
+					"kind": "session"
+				},
+				"createdAt": 3
+			},
+			{
+				"id": 13,
+				"kind": "fixture.retired",
+				"scope": {
+					"kind": "session"
+				},
+				"createdAt": 3,
+				"retiredAt": 4
+			}
+		]
+	},
+	"rootDocuments": {
+		"items": [
+			{
+				"id": 10,
+				"kind": "fixture.history",
+				"scope": {
+					"kind": "conversation",
+					"conversationId": 1
+				},
+				"history": "rewindable",
+				"fork": "asOf",
+				"createdAt": 3
+			}
+		]
+	},
+	"schema": [
+		{
+			"type": "table",
+			"name": "conversations",
+			"tbl_name": "conversations",
+			"sql": "CREATE TABLE conversations (\n\t\tid INTEGER PRIMARY KEY,\n\t\towner_conversation_id INTEGER,\n\t\towner_task_id INTEGER,\n\t\trecord TEXT NOT NULL CHECK (json_valid(record))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "conversations_by_owner_conversation",
+			"tbl_name": "conversations",
+			"sql": "CREATE INDEX conversations_by_owner_conversation ON conversations (owner_conversation_id, id)"
+		},
+		{
+			"type": "index",
+			"name": "conversations_by_owner_task",
+			"tbl_name": "conversations",
+			"sql": "CREATE INDEX conversations_by_owner_task ON conversations (owner_task_id, id)"
+		},
+		{
+			"type": "table",
+			"name": "document_revisions",
+			"tbl_name": "document_revisions",
+			"sql": "CREATE TABLE document_revisions (\n\t\tdocument_id INTEGER NOT NULL,\n\t\tseq INTEGER NOT NULL,\n\t\tkind TEXT NOT NULL CHECK (kind IN ('base', 'delta')),\n\t\tversion INTEGER NOT NULL,\n\t\tcontent TEXT NOT NULL CHECK (json_valid(content)),\n\t\tPRIMARY KEY (document_id, seq)\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "document_revisions_by_kind",
+			"tbl_name": "document_revisions",
+			"sql": "CREATE INDEX document_revisions_by_kind ON document_revisions (document_id, kind, seq DESC)"
+		},
+		{
+			"type": "table",
+			"name": "documents",
+			"tbl_name": "documents",
+			"sql": "CREATE TABLE documents (\n\t\tid INTEGER PRIMARY KEY,\n\t\tkind TEXT NOT NULL,\n\t\tfamily INTEGER NOT NULL CHECK (family IN (0, 1)),\n\t\tkey_value TEXT NOT NULL,\n\t\tscope_kind TEXT NOT NULL CHECK (scope_kind IN ('session', 'conversation', 'task')),\n\t\towner_id INTEGER NOT NULL,\n\t\tcreated_at INTEGER NOT NULL,\n\t\tretired_at INTEGER,\n\t\trecord TEXT NOT NULL CHECK (json_valid(record))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "documents_by_address",
+			"tbl_name": "documents",
+			"sql": "CREATE INDEX documents_by_address\n\t\tON documents (kind, scope_kind, owner_id, family, key_value, created_at DESC, retired_at)"
+		},
+		{
+			"type": "index",
+			"name": "documents_by_scope",
+			"tbl_name": "documents",
+			"sql": "CREATE INDEX documents_by_scope ON documents (scope_kind, owner_id, id)"
+		},
+		{
+			"type": "index",
+			"name": "documents_by_scope_kind",
+			"tbl_name": "documents",
+			"sql": "CREATE INDEX documents_by_scope_kind ON documents (scope_kind, owner_id, kind, id)"
+		},
+		{
+			"type": "table",
+			"name": "durable_metadata",
+			"tbl_name": "durable_metadata",
+			"sql": "CREATE TABLE durable_metadata (\n\t\tsingleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n\t\tnext_id TEXT NOT NULL,\n\t\tnext_seq INTEGER NOT NULL\n\t) STRICT"
+		},
+		{
+			"type": "table",
+			"name": "durable_schema",
+			"tbl_name": "durable_schema",
+			"sql": "CREATE TABLE durable_schema (\n\t\t\tsingleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n\t\t\tversion INTEGER NOT NULL CHECK (version >= 0)\n\t\t) STRICT"
+		},
+		{
+			"type": "table",
+			"name": "entries",
+			"tbl_name": "entries",
+			"sql": "CREATE TABLE entries (\n\t\tid INTEGER PRIMARY KEY,\n\t\tconversation_id INTEGER NOT NULL,\n\t\thead INTEGER,\n\t\tcommit_seq INTEGER NOT NULL,\n\t\trecord TEXT NOT NULL CHECK (json_valid(record))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "entries_by_conversation",
+			"tbl_name": "entries",
+			"sql": "CREATE INDEX entries_by_conversation ON entries (conversation_id, id DESC)"
+		},
+		{
+			"type": "index",
+			"name": "entry_heads_by_conversation",
+			"tbl_name": "entries",
+			"sql": "CREATE INDEX entry_heads_by_conversation ON entries (conversation_id, id DESC) WHERE head IS NOT NULL"
+		},
+		{
+			"type": "table",
+			"name": "record_ids",
+			"tbl_name": "record_ids",
+			"sql": "CREATE TABLE record_ids (\n\t\tid INTEGER PRIMARY KEY,\n\t\trecord_type TEXT NOT NULL CHECK (record_type IN ('conversation', 'entry', 'task', 'submission', 'document'))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "sqlite_autoindex_document_revisions_1",
+			"tbl_name": "document_revisions",
+			"sql": null
+		},
+		{
+			"type": "table",
+			"name": "submissions",
+			"tbl_name": "submissions",
+			"sql": "CREATE TABLE submissions (\n\t\tid INTEGER PRIMARY KEY,\n\t\tconversation_id INTEGER NOT NULL,\n\t\trequest_id TEXT,\n\t\tstatus TEXT NOT NULL CHECK (status IN ('queued', 'placed', 'done', 'unanswered')),\n\t\trecord TEXT NOT NULL CHECK (json_valid(record))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "submissions_by_conversation",
+			"tbl_name": "submissions",
+			"sql": "CREATE INDEX submissions_by_conversation ON submissions (conversation_id, id)"
+		},
+		{
+			"type": "index",
+			"name": "submissions_by_request",
+			"tbl_name": "submissions",
+			"sql": "CREATE INDEX submissions_by_request ON submissions (conversation_id, request_id)"
+		},
+		{
+			"type": "index",
+			"name": "submissions_by_status",
+			"tbl_name": "submissions",
+			"sql": "CREATE INDEX submissions_by_status ON submissions (status, id)"
+		},
+		{
+			"type": "table",
+			"name": "tasks",
+			"tbl_name": "tasks",
+			"sql": "CREATE TABLE tasks (\n\t\tid INTEGER PRIMARY KEY,\n\t\tconversation_id INTEGER NOT NULL,\n\t\tkind TEXT NOT NULL,\n\t\tstatus TEXT NOT NULL CHECK (status IN ('pending', 'running', 'waiting', 'completing', 'terminal')),\n\t\tabort_requested INTEGER NOT NULL CHECK (abort_requested IN (0, 1)),\n\t\tbackground INTEGER NOT NULL CHECK (background IN (0, 1)),\n\t\trecord TEXT NOT NULL CHECK (json_valid(record))\n\t) STRICT"
+		},
+		{
+			"type": "index",
+			"name": "tasks_by_abort_requested",
+			"tbl_name": "tasks",
+			"sql": "CREATE INDEX tasks_by_abort_requested ON tasks (abort_requested, id)"
+		},
+		{
+			"type": "index",
+			"name": "tasks_by_background",
+			"tbl_name": "tasks",
+			"sql": "CREATE INDEX tasks_by_background ON tasks (background, id)"
+		},
+		{
+			"type": "index",
+			"name": "tasks_by_conversation",
+			"tbl_name": "tasks",
+			"sql": "CREATE INDEX tasks_by_conversation ON tasks (conversation_id, id)"
+		},
+		{
+			"type": "index",
+			"name": "tasks_by_kind",
+			"tbl_name": "tasks",
+			"sql": "CREATE INDEX tasks_by_kind ON tasks (kind, id)"
+		},
+		{
+			"type": "index",
+			"name": "tasks_by_status",
+			"tbl_name": "tasks",
+			"sql": "CREATE INDEX tasks_by_status ON tasks (status, id)"
+		}
+	]
+}

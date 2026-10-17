@@ -1,0 +1,883 @@
+//! Rust stand-in for the `openai` SDK client that Pi's OpenAI API modules
+//! (`openai-responses.ts`, `openai-completions.ts`) create per request. No Pi
+//! counterpart: it reproduces the SDK behaviour those modules rely on.
+//!
+//! - Headers: `OpenAI-Organization` / `OpenAI-Project` from the
+//!   `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` environment variables (read when
+//!   the client is created, trimmed, skipped when empty), then
+//!   `Authorization: Bearer <apiKey>`, then the `OPENAI_CUSTOM_HEADERS` lines
+//!   (`Name: value`), then the client's default headers in order, where a
+//!   `None` value removes a header (the SDK drops `null` header values), so
+//!   `Authorization: null` suppresses auth. This is the SDK's layering for a
+//!   client created without `organization` / `project`, as Pi creates it.
+//! - URL: `baseURL + path`, joining a trailing slash like the SDK.
+//! - One attempt per call (Pi passes `maxRetries: 0`); `retryProviderRequest`
+//!   drives retries.
+//! - The SDK `timeout` bounds the request until the response headers arrive;
+//!   expiry is the SDK's `APIConnectionTimeoutError` (`"Request timed out."`,
+//!   no status, so `retryProviderRequest` retries it).
+//! - SSE (see [`sse_json_events`]): `data: [DONE]` ends the stream, each
+//!   other event is parsed as JSON, and an `event: error` frame or an event
+//!   whose JSON has a truthy `error` field fails the stream like the SDK's
+//!   `APIError` (message from `error.message`), as a status-less
+//!   `ProviderHttpError`. An abort ends the stream quietly, like the SDK.
+
+use futures::{Stream, StreamExt};
+use reqwest::Response;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+use crate::types::ProviderHeaders;
+use crate::utils::headers::{apply_provider_headers, redacted_provider_headers};
+use crate::utils::http::{http_client, send_checked_with_timeout};
+use crate::utils::provider_retry::ProviderHttpError;
+use crate::utils::sse;
+use crate::{Error, Result};
+
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Per-request SDK options (`{ signal, timeout, maxRetries: 0 }`).
+#[derive(Debug, Clone, Default)]
+pub struct OpenAIRequestOptions {
+    pub signal: Option<CancellationToken>,
+    pub timeout_ms: Option<u64>,
+}
+
+/// `new OpenAI({ apiKey, baseURL, fetch, defaultHeaders })`. `Debug`
+/// redacts the API key and credential headers.
+#[derive(Clone)]
+pub struct OpenAIClient {
+    pub api_key: String,
+    pub base_url: String,
+    pub default_headers: ProviderHeaders,
+    /// Headers the SDK derives from the process environment.
+    env_headers: SdkEnvHeaders,
+    http_client: reqwest::Client,
+}
+
+/// The headers `new OpenAI({...})` derives from the environment when no
+/// `organization`, `project` or custom headers are passed.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SdkEnvHeaders {
+    /// `OpenAI-Organization` and `OpenAI-Project`, sent before auth.
+    tenant: ProviderHeaders,
+    /// `OPENAI_CUSTOM_HEADERS`, merged before the default headers.
+    custom: ProviderHeaders,
+}
+
+impl SdkEnvHeaders {
+    /// `readEnv()` is `process.env[name]?.trim() || undefined`.
+    fn from_env(read: impl Fn(&str) -> Option<String>) -> Self {
+        let read_env = |name: &str| {
+            read(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let mut tenant = ProviderHeaders::new();
+        if let Some(organization) = read_env("OPENAI_ORG_ID") {
+            tenant.insert("OpenAI-Organization", organization);
+        }
+        if let Some(project) = read_env("OPENAI_PROJECT_ID") {
+            tenant.insert("OpenAI-Project", project);
+        }
+        let mut custom = ProviderHeaders::new();
+        if let Some(lines) = read_env("OPENAI_CUSTOM_HEADERS") {
+            for line in lines.split('\n') {
+                if let Some((name, value)) = line.split_once(':') {
+                    custom.insert(name.trim(), value.trim().to_string());
+                }
+            }
+        }
+        Self { tenant, custom }
+    }
+}
+
+impl std::fmt::Debug for OpenAIClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIClient")
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field(
+                "default_headers",
+                &redacted_provider_headers(&self.default_headers),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenAIClient {
+    pub fn new(
+        api_key: impl Into<String>,
+        base_url: &str,
+        http: Option<&reqwest::Client>,
+        default_headers: ProviderHeaders,
+    ) -> Self {
+        Self {
+            api_key: api_key.into(),
+            base_url: if base_url.is_empty() {
+                DEFAULT_BASE_URL.to_string()
+            } else {
+                base_url.to_string()
+            },
+            default_headers,
+            env_headers: SdkEnvHeaders::from_env(|name| std::env::var(name).ok()),
+            http_client: http_client(http),
+        }
+    }
+
+    pub fn build_url(&self, path: &str) -> String {
+        if self.base_url.ends_with('/') && path.starts_with('/') {
+            format!("{}{}", self.base_url, &path[1..])
+        } else {
+            format!("{}{}", self.base_url, path)
+        }
+    }
+
+    pub fn build_headers(&self) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        apply_provider_headers(&mut headers, &self.env_headers.tenant)?;
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", self.api_key))
+                .map_err(|error| Error::InvalidHeaderValue("authorization".to_string(), error))?,
+        );
+        apply_provider_headers(&mut headers, &self.env_headers.custom)?;
+        apply_provider_headers(&mut headers, &self.default_headers)?;
+        Ok(headers)
+    }
+
+    /// POST `body` to `path` once and return the streaming response. A
+    /// non-2xx response becomes a `ProviderHttpError`.
+    pub async fn post(
+        &self,
+        path: &str,
+        body: &Value,
+        options: &OpenAIRequestOptions,
+    ) -> Result<Response> {
+        let request = self
+            .http_client
+            .post(self.build_url(path))
+            .headers(self.build_headers()?)
+            .json(body);
+        send_checked_with_timeout(request, options.signal.as_ref(), options.timeout_ms).await
+    }
+}
+
+/// The SDK's `Stream.fromSSEResponse()`: parsed JSON events until `[DONE]`.
+///
+/// Like the SDK, the stream ends at a `data: [DONE]` frame, a frame named
+/// `event: error` fails with `APIError(data.error ?? data)`, any other frame
+/// whose JSON has a truthy `error` fails with `APIError(data.error)`, and
+/// malformed JSON fails with the SDK's message. An abort ends the stream
+/// without an error (the SDK swallows it), so callers see a normal end of
+/// stream and check the signal themselves.
+pub fn sse_json_events(
+    response: Response,
+    signal: Option<CancellationToken>,
+) -> impl Stream<Item = Result<Value>> + Send + 'static {
+    sse::sdk_events(response, signal)
+        .map(|event| {
+            event.map(|event| {
+                if event.data == "[DONE]" {
+                    None
+                } else {
+                    Some(parse_sse_event(&event))
+                }
+            })
+        })
+        .take_while(|item| futures::future::ready(!matches!(item, Ok(None))))
+        .filter_map(|item| futures::future::ready(item.transpose()))
+        .map(Result::flatten)
+}
+
+fn parse_sse_event(event: &sse::SseEvent) -> Result<Value> {
+    let value: Value = serde_json::from_str(&event.data)
+        .map_err(|_| Error::message("Error reading response: malformed server-sent event JSON."))?;
+    if event.event.as_deref() == Some("error") {
+        let error = match value.get("error") {
+            Some(error) if !error.is_null() => error.clone(),
+            _ => value,
+        };
+        return Err(api_error(&error));
+    }
+    if let Some(error) = value.get("error").filter(|error| is_truthy(error)) {
+        return Err(api_error(error));
+    }
+    Ok(value)
+}
+
+/// `new APIError(undefined, error, undefined, headers)`: a status-less
+/// `ProviderHttpError`. The error object is kept as the body (wrapped like
+/// an HTTP error body, `{ "error": ... }`) so callers can read fields such
+/// as `error.metadata.raw`, like the SDK's `APIError.error`.
+fn api_error(error: &Value) -> Error {
+    Error::ProviderHttp(Box::new(ProviderHttpError {
+        status: None,
+        headers: Default::default(),
+        body: Some(serde_json::json!({ "error": error }).to_string()),
+        message: api_error_message(error),
+    }))
+}
+
+/// `APIError.makeMessage(undefined, error, undefined)`.
+fn api_error_message(error: &Value) -> String {
+    match error.get("message") {
+        Some(Value::String(message)) if !message.is_empty() => message.clone(),
+        Some(message) if is_truthy(message) => message.to_string(),
+        _ if is_truthy(error) => error.to_string(),
+        _ => "(no status code or body)".to_string(),
+    }
+}
+
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+/// JavaScript template-literal stringification of an optional JSON value
+/// (`${value}`): strings verbatim, `undefined` for a missing value.
+pub(crate) fn js_template_string(value: Option<&Value>) -> String {
+    match value {
+        None => "undefined".to_string(),
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) => "null".to_string(),
+        Some(Value::Object(_)) => "[object Object]".to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::Null => String::new(),
+                item => js_template_string(Some(item)),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// JavaScript truthiness of an optional JSON value.
+pub(crate) fn js_truthy(value: Option<&Value>) -> bool {
+    value.is_some_and(is_truthy)
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! A tiny HTTP/1.1 server for the OpenAI API module tests: it records
+    //! every request and answers with queued responses.
+
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::Error;
+    use crate::types::{
+        AssistantMessage, AssistantMessageEvent, Context, Model, PayloadHook,
+        ProviderStreamEventHook, TranscriptContext,
+    };
+    use crate::utils::event_stream::AssistantMessageEventStream;
+    use crate::utils::transcript::normalize_context;
+
+    /// `normalizeContext(<Pi Context literal>)`.
+    pub fn context(value: Value) -> TranscriptContext {
+        let context: Context = serde_json::from_value(value).expect("valid Pi context");
+        normalize_context(&context)
+    }
+
+    /// A model from a Pi `Model` literal.
+    pub fn model(value: Value) -> Model {
+        serde_json::from_value(value).expect("valid Pi model")
+    }
+
+    /// The literal `gpt-5-mini` model most Pi OpenAI tests construct.
+    pub fn gpt5_mini(api: &str) -> Model {
+        model(json!({
+            "id": "gpt-5-mini",
+            "name": "GPT-5 Mini",
+            "api": api,
+            "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 400000,
+            "maxTokens": 128000,
+        }))
+    }
+
+    pub fn openai_model(id: &str) -> Model {
+        crate::providers::catalog::openai_models()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("openai catalog has {id}"))
+    }
+
+    pub fn copilot_model(id: &str) -> Model {
+        crate::providers::catalog::github_copilot_models()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| panic!("github-copilot catalog has {id}"))
+    }
+
+    /// An empty `output` like the Pi tests' `createOutput()`.
+    pub fn pending_output(model: &Model) -> AssistantMessage {
+        let mut output = AssistantMessage::empty_for(model);
+        output.stop_reason = crate::types::StopReason::Pending;
+        output
+    }
+
+    /// An `onPayload` hook recording every payload; `abort` makes it fail the
+    /// request so nothing is sent.
+    pub fn payload_hook(abort: bool) -> (PayloadHook, Arc<Mutex<Vec<Value>>>) {
+        let payloads = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&payloads);
+        let hook: PayloadHook = Arc::new(move |payload, _model| {
+            captured.lock().push(payload);
+            Box::pin(async move {
+                if abort {
+                    Err(Error::message("payload captured"))
+                } else {
+                    Ok(None)
+                }
+            })
+        });
+        (hook, payloads)
+    }
+
+    /// Provider stream events with the id of the model that produced them.
+    pub type CapturedStreamEvents = Arc<Mutex<Vec<(Value, String)>>>;
+
+    /// An `onProviderStreamEvent` hook recording every event.
+    pub fn stream_event_hook() -> (ProviderStreamEventHook, CapturedStreamEvents) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let hook: ProviderStreamEventHook = Arc::new(move |event, model| {
+            captured.lock().push((event.clone(), model.id.clone()));
+            Box::pin(async {})
+        });
+        (hook, events)
+    }
+
+    /// Drain a stream: its events and final message.
+    pub async fn collect(
+        stream: AssistantMessageEventStream,
+    ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
+        let events: Vec<_> = stream.clone().collect().await;
+        (events, stream.result().await)
+    }
+
+    /// Run `stream` with a payload hook that aborts the request, and return
+    /// the captured payload.
+    pub async fn capture_payload(
+        run: impl FnOnce(PayloadHook) -> AssistantMessageEventStream,
+    ) -> Value {
+        let (hook, payloads) = payload_hook(true);
+        let (_, result) = collect(run(hook)).await;
+        let payload = payloads.lock().first().cloned();
+        payload.unwrap_or_else(|| panic!("no payload captured: {:?}", result.error_message))
+    }
+
+    // transcript-tool-changes.test.ts fixtures (shared by the OpenAI and Kimi
+    // halves; the Anthropic half lives in `anthropic_messages`).
+
+    fn empty_tool(name: &str) -> Value {
+        json!({ "name": name, "description": format!("{name} tool"), "parameters": { "type": "object", "properties": {} } })
+    }
+
+    /// Pi's `context`: section updates, a removal and an addition.
+    pub fn tool_change_context() -> TranscriptContext {
+        context(json!({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "base prompt",
+                    "sections": { "rules": "<rules>\nold rules\n</rules>", "docs": "<docs>\nread docs\n</docs>" },
+                    "toolsAdded": [empty_tool("base_tool")],
+                    "timestamp": 0,
+                },
+                { "role": "user", "content": "before", "timestamp": 1 },
+                {
+                    "role": "system",
+                    "content": "updated guidance",
+                    "sections": { "rules": "<rules>\nnew rules\n</rules>", "docs": null },
+                    "toolsRemoved": [{ "name": "base_tool" }],
+                    "toolsAdded": [empty_tool("late_tool")],
+                    "timestamp": 2,
+                },
+            ],
+        }))
+    }
+
+    /// Pi's `additionContext`: one late addition, no removals.
+    pub fn tool_addition_context() -> TranscriptContext {
+        context(json!({
+            "messages": [
+                { "role": "system", "content": "base prompt", "toolsAdded": [empty_tool("base_tool")], "timestamp": 0 },
+                { "role": "user", "content": "before", "timestamp": 1 },
+                { "role": "system", "content": "updated guidance", "toolsAdded": [empty_tool("late_tool")], "timestamp": 2 },
+            ],
+        }))
+    }
+
+    /// `{ ...modelBase, id, name, api, provider, compat }`.
+    pub fn tool_change_model(id: &str, api: &str, provider: &str, compat: Value) -> Model {
+        let mut value = json!({
+            "id": id,
+            "name": id,
+            "api": api,
+            "provider": provider,
+            "baseUrl": "http://127.0.0.1:9",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 100000,
+            "maxTokens": 1000,
+        });
+        if !compat.is_null() {
+            value["compat"] = compat;
+        }
+        model(value)
+    }
+
+    /// The names of a payload list's entries, read at `pointer` in each.
+    pub fn names(list: &Value, pointer: &str) -> Vec<String> {
+        list.as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.pointer(pointer)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drain a stream, cancelling `signal` once an event of type `abort_at`
+    /// (e.g. `"text_delta"`) arrives.
+    pub async fn collect_aborting(
+        stream: AssistantMessageEventStream,
+        signal: tokio_util::sync::CancellationToken,
+        abort_at: &str,
+    ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
+        let mut events = Vec::new();
+        let mut live = stream.clone();
+        while let Some(event) = live.next().await {
+            if event.event_type() == abort_at {
+                signal.cancel();
+            }
+            events.push(event);
+        }
+        (events, stream.result().await)
+    }
+
+    /// Serve SSE responses whose body is `head` and then stalls with the
+    /// connection open, for mid-stream abort tests. Returns the base URL.
+    pub async fn serve_stalled_sse(head: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let head = head.clone();
+                tokio::spawn(async move {
+                    if read_request(&mut socket).await.is_none() {
+                        return;
+                    }
+                    let raw = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{head}"
+                    );
+                    let _ = socket.write_all(raw.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                });
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// Read requests and never answer them, for timeout tests. Returns the
+    /// base URL.
+    pub async fn serve_silent() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = read_request(&mut socket).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                });
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct CapturedRequest {
+        pub path: String,
+        pub headers: Vec<(String, String)>,
+        pub body: Value,
+    }
+
+    impl CapturedRequest {
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockResponse {
+        pub status: u16,
+        pub headers: Vec<(String, String)>,
+        pub body: String,
+    }
+
+    impl MockResponse {
+        pub fn sse(events: &[Value]) -> Self {
+            let mut body: String = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect();
+            body.push_str("data: [DONE]\n\n");
+            Self::sse_raw(body)
+        }
+
+        pub fn sse_raw(body: impl Into<String>) -> Self {
+            Self {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body: body.into(),
+            }
+        }
+
+        /// `Response.json(value)`.
+        pub fn json(value: Value) -> Self {
+            Self::status(
+                200,
+                &[("content-type", "application/json")],
+                value.to_string(),
+            )
+        }
+
+        pub fn status(status: u16, headers: &[(&str, &str)], body: impl Into<String>) -> Self {
+            Self {
+                status,
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                body: body.into(),
+            }
+        }
+    }
+
+    pub struct MockServer {
+        pub url: String,
+        pub requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    }
+
+    impl MockServer {
+        /// Serve `responses` in order; once they run out, the last one repeats.
+        pub async fn start(responses: Vec<MockResponse>) -> Self {
+            let queue = Mutex::new(VecDeque::from(responses));
+            let last: Mutex<Option<MockResponse>> = Mutex::new(None);
+            Self::start_with(move |_| match queue.lock().pop_front() {
+                Some(response) => {
+                    *last.lock() = Some(response.clone());
+                    response
+                }
+                None => last
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| MockResponse::sse(&[])),
+            })
+            .await
+        }
+
+        /// Answer every request with `handler(request)`.
+        pub async fn start_with(
+            handler: impl Fn(&CapturedRequest) -> MockResponse + Send + Sync + 'static,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&requests);
+            let handler = Arc::new(handler);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let captured = Arc::clone(&captured);
+                    let handler = Arc::clone(&handler);
+                    tokio::spawn(async move {
+                        let Some(request) = read_request(&mut socket).await else {
+                            return;
+                        };
+                        let response = handler(&request);
+                        captured.lock().push(request);
+                        let reason = match response.status {
+                            200 => "OK",
+                            _ => "Error",
+                        };
+                        let mut raw = format!("HTTP/1.1 {} {reason}\r\n", response.status);
+                        for (name, value) in &response.headers {
+                            raw.push_str(&format!("{name}: {value}\r\n"));
+                        }
+                        raw.push_str(&format!(
+                            "content-length: {}\r\nconnection: close\r\n\r\n{}",
+                            response.body.len(),
+                            response.body
+                        ));
+                        let _ = socket.write_all(raw.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    });
+                }
+            });
+            Self {
+                url: format!("http://{addr}/v1"),
+                requests,
+            }
+        }
+
+        pub fn requests(&self) -> Vec<CapturedRequest> {
+            self.requests.lock().clone()
+        }
+
+        pub fn last(&self) -> CapturedRequest {
+            self.requests
+                .lock()
+                .last()
+                .cloned()
+                .expect("a request was captured")
+        }
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<CapturedRequest> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let header_end = loop {
+            let read = socket.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let mut lines = head.split("\r\n");
+        let request_line = lines.next()?;
+        let path = request_line.split(' ').nth(1)?.to_string();
+        let headers: Vec<(String, String)> = lines
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
+        let length = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while buffer.len() < header_end + length {
+            let read = socket.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body = serde_json::from_slice(&buffer[header_end..]).unwrap_or(Value::Null);
+        Some(CapturedRequest {
+            path,
+            headers,
+            body,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::types::ProviderHeaders;
+
+    #[test]
+    fn builds_urls_and_headers_like_the_sdk() {
+        let mut defaults = ProviderHeaders::new();
+        defaults.insert("User-Agent", Some("pi".to_string()));
+        defaults.insert("Authorization", None::<String>);
+        let client = OpenAIClient::new("key", "http://host/v1/", None, defaults);
+        assert_eq!(client.build_url("/responses"), "http://host/v1/responses");
+        let headers = client.build_headers().unwrap();
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(headers.get("user-agent").unwrap(), "pi");
+
+        let client = OpenAIClient::new("key", "", None, ProviderHeaders::new());
+        assert_eq!(
+            client.build_url("/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            client.build_headers().unwrap().get(AUTHORIZATION).unwrap(),
+            "Bearer key"
+        );
+    }
+
+    fn frame(event: Option<&str>, data: &str) -> sse::SseEvent {
+        sse::SseEvent {
+            event: event.map(str::to_string),
+            data: data.to_string(),
+            raw: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sse_error_payloads_fail_like_api_errors() {
+        assert_eq!(
+            parse_sse_event(&frame(None, r#"{"error":{"message":"boom"}}"#))
+                .unwrap_err()
+                .to_string(),
+            "boom"
+        );
+        assert_eq!(
+            parse_sse_event(&frame(None, r#"{"type":"error","error":null}"#)).unwrap(),
+            json!({ "type": "error", "error": null })
+        );
+        // `event: error` frames: `APIError(undefined, data?.error ?? data)`.
+        assert_eq!(
+            parse_sse_event(&frame(
+                Some("error"),
+                r#"{"type":"error","code":"server_error","message":"boom"}"#
+            ))
+            .unwrap_err()
+            .to_string(),
+            "boom"
+        );
+        assert_eq!(
+            parse_sse_event(&frame(Some("error"), r#"{"error":{"message":"nested"}}"#))
+                .unwrap_err()
+                .to_string(),
+            "nested"
+        );
+        assert_eq!(
+            parse_sse_event(&frame(Some("error"), r#"{"code":1}"#))
+                .unwrap_err()
+                .to_string(),
+            r#"{"code":1}"#
+        );
+        assert_eq!(
+            parse_sse_event(&frame(None, "{not json"))
+                .unwrap_err()
+                .to_string(),
+            "Error reading response: malformed server-sent event JSON."
+        );
+    }
+
+    #[test]
+    fn sends_tenant_and_custom_headers_from_the_environment_like_the_sdk() {
+        let env = |name: &str| {
+            match name {
+                "OPENAI_ORG_ID" => Some(" org-1 "),
+                "OPENAI_PROJECT_ID" => Some("   "),
+                "OPENAI_CUSTOM_HEADERS" => Some("X-One: 1\nno colon\nAuthorization : Custom x"),
+                _ => None,
+            }
+            .map(str::to_string)
+        };
+        let env_headers = SdkEnvHeaders::from_env(env);
+        assert_eq!(
+            env_headers.tenant.iter().collect::<Vec<_>>(),
+            [(
+                &"OpenAI-Organization".to_string(),
+                &Some("org-1".to_string())
+            )]
+        );
+
+        let mut defaults = ProviderHeaders::new();
+        defaults.insert("openai-organization", None::<String>);
+        defaults.insert("X-One", Some("default".to_string()));
+        let mut client = OpenAIClient::new("key", "", None, defaults);
+        client.env_headers = env_headers.clone();
+        let headers = client.build_headers().unwrap();
+        // Default headers override or remove the env-derived ones.
+        assert!(headers.get("openai-organization").is_none());
+        assert!(headers.get("openai-project").is_none());
+        assert_eq!(headers.get("x-one").unwrap(), "default");
+        // Custom headers come after auth, so they can replace it.
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Custom x");
+
+        let mut client = OpenAIClient::new("key", "", None, ProviderHeaders::new());
+        client.env_headers = env_headers;
+        let headers = client.build_headers().unwrap();
+        assert_eq!(headers.get("openai-organization").unwrap(), "org-1");
+
+        assert_eq!(SdkEnvHeaders::from_env(|_| None), SdkEnvHeaders::default());
+    }
+
+    #[tokio::test]
+    async fn sse_streams_stop_at_done_and_fail_on_error_frames() {
+        use futures::StreamExt;
+
+        use super::test_support::{MockResponse, MockServer};
+
+        let server = MockServer::start(vec![
+            MockResponse::sse_raw(
+                "data: {\"a\":1}\n\ndata: [DONE]\n\ndata: {\"error\":{\"message\":\"after done\"}}\n\n",
+            ),
+            MockResponse::sse_raw(
+                "event: response.created\ndata: {\"a\":1}\n\nevent: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"boom\"}\n\n",
+            ),
+        ])
+        .await;
+        let client = OpenAIClient::new("key", &server.url, None, ProviderHeaders::new());
+        let options = OpenAIRequestOptions::default();
+
+        let response = client
+            .post("/responses", &json!({}), &options)
+            .await
+            .unwrap();
+        let items: Vec<_> = sse_json_events(response, None).collect().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].as_ref().unwrap(), &json!({ "a": 1 }));
+
+        let response = client
+            .post("/responses", &json!({}), &options)
+            .await
+            .unwrap();
+        let items: Vec<_> = sse_json_events(response, None).collect().await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_ref().unwrap(), &json!({ "a": 1 }));
+        let Err(Error::ProviderHttp(error)) = &items[1] else {
+            panic!("expected an APIError, got {:?}", items[1]);
+        };
+        assert_eq!(error.message, "boom");
+        assert_eq!(error.status, None);
+    }
+
+    #[test]
+    fn template_strings_follow_javascript() {
+        assert_eq!(js_template_string(None), "undefined");
+        assert_eq!(js_template_string(Some(&json!("x"))), "x");
+        assert_eq!(js_template_string(Some(&json!(42))), "42");
+    }
+}

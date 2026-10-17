@@ -9,5 +9,6 @@ publish = false
 
 [dependencies]
 ai.workspace = true
+async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "process"] }

@@ -1,20 +1,42 @@
+//! Port of `providers/faux.ts`: a scripted provider for tests.
+//!
+//! Differences from Pi:
+//! - Response factories receive owned copies of the context, options, a
+//!   snapshot of the provider state and the model, and return a
+//!   `Result`; an `Err` becomes an error event like a thrown error in Pi.
+//! - `getModel()` / `getModel(id)` are [`FauxCore::get_model`] and
+//!   [`FauxCore::get_model_by_id`].
+//! - Text is chunked by `char`, not by UTF-16 code unit, so a chunk never
+//!   splits a surrogate pair. Token estimates still count UTF-16 code units.
+//! - Producers run on a spawned Tokio task; an unpaced chunk yields to the
+//!   runtime where Pi awaits a microtask.
+
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::ops::Deref;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use async_trait::async_trait;
+use futures::FutureExt;
+use parking_lot::Mutex;
+use ring::rand::{SecureRandom, SystemRandom};
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
-use crate::event_stream::{AssistantEventStream, AssistantMessageEventStreamSender};
-use crate::provider::LanguageModelApi;
+use crate::api::lazy::panic_message;
+use crate::auth::{ApiKeyAuth, ApiKeyAuthInput, AuthResult, ProviderAuth};
+use crate::models::{CreateProviderOptions, Provider, ProviderApi, create_provider};
 use crate::types::{
-    AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Context,
-    ImageContent, Message, Model, ModelCost, ModelInput, ProviderResponse, SimpleStreamOptions,
-    StopReason, StreamOptions, TextContent, ThinkingContent, ToolCall, ToolResultContent,
-    ToolResultMessage, Usage, UsageCost, UserContent, UserMessageContent,
+    AnyModel, AssistantContent, AssistantMessage, AssistantMessageEvent, BoxFuture, CacheRetention,
+    DeferredCancelOptions, DeferredFetchOptions, DeferredHandle, Message, Model, ModelCost,
+    ModelInput, ModelInputLimits, ProviderResponse, ProviderStreams, ResponseHook,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent, ToolCall,
+    ToolResultMessage, TranscriptContext, Usage, UserContent, UserMessageContent,
 };
+use crate::utils::event_stream::AssistantMessageEventStream;
+use crate::utils::text::get_system_message_text;
+use crate::utils::time::now_millis;
 use crate::{Error, Result};
 
 const DEFAULT_API: &str = "faux";
@@ -25,63 +47,205 @@ const DEFAULT_BASE_URL: &str = "http://localhost:0";
 const DEFAULT_MIN_TOKEN_SIZE: usize = 3;
 const DEFAULT_MAX_TOKEN_SIZE: usize = 5;
 
-type FauxResponseFuture = Pin<Box<dyn Future<Output = Result<AssistantMessage>> + Send>>;
-type FauxResponseFactory =
-    dyn Fn(Context, StreamOptions, FauxProviderState, Model) -> FauxResponseFuture + Send + Sync;
-
-#[derive(Debug, Clone, Default)]
+/// `FauxModelDefinition`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FauxModelDefinition {
     pub id: String,
     pub name: Option<String>,
     pub reasoning: Option<bool>,
     pub input: Option<Vec<ModelInput>>,
+    pub input_limits: Option<ModelInputLimits>,
     pub cost: Option<ModelCost>,
     pub context_window: Option<u32>,
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct FauxTokenSize {
-    pub min: Option<usize>,
-    pub max: Option<usize>,
+impl FauxModelDefinition {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RegisterFauxProviderOptions {
-    pub api: Option<String>,
-    pub provider: Option<String>,
-    pub models: Vec<FauxModelDefinition>,
-    pub tokens_per_second: Option<f64>,
-    pub token_size: Option<FauxTokenSize>,
+/// `FauxContentBlock`: text, thinking or tool call.
+pub type FauxContentBlock = AssistantContent;
+
+pub fn faux_text(text: impl Into<String>) -> FauxContentBlock {
+    AssistantContent::Text(TextContent::new(text))
 }
 
-#[derive(Clone, Default)]
+pub fn faux_thinking(thinking: impl Into<String>) -> FauxContentBlock {
+    AssistantContent::Thinking(ThinkingContent {
+        thinking: thinking.into(),
+        thinking_signature: None,
+        redacted: None,
+    })
+}
+
+/// `fauxToolCall(name, arguments, { id })`. Without an id, a random one is used.
+pub fn faux_tool_call(
+    name: impl Into<String>,
+    arguments: Value,
+    id: Option<&str>,
+) -> FauxContentBlock {
+    AssistantContent::ToolCall(ToolCall {
+        id: id.map_or_else(|| random_id("tool"), str::to_string),
+        name: name.into(),
+        arguments,
+        thought_signature: None,
+        namespace: None,
+    })
+}
+
+/// `string | FauxContentBlock | FauxContentBlock[]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FauxContent(pub Vec<FauxContentBlock>);
+
+impl From<&str> for FauxContent {
+    fn from(text: &str) -> Self {
+        Self(vec![faux_text(text)])
+    }
+}
+
+impl From<String> for FauxContent {
+    fn from(text: String) -> Self {
+        Self(vec![faux_text(text)])
+    }
+}
+
+impl From<FauxContentBlock> for FauxContent {
+    fn from(block: FauxContentBlock) -> Self {
+        Self(vec![block])
+    }
+}
+
+impl From<Vec<FauxContentBlock>> for FauxContent {
+    fn from(blocks: Vec<FauxContentBlock>) -> Self {
+        Self(blocks)
+    }
+}
+
+impl<const N: usize> From<[FauxContentBlock; N]> for FauxContent {
+    fn from(blocks: [FauxContentBlock; N]) -> Self {
+        Self(blocks.into())
+    }
+}
+
+/// Options of `fauxAssistantMessage`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FauxMessageOptions {
+    pub stop_reason: Option<StopReason>,
+    pub deferred: Option<DeferredHandle>,
+    pub error_message: Option<String>,
+    pub response_id: Option<String>,
+    pub timestamp: Option<u64>,
+}
+
+fn message_for(
+    content: Vec<AssistantContent>,
+    api: &str,
+    provider: &str,
+    model_id: &str,
+    stop_reason: StopReason,
+) -> AssistantMessage {
+    AssistantMessage {
+        content,
+        api: api.to_string(),
+        provider: provider.to_string(),
+        model: model_id.to_string(),
+        response_model: None,
+        response_id: None,
+        provider_thinking_level: None,
+        thinking_level: None,
+        diagnostics: None,
+        usage: Usage::default(),
+        stop_reason,
+        deferred: None,
+        error_message: None,
+        raw_stop_reason: None,
+        end_turn: None,
+        timestamp: now_millis(),
+    }
+}
+
+/// `fauxAssistantMessage(content, options)`.
+pub fn faux_assistant_message(
+    content: impl Into<FauxContent>,
+    options: FauxMessageOptions,
+) -> AssistantMessage {
+    let mut message = message_for(
+        content.into().0,
+        DEFAULT_API,
+        DEFAULT_PROVIDER,
+        DEFAULT_MODEL_ID,
+        options.stop_reason.unwrap_or(StopReason::Stop),
+    );
+    message.deferred = options.deferred;
+    message.error_message = options.error_message;
+    message.response_id = options.response_id;
+    if let Some(timestamp) = options.timestamp {
+        message.timestamp = timestamp;
+    }
+    message
+}
+
+/// `FauxProviderState`. Read it with [`FauxCore::state`], which returns a snapshot.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FauxProviderState {
-    call_count: Arc<AtomicUsize>,
+    pub call_count: usize,
+    pub deferred_fetch_count: usize,
+    pub cancelled_deferred: Vec<DeferredHandle>,
 }
 
-impl FauxProviderState {
-    pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
-    }
+/// `FauxResponseFactory`: `(context, options, state, model) => AssistantMessage`.
+pub type FauxResponseFactory = Arc<
+    dyn Fn(
+            TranscriptContext,
+            SimpleStreamOptions,
+            FauxProviderState,
+            Model,
+        ) -> BoxFuture<Result<AssistantMessage>>
+        + Send
+        + Sync,
+>;
 
-    fn increment_call_count(&self) {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
+/// `FauxResponseStep`: a scripted message or a factory.
 #[derive(Clone)]
-#[allow(clippy::large_enum_variant)]
 pub enum FauxResponseStep {
-    Message(AssistantMessage),
-    Factory(Arc<FauxResponseFactory>),
+    Message(Box<AssistantMessage>),
+    Factory(FauxResponseFactory),
 }
 
 impl FauxResponseStep {
-    pub fn factory<F, Fut>(factory: F) -> Self
+    /// A synchronous factory.
+    pub fn factory(
+        factory: impl Fn(
+            TranscriptContext,
+            SimpleStreamOptions,
+            FauxProviderState,
+            Model,
+        ) -> Result<AssistantMessage>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::Factory(Arc::new(move |context, options, state, model| {
+            let result = factory(context, options, state, model);
+            Box::pin(async move { result })
+        }))
+    }
+
+    /// An asynchronous factory.
+    pub fn async_factory<F>(
+        factory: impl Fn(TranscriptContext, SimpleStreamOptions, FauxProviderState, Model) -> F
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self
     where
-        F: Fn(Context, StreamOptions, FauxProviderState, Model) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<AssistantMessage>> + Send + 'static,
+        F: Future<Output = Result<AssistantMessage>> + Send + 'static,
     {
         Self::Factory(Arc::new(move |context, options, state, model| {
             Box::pin(factory(context, options, state, model))
@@ -90,670 +254,92 @@ impl FauxResponseStep {
 }
 
 impl From<AssistantMessage> for FauxResponseStep {
-    fn from(value: AssistantMessage) -> Self {
-        Self::Message(value)
+    fn from(message: AssistantMessage) -> Self {
+        Self::Message(Box::new(message))
     }
 }
 
-pub enum FauxAssistantContent {
-    Text(String),
-    Block(AssistantContent),
-    Blocks(Vec<AssistantContent>),
-}
-
-impl From<&str> for FauxAssistantContent {
-    fn from(value: &str) -> Self {
-        Self::Text(value.to_string())
-    }
-}
-
-impl From<String> for FauxAssistantContent {
-    fn from(value: String) -> Self {
-        Self::Text(value)
-    }
-}
-
-impl From<AssistantContent> for FauxAssistantContent {
-    fn from(value: AssistantContent) -> Self {
-        Self::Block(value)
-    }
-}
-
-impl From<Vec<AssistantContent>> for FauxAssistantContent {
-    fn from(value: Vec<AssistantContent>) -> Self {
-        Self::Blocks(value)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FauxAssistantMessageOptions {
-    pub stop_reason: Option<StopReason>,
-    pub error_message: Option<String>,
-    pub response_id: Option<String>,
-    pub timestamp: Option<u64>,
-}
-
-pub struct FauxProviderRegistration {
-    pub api: String,
-    pub models: Vec<Model>,
-    pub state: FauxProviderState,
-    pending_responses: Arc<Mutex<VecDeque<FauxResponseStep>>>,
-    active: Arc<AtomicBool>,
-}
-
-impl FauxProviderRegistration {
-    pub fn get_model(&self) -> Model {
-        self.models[0].clone()
-    }
-
-    pub fn get_model_by_id(&self, model_id: &str) -> Option<Model> {
-        self.models
-            .iter()
-            .find(|model| model.id == model_id)
-            .cloned()
-    }
-
-    pub fn set_responses<I, S>(&self, responses: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<FauxResponseStep>,
-    {
-        let mut pending = self
-            .pending_responses
-            .lock()
-            .expect("faux response queue poisoned");
-        *pending = responses
-            .into_iter()
-            .map(Into::into)
-            .collect::<VecDeque<_>>();
-    }
-
-    pub fn append_responses<I, S>(&self, responses: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<FauxResponseStep>,
-    {
-        let mut pending = self
-            .pending_responses
-            .lock()
-            .expect("faux response queue poisoned");
-        pending.extend(responses.into_iter().map(Into::into));
-    }
-
-    pub fn get_pending_response_count(&self) -> usize {
-        self.pending_responses
-            .lock()
-            .expect("faux response queue poisoned")
-            .len()
-    }
-
-    pub fn unregister(&self) {
-        self.active.store(false, Ordering::SeqCst);
-    }
-}
-
-pub fn faux_text<T: Into<String>>(text: T) -> AssistantContent {
-    AssistantContent::Text(TextContent {
-        text: text.into(),
-        text_signature: None,
-    })
-}
-
-pub fn faux_thinking<T: Into<String>>(thinking: T) -> AssistantContent {
-    AssistantContent::Thinking(ThinkingContent {
-        thinking: thinking.into(),
-        thinking_signature: None,
-        redacted: None,
-    })
-}
-
-pub fn faux_tool_call<T: Into<String>>(
-    name: T,
-    arguments: Value,
-    id: Option<String>,
-) -> AssistantContent {
-    AssistantContent::ToolCall(ToolCall {
-        id: id.unwrap_or_else(|| random_id("tool")),
-        name: name.into(),
-        arguments,
-        thought_signature: None,
-    })
-}
-
-pub fn faux_assistant_message(
-    content: impl Into<FauxAssistantContent>,
-    options: Option<FauxAssistantMessageOptions>,
-) -> AssistantMessage {
-    let options = options.unwrap_or_default();
-    AssistantMessage {
-        content: normalize_faux_assistant_content(content.into()),
-        api: DEFAULT_API.to_string(),
-        provider: DEFAULT_PROVIDER.to_string(),
-        model: DEFAULT_MODEL_ID.to_string(),
-        response_model: None,
-        response_id: options.response_id,
-        diagnostics: Vec::new(),
-        usage: default_usage(),
-        stop_reason: options.stop_reason.unwrap_or(StopReason::Stop),
-        error_message: options.error_message,
-        timestamp: options
-            .timestamp
-            .unwrap_or_else(crate::utils::time::now_millis),
-    }
-}
-
-pub fn register_faux_provider(
-    options: Option<RegisterFauxProviderOptions>,
-) -> FauxProviderRegistration {
-    let options = options.unwrap_or_default();
-    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
-    let provider = options
-        .provider
-        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
-    let token_size = options.token_size.unwrap_or_default();
-    let min_token_size = std::cmp::max(
-        1,
-        std::cmp::min(
-            token_size.min.unwrap_or(DEFAULT_MIN_TOKEN_SIZE),
-            token_size.max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE),
-        ),
-    );
-    let max_token_size = std::cmp::max(
-        min_token_size,
-        token_size.max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE),
-    );
-    let pending_responses = Arc::new(Mutex::new(VecDeque::new()));
-    let state = FauxProviderState::default();
-    let prompt_cache = Arc::new(Mutex::new(HashMap::new()));
-    let active = Arc::new(AtomicBool::new(true));
-    let language_api: Arc<dyn LanguageModelApi> = Arc::new(FauxLanguageModelApi {
-        api: api.clone(),
-        provider: provider.clone(),
-        pending_responses: pending_responses.clone(),
-        state: state.clone(),
-        prompt_cache,
-        min_token_size,
-        max_token_size,
-        tokens_per_second: options.tokens_per_second,
-        active: active.clone(),
-    });
-
-    let model_definitions = if options.models.is_empty() {
-        vec![FauxModelDefinition {
-            id: DEFAULT_MODEL_ID.to_string(),
-            name: Some(DEFAULT_MODEL_NAME.to_string()),
-            reasoning: Some(false),
-            input: Some(vec![ModelInput::Text, ModelInput::Image]),
-            cost: Some(ModelCost::default()),
-            context_window: Some(128_000),
-            max_tokens: Some(16_384),
-        }]
-    } else {
-        options.models
-    };
-    let models = model_definitions
-        .into_iter()
-        .map(|definition| {
-            let id = definition.id;
-            Model {
-                name: definition.name.unwrap_or_else(|| id.clone()),
-                id,
-                api: api.clone(),
-                provider: provider.clone(),
-                base_url: DEFAULT_BASE_URL.to_string(),
-                reasoning: definition.reasoning.unwrap_or(false),
-                input: definition
-                    .input
-                    .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
-                cost: definition.cost.unwrap_or_default(),
-                context_window: definition.context_window.unwrap_or(128_000),
-                max_tokens: definition.max_tokens.unwrap_or(16_384),
-                language_api: Some(language_api.clone()),
-                ..Model::default()
-            }
-        })
-        .collect::<Vec<_>>();
-
-    FauxProviderRegistration {
-        api,
-        models,
-        state,
-        pending_responses,
-        active,
-    }
-}
-
-#[derive(Clone)]
-struct FauxLanguageModelApi {
-    api: String,
-    provider: String,
-    pending_responses: Arc<Mutex<VecDeque<FauxResponseStep>>>,
-    state: FauxProviderState,
-    prompt_cache: Arc<Mutex<HashMap<String, String>>>,
-    min_token_size: usize,
-    max_token_size: usize,
-    tokens_per_second: Option<f64>,
-    active: Arc<AtomicBool>,
-}
-
-impl LanguageModelApi for FauxLanguageModelApi {
-    fn id(&self) -> &str {
-        &self.api
-    }
-
-    fn stream(
-        &self,
-        request_model: Model,
-        context: Context,
-        stream_options: StreamOptions,
-    ) -> Result<AssistantEventStream> {
-        if !self.active.load(Ordering::SeqCst) {
-            return Err(Error::unsupported_capability(
-                request_model.provider,
-                "language models",
-            ));
-        }
-
-        if request_model.api != self.api {
-            return Err(Error::UnsupportedApi(format!(
-                "Mismatched api: {} expected {}",
-                request_model.api, self.api
-            )));
-        }
-
-        let (sender, output_stream) = crate::create_assistant_message_event_stream();
-        let step = self
-            .pending_responses
-            .lock()
-            .expect("faux response queue poisoned")
-            .pop_front();
-        self.state.increment_call_count();
-
-        let request_model_for_task = request_model.clone();
-        let api = self.api.clone();
-        let provider = self.provider.clone();
-        let state = self.state.clone();
-        let prompt_cache = self.prompt_cache.clone();
-        let min_token_size = self.min_token_size;
-        let max_token_size = self.max_token_size;
-        let tokens_per_second = self.tokens_per_second;
-        tokio::spawn(async move {
-            stream_faux_response(
-                sender,
-                step,
-                request_model_for_task,
-                context,
-                stream_options,
-                state,
-                api,
-                provider,
-                min_token_size,
-                max_token_size,
-                tokens_per_second,
-                prompt_cache,
-            )
-            .await;
-        });
-
-        Ok(output_stream)
-    }
-
-    fn stream_simple(
-        &self,
-        model: Model,
-        context: Context,
-        options: SimpleStreamOptions,
-    ) -> Result<AssistantEventStream> {
-        self.stream(model, context, options.stream)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn stream_faux_response(
-    mut sender: AssistantMessageEventStreamSender,
-    step: Option<FauxResponseStep>,
-    request_model: Model,
-    context: Context,
-    stream_options: StreamOptions,
-    state: FauxProviderState,
-    api: String,
-    provider: String,
-    min_token_size: usize,
-    max_token_size: usize,
-    tokens_per_second: Option<f64>,
-    prompt_cache: Arc<Mutex<HashMap<String, String>>>,
-) {
-    let result: Result<TerminalFauxMessage> = async {
-        if let Some(on_response) = stream_options.on_response.clone() {
-            on_response(
-                ProviderResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                },
-                &request_model,
-            )
-            .await?;
-        }
-
-        let Some(step) = step else {
-            let message = create_error_message(
-                "No more faux responses queued",
-                &api,
-                &provider,
-                &request_model.id,
-            );
-            return Ok(TerminalFauxMessage::ImmediateError(with_usage_estimate(
-                message,
-                &context,
-                &stream_options,
-                &prompt_cache,
-            )));
-        };
-
-        let resolved = match step {
-            FauxResponseStep::Message(message) => Ok(message),
-            FauxResponseStep::Factory(factory) => {
-                factory(
-                    context.clone(),
-                    stream_options.clone(),
-                    state,
-                    request_model.clone(),
-                )
-                .await
-            }
-        }?;
-        let message = clone_message(resolved, &api, &provider, &request_model.id);
-        Ok(TerminalFauxMessage::Stream(with_usage_estimate(
-            message,
-            &context,
-            &stream_options,
-            &prompt_cache,
-        )))
-    }
-    .await;
-
-    match result {
-        Ok(TerminalFauxMessage::ImmediateError(message)) => {
-            sender.push(AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                error: message,
-            });
-        }
-        Ok(TerminalFauxMessage::Stream(message)) => {
-            stream_with_deltas(
-                &mut sender,
-                message,
-                min_token_size,
-                max_token_size,
-                tokens_per_second,
-                stream_options,
-            )
-            .await;
-        }
-        Err(error) => {
-            let message = create_error_message(
-                faux_error_message(&error),
-                &api,
-                &provider,
-                &request_model.id,
-            );
-            sender.push(AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                error: message,
-            });
+impl std::fmt::Debug for FauxResponseStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message) => f.debug_tuple("Message").field(message).finish(),
+            Self::Factory(_) => f.write_str("Factory(..)"),
         }
     }
 }
 
-enum TerminalFauxMessage {
-    ImmediateError(AssistantMessage),
-    Stream(AssistantMessage),
+/// `deferred` of [`RegisterFauxProviderOptions`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FauxDeferredOptions {
+    /// Number of fetches that return the original handle before the scripted
+    /// response becomes ready.
+    pub pending_fetches: Option<u32>,
+    pub poll_after_ms: Option<u64>,
 }
 
-async fn stream_with_deltas(
-    sender: &mut AssistantMessageEventStreamSender,
-    message: AssistantMessage,
-    min_token_size: usize,
-    max_token_size: usize,
-    tokens_per_second: Option<f64>,
-    stream_options: StreamOptions,
-) {
-    let mut partial = AssistantMessage {
-        content: Vec::new(),
-        ..message.clone()
-    };
-
-    if is_cancelled(&stream_options) {
-        let aborted = create_aborted_message(partial);
-        sender.push(AssistantMessageEvent::Error {
-            reason: StopReason::Aborted,
-            error: aborted,
-        });
-        return;
-    }
-
-    sender.push(AssistantMessageEvent::Start {
-        partial: partial.clone(),
-    });
-
-    for (index, block) in message.content.iter().enumerate() {
-        if is_cancelled(&stream_options) {
-            let aborted = create_aborted_message(partial);
-            sender.push(AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                error: aborted,
-            });
-            return;
-        }
-
-        match block {
-            AssistantContent::Thinking(thinking) => {
-                partial
-                    .content
-                    .push(AssistantContent::Thinking(ThinkingContent {
-                        thinking: String::new(),
-                        thinking_signature: thinking.thinking_signature.clone(),
-                        redacted: thinking.redacted,
-                    }));
-                sender.push(AssistantMessageEvent::ThinkingStart {
-                    content_index: index,
-                    partial: partial.clone(),
-                });
-                for chunk in
-                    split_string_by_token_size(&thinking.thinking, min_token_size, max_token_size)
-                {
-                    schedule_chunk(&chunk, tokens_per_second).await;
-                    if is_cancelled(&stream_options) {
-                        let aborted = create_aborted_message(partial);
-                        sender.push(AssistantMessageEvent::Error {
-                            reason: StopReason::Aborted,
-                            error: aborted,
-                        });
-                        return;
-                    }
-                    if let Some(AssistantContent::Thinking(partial_thinking)) =
-                        partial.content.get_mut(index)
-                    {
-                        partial_thinking.thinking.push_str(&chunk);
-                    }
-                    sender.push(AssistantMessageEvent::ThinkingDelta {
-                        content_index: index,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
-                }
-                sender.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index,
-                    content: thinking.thinking.clone(),
-                    partial: partial.clone(),
-                });
-            }
-            AssistantContent::Text(text) => {
-                partial.content.push(AssistantContent::Text(TextContent {
-                    text: String::new(),
-                    text_signature: text.text_signature.clone(),
-                }));
-                sender.push(AssistantMessageEvent::TextStart {
-                    content_index: index,
-                    partial: partial.clone(),
-                });
-                for chunk in split_string_by_token_size(&text.text, min_token_size, max_token_size)
-                {
-                    schedule_chunk(&chunk, tokens_per_second).await;
-                    if is_cancelled(&stream_options) {
-                        let aborted = create_aborted_message(partial);
-                        sender.push(AssistantMessageEvent::Error {
-                            reason: StopReason::Aborted,
-                            error: aborted,
-                        });
-                        return;
-                    }
-                    if let Some(AssistantContent::Text(partial_text)) =
-                        partial.content.get_mut(index)
-                    {
-                        partial_text.text.push_str(&chunk);
-                    }
-                    sender.push(AssistantMessageEvent::TextDelta {
-                        content_index: index,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
-                }
-                sender.push(AssistantMessageEvent::TextEnd {
-                    content_index: index,
-                    content: text.text.clone(),
-                    partial: partial.clone(),
-                });
-            }
-            AssistantContent::ToolCall(tool_call) => {
-                partial.content.push(AssistantContent::ToolCall(ToolCall {
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
-                    arguments: json!({}),
-                    thought_signature: tool_call.thought_signature.clone(),
-                }));
-                sender.push(AssistantMessageEvent::ToolCallStart {
-                    content_index: index,
-                    partial: partial.clone(),
-                });
-                let serialized_args = serde_json::to_string(&tool_call.arguments)
-                    .unwrap_or_else(|_| "null".to_string());
-                for chunk in
-                    split_string_by_token_size(&serialized_args, min_token_size, max_token_size)
-                {
-                    schedule_chunk(&chunk, tokens_per_second).await;
-                    if is_cancelled(&stream_options) {
-                        let aborted = create_aborted_message(partial);
-                        sender.push(AssistantMessageEvent::Error {
-                            reason: StopReason::Aborted,
-                            error: aborted,
-                        });
-                        return;
-                    }
-                    sender.push(AssistantMessageEvent::ToolCallDelta {
-                        content_index: index,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
-                }
-                if let Some(AssistantContent::ToolCall(partial_tool_call)) =
-                    partial.content.get_mut(index)
-                {
-                    partial_tool_call.arguments = tool_call.arguments.clone();
-                }
-                sender.push(AssistantMessageEvent::ToolCallEnd {
-                    content_index: index,
-                    tool_call: tool_call.clone(),
-                    partial: partial.clone(),
-                });
-            }
-        }
-    }
-
-    if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
-        sender.push(AssistantMessageEvent::Error {
-            reason: message.stop_reason,
-            error: message,
-        });
-        return;
-    }
-
-    sender.push(AssistantMessageEvent::Done {
-        reason: message.stop_reason,
-        message,
-    });
+/// `tokenSize` of [`RegisterFauxProviderOptions`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FauxTokenSize {
+    pub min: Option<usize>,
+    pub max: Option<usize>,
 }
 
-fn default_usage() -> Usage {
-    Usage {
-        input: 0,
-        output: 0,
-        cache_read: 0,
-        cache_write: 0,
-        cache_write_1h: None,
-        reasoning: None,
-        total_tokens: 0,
-        cost: UsageCost::default(),
-    }
-}
-
-fn normalize_faux_assistant_content(content: FauxAssistantContent) -> Vec<AssistantContent> {
-    match content {
-        FauxAssistantContent::Text(text) => vec![faux_text(text)],
-        FauxAssistantContent::Block(block) => vec![block],
-        FauxAssistantContent::Blocks(blocks) => blocks,
-    }
+/// `RegisterFauxProviderOptions`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegisterFauxProviderOptions {
+    pub api: Option<String>,
+    pub provider: Option<String>,
+    pub models: Vec<FauxModelDefinition>,
+    pub deferred: Option<FauxDeferredOptions>,
+    pub tokens_per_second: Option<f64>,
+    pub token_size: Option<FauxTokenSize>,
 }
 
 fn estimate_tokens(text: &str) -> u32 {
-    estimate_tokens_from_units(utf16_len(text))
-}
-
-fn estimate_tokens_from_units(units: usize) -> u32 {
-    units.div_ceil(4) as u32
+    utf16_len(text).div_ceil(4) as u32
 }
 
 fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("system randomness is available");
+    u64::from_le_bytes(bytes)
+}
+
+pub(crate) fn random_base36(mut value: u64) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base36 digits are ASCII")
+}
+
 fn random_id(prefix: &str) -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "{}:{}:{}",
-        prefix,
-        crate::utils::time::now_millis(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    format!("{prefix}:{}:{}", now_millis(), random_base36(random_u64()))
 }
 
-fn content_to_text(content: &UserMessageContent) -> String {
-    match content {
-        UserMessageContent::Text(text) => text.clone(),
-        UserMessageContent::Parts(parts) => parts
-            .iter()
-            .map(user_content_block_to_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
-fn user_content_block_to_text(block: &UserContent) -> String {
-    match block {
-        UserContent::Text(text) => text.text.clone(),
-        UserContent::Image(image) => image_to_text(image),
-    }
-}
-
-fn tool_result_block_to_text(block: &ToolResultContent) -> String {
-    match block {
-        ToolResultContent::Text(text) => text.text.clone(),
-        ToolResultContent::Image(image) => image_to_text(image),
-    }
-}
-
-fn image_to_text(image: &ImageContent) -> String {
-    format!("[image:{}:{}]", image.mime_type, image.data.len())
+fn content_to_text(content: &[UserContent]) -> String {
+    content
+        .iter()
+        .map(|block| match block {
+            UserContent::Text(text) => text.text.clone(),
+            UserContent::Image(image) => {
+                format!("[image:{}:{}]", image.mime_type, utf16_len(&image.data))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn assistant_content_to_text(content: &[AssistantContent]) -> String {
@@ -762,11 +348,11 @@ fn assistant_content_to_text(content: &[AssistantContent]) -> String {
         .map(|block| match block {
             AssistantContent::Text(text) => text.text.clone(),
             AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
-            AssistantContent::ToolCall(tool_call) => {
-                let arguments = serde_json::to_string(&tool_call.arguments)
-                    .unwrap_or_else(|_| "null".to_string());
-                format!("{}:{}", tool_call.name, arguments)
-            }
+            AssistantContent::ToolCall(tool_call) => format!(
+                "{}:{}",
+                tool_call.name,
+                serde_json::to_string(&tool_call.arguments).unwrap_or_default()
+            ),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -774,60 +360,71 @@ fn assistant_content_to_text(content: &[AssistantContent]) -> String {
 
 fn tool_result_to_text(message: &ToolResultMessage) -> String {
     std::iter::once(message.tool_name.clone())
-        .chain(message.content.iter().map(tool_result_block_to_text))
+        .chain(
+            message
+                .content
+                .iter()
+                .map(|block| content_to_text(std::slice::from_ref(block))),
+        )
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+fn to_json(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
 fn message_to_text(message: &Message) -> String {
     match message {
-        Message::User(message) => content_to_text(&message.content),
+        Message::System(message) => std::iter::once(get_system_message_text(message))
+            .chain(
+                message
+                    .tools_removed
+                    .iter()
+                    .flatten()
+                    .map(|tool| format!("tool-:{}", to_json(tool))),
+            )
+            .chain(
+                message
+                    .tools_added
+                    .iter()
+                    .flatten()
+                    .map(|tool| format!("tool+:{}", to_json(tool))),
+            )
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Message::User(message) => match &message.content {
+            UserMessageContent::Text(text) => text.clone(),
+            UserMessageContent::Parts(parts) => content_to_text(parts),
+        },
         Message::Assistant(message) => assistant_content_to_text(&message.content),
         Message::ToolResult(message) => tool_result_to_text(message),
-        Message::Custom(_) => String::new(),
     }
 }
 
-fn message_role(message: &Message) -> &'static str {
-    match message {
-        Message::User(_) => "user",
-        Message::Assistant(_) => "assistant",
-        Message::ToolResult(_) => "toolResult",
-        Message::Custom(_) => "custom",
-    }
+fn serialize_context(context: &TranscriptContext) -> String {
+    context
+        .messages
+        .iter()
+        .map(|message| format!("{}:{}", message.role(), message_to_text(message)))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
-fn serialize_context(context: &Context) -> String {
-    let mut parts = Vec::new();
-    if let Some(system_prompt) = &context.system_prompt {
-        parts.push(format!("system:{system_prompt}"));
-    }
-    for message in &context.messages {
-        parts.push(format!(
-            "{}:{}",
-            message_role(message),
-            message_to_text(message)
-        ));
-    }
-    if !context.tools.is_empty() {
-        let tools = serde_json::to_string(&context.tools).unwrap_or_else(|_| "[]".to_string());
-        parts.push(format!("tools:{tools}"));
-    }
-    parts.join("\n\n")
-}
-
-fn common_prefix_utf16_units(a: &str, b: &str) -> usize {
+/// Common prefix length in UTF-16 code units.
+fn common_prefix_length(a: &str, b: &str) -> usize {
     a.encode_utf16()
         .zip(b.encode_utf16())
-        .take_while(|(left, right)| left == right)
+        .take_while(|(a, b)| a == b)
         .count()
 }
 
 fn with_usage_estimate(
     mut message: AssistantMessage,
-    context: &Context,
+    context: &TranscriptContext,
     options: &StreamOptions,
-    prompt_cache: &Arc<Mutex<HashMap<String, String>>>,
+    prompt_cache: &mut HashMap<String, String>,
 ) -> AssistantMessage {
     let prompt_text = serialize_context(context);
     let prompt_tokens = estimate_tokens(&prompt_text);
@@ -836,20 +433,22 @@ fn with_usage_estimate(
     let mut cache_read = 0;
     let mut cache_write = 0;
 
-    if let Some(session_id) = &options.session_id
-        && !matches!(options.cache_retention, Some(CacheRetention::None))
+    if let Some(session_id) = options.session_id.as_deref().filter(|id| !id.is_empty())
+        && options.cache_retention != Some(CacheRetention::None)
     {
-        let mut cache = prompt_cache.lock().expect("faux prompt cache poisoned");
-        if let Some(previous_prompt) = cache.get(session_id) {
-            let cached_units = common_prefix_utf16_units(previous_prompt, &prompt_text);
-            cache_read = estimate_tokens_from_units(cached_units);
-            cache_write =
-                estimate_tokens_from_units(utf16_len(&prompt_text).saturating_sub(cached_units));
-            input = prompt_tokens.saturating_sub(cache_read);
-        } else {
-            cache_write = prompt_tokens;
+        match prompt_cache
+            .get(session_id)
+            .filter(|prompt| !prompt.is_empty())
+        {
+            Some(previous_prompt) => {
+                let cached_units = common_prefix_length(previous_prompt, &prompt_text);
+                cache_read = cached_units.div_ceil(4) as u32;
+                cache_write = (utf16_len(&prompt_text) - cached_units).div_ceil(4) as u32;
+                input = prompt_tokens.saturating_sub(cache_read);
+            }
+            None => cache_write = prompt_tokens,
         }
-        cache.insert(session_id.clone(), prompt_text);
+        prompt_cache.insert(session_id.to_string(), prompt_text);
     }
 
     message.usage = Usage {
@@ -857,12 +456,32 @@ fn with_usage_estimate(
         output: output_tokens,
         cache_read,
         cache_write,
-        cache_write_1h: None,
-        reasoning: None,
         total_tokens: input + output_tokens + cache_read + cache_write,
-        cost: UsageCost::default(),
+        ..Default::default()
     };
     message
+}
+
+fn split_string_by_token_size(
+    text: &str,
+    min_token_size: usize,
+    max_token_size: usize,
+) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let span = (max_token_size - min_token_size + 1) as u64;
+        let token_size = min_token_size + (random_u64() % span) as usize;
+        let char_size = (token_size * 4).max(1);
+        let end = (index + char_size).min(chars.len());
+        chunks.push(chars[index..end].iter().collect());
+        index += char_size;
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
 }
 
 fn clone_message(
@@ -877,156 +496,838 @@ fn clone_message(
     message
 }
 
+fn create_deferred_message(model: &Model, handle: DeferredHandle) -> AssistantMessage {
+    let mut message = message_for(
+        Vec::new(),
+        &model.api,
+        &model.provider,
+        &model.id,
+        StopReason::Deferred,
+    );
+    message.deferred = Some(handle);
+    message
+}
+
 fn create_error_message(
-    error: impl Into<String>,
+    error: &Error,
     api: &str,
     provider: &str,
     model_id: &str,
 ) -> AssistantMessage {
+    let mut message = message_for(Vec::new(), api, provider, model_id, StopReason::Error);
+    message.error_message = Some(error.to_string());
+    message
+}
+
+fn create_aborted_message(partial: &AssistantMessage) -> AssistantMessage {
     AssistantMessage {
-        content: Vec::new(),
-        api: api.to_string(),
-        provider: provider.to_string(),
-        model: model_id.to_string(),
-        response_model: None,
-        response_id: None,
-        diagnostics: Vec::new(),
-        usage: default_usage(),
-        stop_reason: StopReason::Error,
-        error_message: Some(error.into()),
-        timestamp: crate::utils::time::now_millis(),
+        stop_reason: StopReason::Aborted,
+        error_message: Some("Request was aborted".to_string()),
+        timestamp: now_millis(),
+        ..partial.clone()
     }
-}
-
-fn faux_error_message(error: &Error) -> String {
-    match error {
-        Error::Provider(message) | Error::Validation(message) => message.clone(),
-        _ => error.to_string(),
-    }
-}
-
-fn create_aborted_message(mut partial: AssistantMessage) -> AssistantMessage {
-    partial.stop_reason = StopReason::Aborted;
-    partial.error_message = Some("Request was aborted".to_string());
-    partial.timestamp = crate::utils::time::now_millis();
-    partial
 }
 
 async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
-    let Some(tokens_per_second) = tokens_per_second else {
-        tokio::task::yield_now().await;
-        return;
-    };
-    if tokens_per_second <= 0.0 {
-        tokio::task::yield_now().await;
-        return;
+    match tokens_per_second.filter(|rate| *rate > 0.0) {
+        None => tokio::task::yield_now().await,
+        Some(rate) => {
+            let delay = f64::from(estimate_tokens(chunk)) / rate;
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+        }
     }
-    let delay = (estimate_tokens(chunk) as f64 / tokens_per_second).max(0.0);
-    tokio::time::sleep(Duration::from_secs_f64(delay)).await;
 }
 
-fn split_string_by_token_size(
-    text: &str,
+fn is_aborted(signal: Option<&CancellationToken>) -> bool {
+    signal.is_some_and(CancellationToken::is_cancelled)
+}
+
+fn push_aborted(stream: &AssistantMessageEventStream, partial: &AssistantMessage) {
+    let aborted = create_aborted_message(partial);
+    stream.push(AssistantMessageEvent::Error {
+        reason: StopReason::Aborted,
+        error: aborted.clone(),
+    });
+    stream.end(Some(aborted));
+}
+
+struct FauxShared {
+    api: String,
+    provider: String,
+    models: Vec<Model>,
     min_token_size: usize,
     max_token_size: usize,
-) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let min_token_size = std::cmp::max(1, std::cmp::min(min_token_size, max_token_size));
-    let max_token_size = std::cmp::max(min_token_size, max_token_size);
-    let range = max_token_size - min_token_size + 1;
-    let mut seed = (utf16_len(text) as u64)
-        ^ ((min_token_size as u64) << 21)
-        ^ ((max_token_size as u64) << 42);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_units = 0;
-    let mut token_size = next_token_size(&mut seed, min_token_size, range);
-    let mut chunk_units = token_size * 4;
+    tokens_per_second: Option<f64>,
+    deferred: Option<FauxDeferredOptions>,
+    inner: Mutex<FauxInner>,
+}
 
-    for character in text.chars() {
-        let character_units = character.len_utf16();
-        if !current.is_empty() && current_units + character_units > chunk_units {
-            chunks.push(std::mem::take(&mut current));
-            current_units = 0;
-            token_size = next_token_size(&mut seed, min_token_size, range);
-            chunk_units = token_size * 4;
+#[derive(Default)]
+struct FauxInner {
+    pending_responses: VecDeque<FauxResponseStep>,
+    state: FauxProviderState,
+    prompt_cache: HashMap<String, String>,
+    deferred_responses: HashMap<String, DeferredEntry>,
+}
+
+struct DeferredEntry {
+    handle: DeferredHandle,
+    step: FauxResponseStep,
+    context: TranscriptContext,
+    options: SimpleStreamOptions,
+    model: Model,
+    pending_fetches: u32,
+    cancelled: bool,
+    final_message: Option<AssistantMessage>,
+}
+
+/// `createFauxCore(options)`: the scripted stream implementation shared by
+/// [`faux_provider`]. Cheap to clone.
+#[derive(Clone)]
+pub struct FauxCore {
+    shared: Arc<FauxShared>,
+}
+
+impl std::fmt::Debug for FauxCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FauxCore")
+            .field("api", &self.shared.api)
+            .field("provider", &self.shared.provider)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `createFauxCore(options)`.
+pub fn create_faux_core(options: RegisterFauxProviderOptions) -> FauxCore {
+    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
+    let provider = options
+        .provider
+        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
+    let token_size = options.token_size.unwrap_or_default();
+    let max = token_size.max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
+    let min_token_size = token_size
+        .min
+        .unwrap_or(DEFAULT_MIN_TOKEN_SIZE)
+        .min(max)
+        .max(1);
+    let max_token_size = min_token_size.max(max);
+
+    let definitions = if options.models.is_empty() {
+        vec![FauxModelDefinition {
+            id: DEFAULT_MODEL_ID.to_string(),
+            name: Some(DEFAULT_MODEL_NAME.to_string()),
+            reasoning: Some(false),
+            input: Some(vec![ModelInput::Text, ModelInput::Image]),
+            input_limits: None,
+            cost: Some(ModelCost::default()),
+            context_window: Some(128_000),
+            max_tokens: Some(16_384),
+        }]
+    } else {
+        options.models
+    };
+    let models = definitions
+        .into_iter()
+        .map(|definition| Model {
+            name: definition.name.unwrap_or_else(|| definition.id.clone()),
+            id: definition.id,
+            api: api.clone(),
+            provider: provider.clone(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            reasoning: definition.reasoning.unwrap_or(false),
+            input: definition
+                .input
+                .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
+            input_limits: definition.input_limits,
+            cost: definition.cost.unwrap_or_default(),
+            context_window: definition.context_window.unwrap_or(128_000),
+            max_tokens: definition.max_tokens.unwrap_or(16_384),
+            ..Default::default()
+        })
+        .collect();
+
+    FauxCore {
+        shared: Arc::new(FauxShared {
+            api,
+            provider,
+            models,
+            min_token_size,
+            max_token_size,
+            tokens_per_second: options.tokens_per_second,
+            deferred: options.deferred,
+            inner: Mutex::default(),
+        }),
+    }
+}
+
+impl FauxCore {
+    pub fn api(&self) -> &str {
+        &self.shared.api
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.shared.provider
+    }
+
+    /// The registered models; never empty.
+    pub fn models(&self) -> &[Model] {
+        &self.shared.models
+    }
+
+    /// `getModel()`: the first model.
+    pub fn get_model(&self) -> Model {
+        self.shared.models[0].clone()
+    }
+
+    /// `getModel(modelId)`.
+    pub fn get_model_by_id(&self, model_id: &str) -> Option<Model> {
+        if model_id.is_empty() {
+            return Some(self.get_model());
         }
-        current.push(character);
-        current_units += character_units;
+        self.shared
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model_id)
+            .cloned()
     }
 
-    if !current.is_empty() {
-        chunks.push(current);
+    /// Snapshot of `state`.
+    pub fn state(&self) -> FauxProviderState {
+        self.shared.inner.lock().state.clone()
     }
-    chunks
+
+    pub fn set_responses(&self, responses: impl IntoIterator<Item = FauxResponseStep>) {
+        self.shared.inner.lock().pending_responses = responses.into_iter().collect();
+    }
+
+    pub fn append_responses(&self, responses: impl IntoIterator<Item = FauxResponseStep>) {
+        self.shared.inner.lock().pending_responses.extend(responses);
+    }
+
+    pub fn get_pending_response_count(&self) -> usize {
+        self.shared.inner.lock().pending_responses.len()
+    }
+
+    fn error_message(&self, error: &Error, model_id: &str) -> AssistantMessage {
+        create_error_message(error, &self.shared.api, &self.shared.provider, model_id)
+    }
+
+    fn push_error(&self, stream: &AssistantMessageEventStream, error: &Error, model_id: &str) {
+        let message = self.error_message(error, model_id);
+        stream.push(AssistantMessageEvent::Error {
+            reason: StopReason::Error,
+            error: message.clone(),
+        });
+        stream.end(Some(message));
+    }
+
+    async fn resolve_response(
+        &self,
+        step: FauxResponseStep,
+        context: &TranscriptContext,
+        options: &SimpleStreamOptions,
+        request_model: &Model,
+    ) -> Result<AssistantMessage> {
+        let resolved = match step {
+            FauxResponseStep::Message(message) => *message,
+            FauxResponseStep::Factory(factory) => {
+                let state = self.state();
+                factory(
+                    context.clone(),
+                    options.clone(),
+                    state,
+                    request_model.clone(),
+                )
+                .await?
+            }
+        };
+        let cloned = clone_message(
+            resolved,
+            &self.shared.api,
+            &self.shared.provider,
+            &request_model.id,
+        );
+        let mut inner = self.shared.inner.lock();
+        Ok(with_usage_estimate(
+            cloned,
+            context,
+            &options.stream,
+            &mut inner.prompt_cache,
+        ))
+    }
+
+    async fn stream_with_deltas(
+        &self,
+        stream: &AssistantMessageEventStream,
+        message: AssistantMessage,
+        signal: Option<&CancellationToken>,
+    ) -> Result<()> {
+        let (min, max, rate) = (
+            self.shared.min_token_size,
+            self.shared.max_token_size,
+            self.shared.tokens_per_second,
+        );
+        let mut partial = AssistantMessage {
+            content: Vec::new(),
+            stop_reason: StopReason::Pending,
+            ..message.clone()
+        };
+        if is_aborted(signal) {
+            push_aborted(stream, &partial);
+            return Ok(());
+        }
+
+        stream.push(AssistantMessageEvent::Start {
+            partial: partial.clone(),
+        });
+
+        for (index, block) in message.content.iter().enumerate() {
+            if is_aborted(signal) {
+                push_aborted(stream, &partial);
+                return Ok(());
+            }
+
+            match block {
+                AssistantContent::Thinking(thinking) => {
+                    partial.content.push(faux_thinking(""));
+                    stream.push(AssistantMessageEvent::ThinkingStart {
+                        content_index: index,
+                        partial: partial.clone(),
+                    });
+                    for chunk in split_string_by_token_size(&thinking.thinking, min, max) {
+                        schedule_chunk(&chunk, rate).await;
+                        if is_aborted(signal) {
+                            push_aborted(stream, &partial);
+                            return Ok(());
+                        }
+                        if let Some(AssistantContent::Thinking(current)) =
+                            partial.content.get_mut(index)
+                        {
+                            current.thinking.push_str(&chunk);
+                        }
+                        stream.push(AssistantMessageEvent::ThinkingDelta {
+                            content_index: index,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        });
+                    }
+                    stream.push(AssistantMessageEvent::ThinkingEnd {
+                        content_index: index,
+                        content: thinking.thinking.clone(),
+                        partial: partial.clone(),
+                    });
+                }
+                AssistantContent::Text(text) => {
+                    partial.content.push(faux_text(""));
+                    stream.push(AssistantMessageEvent::TextStart {
+                        content_index: index,
+                        partial: partial.clone(),
+                    });
+                    for chunk in split_string_by_token_size(&text.text, min, max) {
+                        schedule_chunk(&chunk, rate).await;
+                        if is_aborted(signal) {
+                            push_aborted(stream, &partial);
+                            return Ok(());
+                        }
+                        if let Some(AssistantContent::Text(current)) =
+                            partial.content.get_mut(index)
+                        {
+                            current.text.push_str(&chunk);
+                        }
+                        stream.push(AssistantMessageEvent::TextDelta {
+                            content_index: index,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        });
+                    }
+                    stream.push(AssistantMessageEvent::TextEnd {
+                        content_index: index,
+                        content: text.text.clone(),
+                        partial: partial.clone(),
+                    });
+                }
+                AssistantContent::ToolCall(tool_call) => {
+                    partial.content.push(AssistantContent::ToolCall(ToolCall {
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        arguments: Value::Object(Default::default()),
+                        thought_signature: None,
+                        namespace: None,
+                    }));
+                    stream.push(AssistantMessageEvent::ToolCallStart {
+                        content_index: index,
+                        partial: partial.clone(),
+                    });
+                    for chunk in
+                        split_string_by_token_size(&to_json(&tool_call.arguments), min, max)
+                    {
+                        schedule_chunk(&chunk, rate).await;
+                        if is_aborted(signal) {
+                            push_aborted(stream, &partial);
+                            return Ok(());
+                        }
+                        stream.push(AssistantMessageEvent::ToolCallDelta {
+                            content_index: index,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        });
+                    }
+                    if let Some(AssistantContent::ToolCall(current)) =
+                        partial.content.get_mut(index)
+                    {
+                        current.arguments = tool_call.arguments.clone();
+                    }
+                    stream.push(AssistantMessageEvent::ToolCallEnd {
+                        content_index: index,
+                        tool_call: tool_call.clone(),
+                        partial: partial.clone(),
+                    });
+                }
+            }
+        }
+
+        match message.stop_reason {
+            StopReason::Pending => Err(Error::message("Faux response ended without a stop reason")),
+            StopReason::Error | StopReason::Aborted => {
+                stream.push(AssistantMessageEvent::Error {
+                    reason: message.stop_reason,
+                    error: message.clone(),
+                });
+                stream.end(Some(message));
+                Ok(())
+            }
+            reason => {
+                stream.push(AssistantMessageEvent::Done {
+                    reason,
+                    message: message.clone(),
+                });
+                stream.end(Some(message));
+                Ok(())
+            }
+        }
+    }
+
+    async fn run_stream(
+        &self,
+        outer: &AssistantMessageEventStream,
+        step: Option<FauxResponseStep>,
+        request_model: Model,
+        context: TranscriptContext,
+        options: SimpleStreamOptions,
+    ) -> Result<()> {
+        call_response_hook(options.stream.on_response.as_ref(), &request_model).await?;
+        let Some(step) = step else {
+            let error = Error::message("No more faux responses queued");
+            let message = self.error_message(&error, &request_model.id);
+            let message = {
+                let mut inner = self.shared.inner.lock();
+                with_usage_estimate(message, &context, &options.stream, &mut inner.prompt_cache)
+            };
+            outer.push(AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: message.clone(),
+            });
+            outer.end(Some(message));
+            return Ok(());
+        };
+
+        if options
+            .deferred
+            .is_some_and(|deferred| deferred.is_enabled())
+        {
+            let deferred = self.shared.deferred.unwrap_or_default();
+            let handle = DeferredHandle {
+                provider: request_model.provider.clone(),
+                model_id: request_model.id.clone(),
+                api: request_model.api.clone(),
+                id: random_id("deferred"),
+                expires_at: None,
+                poll_after_ms: deferred.poll_after_ms,
+                data: None,
+            };
+            let signal = options.stream.signal.clone();
+            self.shared.inner.lock().deferred_responses.insert(
+                handle.id.clone(),
+                DeferredEntry {
+                    handle: handle.clone(),
+                    step,
+                    context,
+                    options,
+                    model: request_model.clone(),
+                    pending_fetches: deferred.pending_fetches.unwrap_or(0),
+                    cancelled: false,
+                    final_message: None,
+                },
+            );
+            return self
+                .stream_with_deltas(
+                    outer,
+                    create_deferred_message(&request_model, handle),
+                    signal.as_ref(),
+                )
+                .await;
+        }
+
+        let message = self
+            .resolve_response(step, &context, &options, &request_model)
+            .await?;
+        self.stream_with_deltas(outer, message, options.stream.signal.as_ref())
+            .await
+    }
+
+    async fn run_fetch_deferred(
+        &self,
+        outer: &AssistantMessageEventStream,
+        request_model: Model,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> Result<()> {
+        call_response_hook(options.request.on_response.as_ref(), &request_model).await?;
+        let signal = options.request.signal.as_ref();
+        let pending = {
+            let mut inner = self.shared.inner.lock();
+            let entry = inner
+                .deferred_responses
+                .get_mut(&handle.id)
+                .filter(|entry| {
+                    entry.handle.provider == handle.provider
+                        && entry.handle.model_id == handle.model_id
+                        && entry.handle.api == handle.api
+                })
+                .ok_or_else(|| {
+                    Error::message(format!("Unknown faux deferred response: {}", handle.id))
+                })?;
+            if entry.cancelled {
+                return Err(Error::message(format!(
+                    "Faux deferred response was cancelled: {}",
+                    handle.id
+                )));
+            }
+            if entry.pending_fetches > 0 {
+                entry.pending_fetches -= 1;
+                Some(entry.handle.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(entry_handle) = pending {
+            return self
+                .stream_with_deltas(
+                    outer,
+                    create_deferred_message(&request_model, entry_handle),
+                    signal,
+                )
+                .await;
+        }
+
+        let existing = {
+            let inner = self.shared.inner.lock();
+            let entry = &inner.deferred_responses[&handle.id];
+            match &entry.final_message {
+                Some(message) => Ok(message.clone()),
+                None => Err((
+                    entry.step.clone(),
+                    entry.context.clone(),
+                    entry.options.clone(),
+                    entry.model.clone(),
+                )),
+            }
+        };
+        let final_message = match existing {
+            Ok(message) => message,
+            Err((step, context, mut submission_options, model)) => {
+                submission_options.deferred = None;
+                submission_options.stream.signal = None;
+                submission_options.stream.on_response = None;
+                let message = match self
+                    .resolve_response(step, &context, &submission_options, &model)
+                    .await
+                {
+                    Ok(message) => message,
+                    Err(error) => self.error_message(&error, &model.id),
+                };
+                if let Some(entry) = self
+                    .shared
+                    .inner
+                    .lock()
+                    .deferred_responses
+                    .get_mut(&handle.id)
+                {
+                    entry.final_message = Some(message.clone());
+                }
+                message
+            }
+        };
+        self.stream_with_deltas(outer, final_message, signal).await
+    }
 }
 
-fn next_token_size(seed: &mut u64, min_token_size: usize, range: usize) -> usize {
-    if range <= 1 {
-        return min_token_size;
+async fn call_response_hook(hook: Option<&ResponseHook>, model: &Model) -> Result<()> {
+    match hook {
+        Some(hook) => {
+            hook(
+                ProviderResponse {
+                    status: 200,
+                    headers: Default::default(),
+                },
+                model,
+            )
+            .await
+        }
+        None => Ok(()),
     }
-    *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-    min_token_size + ((*seed >> 32) as usize % range)
 }
 
-fn is_cancelled(options: &StreamOptions) -> bool {
-    options
-        .cancellation_token
-        .as_ref()
-        .is_some_and(|token| token.is_cancelled())
+#[async_trait]
+impl ProviderStreams for FauxCore {
+    fn stream(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: StreamOptions,
+    ) -> AssistantMessageEventStream {
+        self.stream_simple(model, context, SimpleStreamOptions::from(options))
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: TranscriptContext,
+        options: SimpleStreamOptions,
+    ) -> AssistantMessageEventStream {
+        let outer = AssistantMessageEventStream::new();
+        let step = {
+            let mut inner = self.shared.inner.lock();
+            inner.state.call_count += 1;
+            inner.pending_responses.pop_front()
+        };
+        let core = self.clone();
+        let producer = outer.clone();
+        tokio::spawn(async move {
+            let model_id = model.id.clone();
+            // A panicking response factory ends the stream like a throwing one (TS `catch`).
+            let run = AssertUnwindSafe(core.run_stream(&producer, step, model, context, options));
+            let error = match run.catch_unwind().await {
+                Ok(result) => result.err(),
+                Err(payload) => Some(Error::message(panic_message(payload.as_ref()))),
+            };
+            if let Some(error) = error {
+                core.push_error(&producer, &error, &model_id);
+            }
+        });
+        outer
+    }
+
+    fn supports_fetch_deferred(&self) -> bool {
+        true
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: Model,
+        handle: DeferredHandle,
+        options: DeferredFetchOptions,
+    ) -> AssistantMessageEventStream {
+        let outer = AssistantMessageEventStream::new();
+        self.shared.inner.lock().state.deferred_fetch_count += 1;
+        let core = self.clone();
+        let producer = outer.clone();
+        tokio::spawn(async move {
+            let model_id = model.id.clone();
+            let run = AssertUnwindSafe(core.run_fetch_deferred(&producer, model, handle, options));
+            let error = match run.catch_unwind().await {
+                Ok(result) => result.err(),
+                Err(payload) => Some(Error::message(panic_message(payload.as_ref()))),
+            };
+            if let Some(error) = error {
+                core.push_error(&producer, &error, &model_id);
+            }
+        });
+        outer
+    }
+
+    fn supports_cancel_deferred(&self) -> bool {
+        true
+    }
+
+    async fn cancel_deferred(
+        &self,
+        model: Model,
+        handle: DeferredHandle,
+        options: DeferredCancelOptions,
+    ) -> Result<()> {
+        {
+            let mut inner = self.shared.inner.lock();
+            inner.state.cancelled_deferred.push(handle.clone());
+            if let Some(entry) = inner.deferred_responses.get_mut(&handle.id) {
+                entry.cancelled = true;
+            }
+        }
+        call_response_hook(options.on_response.as_ref(), &model).await
+    }
+}
+
+struct FauxAuth;
+
+#[async_trait]
+impl ApiKeyAuth for FauxAuth {
+    fn name(&self) -> &str {
+        "Faux"
+    }
+
+    async fn resolve(&self, _input: ApiKeyAuthInput) -> Result<Option<AuthResult>> {
+        Ok(Some(AuthResult::default()))
+    }
+}
+
+/// `FauxProviderHandle`. Derefs to [`FauxCore`] for `api`, `models`,
+/// `get_model`, `state`, `set_responses`, `append_responses` and
+/// `get_pending_response_count`.
+#[derive(Clone)]
+pub struct FauxProviderHandle {
+    pub provider: Arc<dyn Provider>,
+    core: FauxCore,
+}
+
+impl Deref for FauxProviderHandle {
+    type Target = FauxCore;
+
+    fn deref(&self) -> &FauxCore {
+        &self.core
+    }
+}
+
+/// Faux provider for tests built on explicit `Models` collections:
+///
+/// ```no_run
+/// # async fn demo() {
+/// use ai::{FauxMessageOptions, create_models, faux_assistant_message, faux_provider};
+///
+/// let faux = faux_provider(Default::default());
+/// let models = create_models(Default::default());
+/// models.set_provider(faux.provider.clone());
+/// faux.set_responses([faux_assistant_message("hi", FauxMessageOptions::default()).into()]);
+/// # }
+/// ```
+pub fn faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderHandle {
+    let core = create_faux_core(options);
+    let provider = create_provider(CreateProviderOptions {
+        id: core.provider().to_string(),
+        auth: ProviderAuth {
+            api_key: Some(Arc::new(FauxAuth)),
+            oauth: None,
+        },
+        models: core.models().iter().cloned().map(AnyModel::Chat).collect(),
+        api: Some(ProviderApi::Single(Arc::new(core.clone()))),
+        ..Default::default()
+    })
+    .expect("the faux provider has an API implementation");
+    FauxProviderHandle { provider, core }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Port of `test/faux-provider.test.ts` and the `fauxProvider` block of
+    //! `test/providers.test.ts`.
+    //!
+    //! Divergence: Pi's `faux-provider.test.ts` registers through the compat
+    //! `registerFauxProvider`; ai.rs has no global api-registry, so each test
+    //! registers `faux_provider(..)` in its own `Models` and requests go
+    //! through `Models::stream`. The "unregisters the provider" case has no
+    //! counterpart and is not ported.
+
     use futures::StreamExt;
     use serde_json::json;
-    use tokio_util::sync::CancellationToken;
-
-    use crate::stream::{complete, stream};
-    use crate::types::{
-        AssistantContent, AssistantMessageEvent, Context, Message, StreamOptions, TextContent,
-        Tool, ToolResultContent, ToolResultMessage, UserContent, UserMessage,
-    };
 
     use super::*;
+    use crate::models::{Models, create_models};
+    use crate::types::{Context, DeferredRequest, DeferredWindow, ImageContent, Tool, UserMessage};
 
-    async fn collect_events(mut stream: AssistantEventStream) -> Vec<AssistantMessageEvent> {
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            events.push(event);
-        }
-        events
+    /// A faux provider registered in its own `Models` collection.
+    struct Registered {
+        faux: FauxProviderHandle,
+        models: Models,
     }
 
-    fn assistant_text(message: &AssistantMessage) -> String {
-        message
-            .content
+    impl Deref for Registered {
+        type Target = FauxProviderHandle;
+
+        fn deref(&self) -> &FauxProviderHandle {
+            &self.faux
+        }
+    }
+
+    impl Registered {
+        fn stream(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream {
+            self.models
+                .stream(&model, &context, options.unwrap_or_default())
+        }
+
+        async fn run(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> AssistantMessage {
+            self.stream(model, context, options).result().await
+        }
+
+        async fn collect_events(
+            &self,
+            model: Model,
+            context: Context,
+            options: Option<StreamOptions>,
+        ) -> Vec<AssistantMessageEvent> {
+            self.stream(model, context, options).collect().await
+        }
+    }
+
+    async fn register(options: RegisterFauxProviderOptions) -> Registered {
+        let faux = faux_provider(options);
+        let models = create_models(Default::default());
+        models.set_provider(faux.provider.clone());
+        Registered { faux, models }
+    }
+
+    fn message(text: &str) -> FauxResponseStep {
+        faux_assistant_message(text, FauxMessageOptions::default()).into()
+    }
+
+    fn hi() -> Context {
+        Context::builder().message(Message::user_text("hi")).build()
+    }
+
+    fn event_types(events: &[AssistantMessageEvent]) -> Vec<&'static str> {
+        events
             .iter()
-            .filter_map(|content| match content {
-                AssistantContent::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map(AssistantMessageEvent::event_type)
+            .collect()
+    }
+
+    fn terminal_error(event: &AssistantMessageEvent) -> (StopReason, &AssistantMessage) {
+        match event {
+            AssistantMessageEvent::Error { reason, error } => (*reason, error),
+            other => panic!("expected an error event, got {}", other.event_type()),
+        }
     }
 
     #[tokio::test]
     async fn registers_a_custom_provider_and_estimates_usage() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message("hello world", None)]);
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("hello world")]);
 
-        let context = Context {
-            system_prompt: Some("Be concise.".to_string()),
-            messages: vec![Message::user_text("hi there")],
-            tools: Vec::new(),
-        };
-
-        let response = complete(registration.get_model(), context, None)
-            .await
-            .expect("faux response");
+        let context = Context::builder()
+            .system_prompt("Be concise.")
+            .message(Message::user_text("hi there"))
+            .build();
+        let response = registration
+            .run(registration.get_model(), context, None)
+            .await;
         assert_eq!(response.content, vec![faux_text("hello world")]);
         assert!(response.usage.input > 0);
         assert!(response.usage.output > 0);
@@ -1034,92 +1335,75 @@ mod tests {
             response.usage.total_tokens,
             response.usage.input + response.usage.output
         );
-        assert_eq!(registration.state.call_count(), 1);
-
-        registration.unregister();
+        assert_eq!(registration.state().call_count, 1);
     }
 
     #[tokio::test]
     async fn supports_helper_blocks_for_text_thinking_and_tool_calls() {
-        let registration = register_faux_provider(None);
+        let registration = register(Default::default()).await;
         registration.set_responses([faux_assistant_message(
-            vec![
+            [
                 faux_thinking("think"),
-                faux_tool_call("echo", json!({ "text": "hi" }), Some("tool-1".to_string())),
+                faux_tool_call("echo", json!({ "text": "hi" }), None),
                 faux_text("done"),
             ],
-            Some(FauxAssistantMessageOptions {
+            FauxMessageOptions {
                 stop_reason: Some(StopReason::ToolUse),
                 ..Default::default()
-            }),
-        )]);
-
-        let response = complete(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
             },
-            None,
         )
-        .await
-        .expect("faux response");
+        .into()]);
 
+        let response = registration.run(registration.get_model(), hi(), None).await;
+        assert_eq!(response.content.len(), 3);
+        assert_eq!(response.content[0], faux_thinking("think"));
+        let AssistantContent::ToolCall(tool_call) = &response.content[1] else {
+            panic!("expected a tool call");
+        };
+        assert!(!tool_call.id.is_empty());
         assert_eq!(
-            response.content,
-            vec![
-                faux_thinking("think"),
-                faux_tool_call("echo", json!({ "text": "hi" }), Some("tool-1".to_string())),
-                faux_text("done"),
-            ]
+            (tool_call.name.as_str(), &tool_call.arguments),
+            ("echo", &json!({ "text": "hi" }))
         );
+        assert_eq!(response.content[2], faux_text("done"));
         assert_eq!(response.stop_reason, StopReason::ToolUse);
-
-        registration.unregister();
     }
 
     #[tokio::test]
     async fn supports_multiple_models_with_per_model_reasoning_and_model_aware_factories() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+        let registration = register(RegisterFauxProviderOptions {
             models: vec![
                 FauxModelDefinition {
-                    id: "faux-fast".to_string(),
                     name: Some("Faux Fast".to_string()),
                     reasoning: Some(false),
-                    ..Default::default()
+                    ..FauxModelDefinition::new("faux-fast")
                 },
                 FauxModelDefinition {
-                    id: "faux-thinker".to_string(),
                     name: Some("Faux Thinker".to_string()),
                     reasoning: Some(true),
-                    ..Default::default()
+                    ..FauxModelDefinition::new("faux-thinker")
                 },
             ],
             ..Default::default()
-        }));
-        registration.set_responses([
-            FauxResponseStep::factory(|_context, _options, _state, model| async move {
+        })
+        .await;
+        let factory = || {
+            FauxResponseStep::factory(|_, _, _, model| {
                 Ok(faux_assistant_message(
                     format!("{}:{}", model.id, model.reasoning),
-                    None,
+                    FauxMessageOptions::default(),
                 ))
-            }),
-            FauxResponseStep::factory(|_context, _options, _state, model| async move {
-                Ok(faux_assistant_message(
-                    format!("{}:{}", model.id, model.reasoning),
-                    None,
-                ))
-            }),
-        ]);
+            })
+        };
+        registration.set_responses([factory(), factory()]);
 
-        assert_eq!(
-            registration
-                .models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["faux-fast", "faux-thinker"]
-        );
+        let ids: Vec<_> = registration
+            .models()
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["faux-fast", "faux-thinker"]);
+        assert_eq!(registration.get_model(), registration.models()[0]);
         assert!(!registration.get_model_by_id("faux-fast").unwrap().reasoning);
         assert!(
             registration
@@ -1128,84 +1412,49 @@ mod tests {
                 .reasoning
         );
 
-        let fast = complete(
-            registration.get_model_by_id("faux-fast").unwrap(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            None,
-        )
-        .await
-        .expect("fast response");
-        let thinker = complete(
-            registration.get_model_by_id("faux-thinker").unwrap(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            None,
-        )
-        .await
-        .expect("thinker response");
-
+        let fast = registration
+            .run(
+                registration.get_model_by_id("faux-fast").unwrap(),
+                hi(),
+                None,
+            )
+            .await;
+        let thinker = registration
+            .run(
+                registration.get_model_by_id("faux-thinker").unwrap(),
+                hi(),
+                None,
+            )
+            .await;
         assert_eq!(fast.content, vec![faux_text("faux-fast:false")]);
         assert_eq!(thinker.content, vec![faux_text("faux-thinker:true")]);
-
-        registration.unregister();
     }
 
     #[tokio::test]
     async fn rewrites_api_provider_and_model_on_returned_messages() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+        let registration = register(RegisterFauxProviderOptions {
             api: Some("faux:test".to_string()),
             provider: Some("faux-provider".to_string()),
-            models: vec![FauxModelDefinition {
-                id: "faux-model".to_string(),
-                ..Default::default()
-            }],
+            models: vec![FauxModelDefinition::new("faux-model")],
             ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message("hello", None)]);
+        })
+        .await;
+        registration.set_responses([message("hello")]);
 
-        let response = complete(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            None,
-        )
-        .await
-        .expect("faux response");
-
+        let response = registration.run(registration.get_model(), hi(), None).await;
         assert_eq!(response.api, "faux:test");
         assert_eq!(response.provider, "faux-provider");
         assert_eq!(response.model, "faux-model");
-        registration.unregister();
     }
 
     #[tokio::test]
     async fn consumes_queued_responses_in_order_and_errors_when_exhausted() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([
-            faux_assistant_message("first", None),
-            faux_assistant_message("second", None),
-        ]);
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("first"), message("second")]);
 
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Context::default()
-        };
-        let first = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("first response");
-        let second = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("second response");
-        let exhausted = complete(registration.get_model(), context, None)
-            .await
-            .expect("exhausted response");
+        let first = registration.run(registration.get_model(), hi(), None).await;
+        let second = registration.run(registration.get_model(), hi(), None).await;
+        let exhausted = registration.run(registration.get_model(), hi(), None).await;
 
         assert_eq!(first.content, vec![faux_text("first")]);
         assert_eq!(second.content, vec![faux_text("second")]);
@@ -1215,168 +1464,175 @@ mod tests {
             Some("No more faux responses queued")
         );
         assert_eq!(registration.get_pending_response_count(), 0);
-        assert_eq!(registration.state.call_count(), 3);
-
-        registration.unregister();
+        assert_eq!(registration.state().call_count, 3);
     }
 
     #[tokio::test]
     async fn can_replace_and_append_queued_responses() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message("first", None)]);
-        let context = Context {
-            messages: vec![Message::user_text("hi")],
-            ..Context::default()
-        };
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("first")]);
+        let text = |response: AssistantMessage| response.content;
 
-        let first = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("first response");
-        assert_eq!(first.content, vec![faux_text("first")]);
+        assert_eq!(
+            text(registration.run(registration.get_model(), hi(), None).await),
+            vec![faux_text("first")]
+        );
         assert_eq!(registration.get_pending_response_count(), 0);
 
-        registration.set_responses([faux_assistant_message("second", None)]);
+        registration.set_responses([message("second")]);
         assert_eq!(registration.get_pending_response_count(), 1);
-        let second = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("second response");
-        assert_eq!(second.content, vec![faux_text("second")]);
+        assert_eq!(
+            text(registration.run(registration.get_model(), hi(), None).await),
+            vec![faux_text("second")]
+        );
 
-        registration.append_responses([
-            faux_assistant_message("third", None),
-            faux_assistant_message("fourth", None),
-        ]);
+        registration.append_responses([message("third"), message("fourth")]);
         assert_eq!(registration.get_pending_response_count(), 2);
-        let third = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("third response");
-        let fourth = complete(registration.get_model(), context, None)
-            .await
-            .expect("fourth response");
-        assert_eq!(third.content, vec![faux_text("third")]);
-        assert_eq!(fourth.content, vec![faux_text("fourth")]);
+        assert_eq!(
+            text(registration.run(registration.get_model(), hi(), None).await),
+            vec![faux_text("third")]
+        );
+        assert_eq!(
+            text(registration.run(registration.get_model(), hi(), None).await),
+            vec![faux_text("fourth")]
+        );
         assert_eq!(registration.get_pending_response_count(), 0);
-        registration.unregister();
-    }
-
-    #[tokio::test]
-    async fn emits_an_error_when_a_response_factory_throws() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([FauxResponseStep::factory(
-            |_context, _options, _state, _model| async move {
-                Err(crate::Error::Provider("boom".to_string()))
-            },
-        )]);
-
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
-        .await;
-
-        assert_eq!(events.len(), 1);
-        let AssistantMessageEvent::Error { error, .. } = &events[0] else {
-            panic!("expected error event");
-        };
-        assert_eq!(error.stop_reason, StopReason::Error);
-        assert_eq!(error.error_message.as_deref(), Some("boom"));
-        registration.unregister();
     }
 
     #[tokio::test]
     async fn supports_async_response_factories() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([FauxResponseStep::factory(
-            |context, options, state, model| async move {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                assert_eq!(context.messages.len(), 1);
-                assert_eq!(options.api_key.as_deref(), Some("factory-key"));
-                assert_eq!(state.call_count(), 1);
+        let registration = register(Default::default()).await;
+        registration.set_responses([FauxResponseStep::async_factory(
+            |context, _, state, _| async move {
                 Ok(faux_assistant_message(
-                    format!("{}:{}", model.id, state.call_count()),
-                    None,
+                    format!("{}:{}", context.messages.len(), state.call_count),
+                    FauxMessageOptions::default(),
                 ))
             },
         )]);
 
-        let response = complete(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            Some(StreamOptions {
-                api_key: Some("factory-key".to_string()),
-                ..StreamOptions::default()
-            }),
-        )
-        .await
-        .expect("factory response");
+        let response = registration.run(registration.get_model(), hi(), None).await;
+        assert_eq!(response.content, vec![faux_text("1:1")]);
+    }
 
-        assert_eq!(assistant_text(&response), "faux-1:1");
-        registration.unregister();
+    #[tokio::test]
+    async fn emits_an_error_when_a_response_factory_throws() {
+        let registration = register(Default::default()).await;
+        registration.set_responses([FauxResponseStep::factory(|_, _, _, _| {
+            Err(Error::message("boom"))
+        })]);
+
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        assert_eq!(events.len(), 1);
+        let (_, error) = terminal_error(&events[0]);
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(error.error_message.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn emits_an_error_when_a_response_factory_panics() {
+        // A panic is the Rust form of a throwing factory: the stream ends with an error event.
+        let registration = register(Default::default()).await;
+        registration.set_responses([FauxResponseStep::factory(|_, _, _, _| {
+            panic!("factory panicked")
+        })]);
+
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        assert_eq!(events.len(), 1);
+        let (_, error) = terminal_error(&events[0]);
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(error.error_message.as_deref(), Some("factory panicked"));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_queued_response_without_a_terminal_stop_reason() {
+        let registration = register(Default::default()).await;
+        registration.set_responses([faux_assistant_message(
+            "partial",
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::Pending),
+                ..Default::default()
+            },
+        )
+        .into()]);
+
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        assert!(!event_types(&events).contains(&"done"));
+        let (_, error) = terminal_error(events.last().unwrap());
+        assert_eq!(error.stop_reason, StopReason::Error);
+        assert_eq!(
+            error.error_message.as_deref(),
+            Some("Faux response ended without a stop reason")
+        );
     }
 
     #[tokio::test]
     async fn estimates_prompt_and_output_tokens_from_serialized_context() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message("done", None)]);
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("done")]);
 
         let tool = Tool {
             name: "echo".to_string(),
             description: "Echo back text".to_string(),
             parameters: json!({
                 "type": "object",
-                "properties": {
-                    "text": { "type": "string" }
-                },
-                "required": ["text"]
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
             }),
             constrained_sampling: None,
         };
-        let context = Context {
-            system_prompt: Some("sys".to_string()),
-            messages: vec![
-                Message::User(UserMessage {
-                    content: UserMessageContent::Parts(vec![
-                        UserContent::Text(TextContent {
-                            text: "hello".to_string(),
-                            text_signature: None,
-                        }),
-                        UserContent::Image(ImageContent {
-                            mime_type: "image/png".to_string(),
-                            data: "abcd".to_string(),
-                        }),
-                    ]),
-                    timestamp: 1,
-                }),
-                Message::Assistant(faux_assistant_message("prior", None)),
-                Message::ToolResult(ToolResultMessage {
-                    tool_call_id: "tool-1".to_string(),
-                    tool_name: "echo".to_string(),
-                    content: vec![ToolResultContent::text("tool out")],
-                    details: None,
-                    usage: None,
-                    added_tool_names: Vec::new(),
-                    is_error: false,
-                    timestamp: 2,
-                }),
-            ],
-            tools: vec![tool],
-        };
+        let context = Context::builder()
+            .system_prompt("sys")
+            .message(Message::User(UserMessage {
+                content: UserMessageContent::Parts(vec![
+                    UserContent::text("hello"),
+                    UserContent::Image(ImageContent {
+                        data: "abcd".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }),
+                ]),
+                timestamp: 1,
+            }))
+            .message(Message::Assistant(faux_assistant_message(
+                "prior",
+                FauxMessageOptions::default(),
+            )))
+            .message(Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tool-1".to_string(),
+                tool_name: "echo".to_string(),
+                content: vec![UserContent::text("tool out")],
+                details: None,
+                usage: None,
+                nested_calls: None,
+                is_error: false,
+                timestamp: 2,
+            }))
+            .tool(tool.clone())
+            .build();
 
-        let response = complete(registration.get_model(), context.clone(), None)
-            .await
-            .expect("faux response");
-        let expected_prompt_tokens = estimate_tokens(&serialize_context(&context));
-        let expected_output_tokens = estimate_tokens("done");
+        let response = registration
+            .run(registration.get_model(), context, None)
+            .await;
+        // Pi's test lists the tools as a trailing `tools:` entry; the
+        // implementation serializes them on the leading system message.
+        let prompt_text = [
+            format!(
+                "system:sys\ntool+:{}",
+                serde_json::to_string(&tool).unwrap()
+            ),
+            "user:hello\n[image:image/png:4]".to_string(),
+            "assistant:prior".to_string(),
+            "toolResult:echo\ntool out".to_string(),
+        ]
+        .join("\n\n");
+        let expected_prompt_tokens = prompt_text.len().div_ceil(4) as u32;
+        let expected_output_tokens = "done".len().div_ceil(4) as u32;
 
         assert_eq!(response.usage.input, expected_prompt_tokens);
         assert_eq!(response.usage.output, expected_output_tokens);
@@ -1386,199 +1642,188 @@ mod tests {
             response.usage.total_tokens,
             expected_prompt_tokens + expected_output_tokens
         );
-
-        registration.unregister();
     }
 
-    #[tokio::test]
-    async fn does_not_simulate_caching_when_cache_retention_is_none() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([
-            faux_assistant_message("first", None),
-            faux_assistant_message("second", None),
-        ]);
-        let context = Context {
-            messages: vec![Message::user_text("hello")],
-            ..Context::default()
-        };
-        let options = StreamOptions {
-            session_id: Some("session-1".to_string()),
-            cache_retention: Some(CacheRetention::None),
-            ..StreamOptions::default()
-        };
-
-        let first = complete(
-            registration.get_model(),
-            context.clone(),
-            Some(options.clone()),
-        )
-        .await
-        .expect("first response");
-        let second = complete(registration.get_model(), context, Some(options))
-            .await
-            .expect("second response");
-
-        assert_eq!(first.usage.cache_read, 0);
-        assert_eq!(first.usage.cache_write, 0);
-        assert_eq!(second.usage.cache_read, 0);
-        assert_eq!(second.usage.cache_write, 0);
-        registration.unregister();
+    fn session(id: &str, retention: CacheRetention) -> Option<StreamOptions> {
+        Some(StreamOptions {
+            session_id: Some(id.to_string()),
+            cache_retention: Some(retention),
+            ..Default::default()
+        })
     }
 
     #[tokio::test]
     async fn does_not_share_cache_across_sessions_or_requests_without_session_id() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([
-            faux_assistant_message("first", None),
-            faux_assistant_message("second", None),
-        ]);
-        let context = Context {
-            messages: vec![Message::user_text("hello")],
-            ..Context::default()
-        };
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("first"), message("second"), message("third")]);
 
-        let first = complete(
-            registration.get_model(),
-            context.clone(),
-            Some(StreamOptions {
-                cache_retention: Some(CacheRetention::Short),
-                ..StreamOptions::default()
-            }),
-        )
-        .await
-        .expect("first response");
-        let second = complete(
-            registration.get_model(),
-            context,
-            Some(StreamOptions {
-                cache_retention: Some(CacheRetention::Short),
-                ..StreamOptions::default()
-            }),
-        )
-        .await
-        .expect("second response");
+        let mut context = Context::builder()
+            .message(Message::user_text("hello"))
+            .build();
+        let first = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
+        assert!(first.usage.cache_write > 0);
+        context.messages.push(Message::Assistant(first));
+        context.messages.push(Message::user_text("follow up"));
 
-        assert_eq!(first.usage.cache_read, 0);
-        assert_eq!(first.usage.cache_write, 0);
+        let second = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-2", CacheRetention::Short),
+            )
+            .await;
         assert_eq!(second.usage.cache_read, 0);
-        assert_eq!(second.usage.cache_write, 0);
-        registration.unregister();
+        assert!(second.usage.cache_write > 0);
+
+        let third = registration
+            .run(registration.get_model(), context, None)
+            .await;
+        assert_eq!(third.usage.cache_read, 0);
+        assert_eq!(third.usage.cache_write, 0);
     }
 
     #[tokio::test]
     async fn simulates_prompt_caching_per_session_id() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([
-            faux_assistant_message("first", None),
-            faux_assistant_message("second", None),
-            faux_assistant_message("third", None),
-        ]);
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("first"), message("second")]);
 
-        let mut context = Context {
-            system_prompt: Some("Be concise.".to_string()),
-            messages: vec![Message::user_text("hello")],
-            ..Context::default()
-        };
-
-        let first = complete(
-            registration.get_model(),
-            context.clone(),
-            Some(StreamOptions {
-                session_id: Some("session-1".to_string()),
-                cache_retention: Some(CacheRetention::Short),
-                ..StreamOptions::default()
-            }),
-        )
-        .await
-        .expect("first response");
+        let mut context = Context::builder()
+            .system_prompt("Be concise.")
+            .message(Message::user_text("hello"))
+            .build();
+        let first = registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
         assert_eq!(first.usage.cache_read, 0);
         assert!(first.usage.cache_write > 0);
 
         context.messages.push(Message::Assistant(first));
         context.messages.push(Message::user_text("follow up"));
-
-        let second = complete(
-            registration.get_model(),
-            context.clone(),
-            Some(StreamOptions {
-                session_id: Some("session-1".to_string()),
-                cache_retention: Some(CacheRetention::Short),
-                ..StreamOptions::default()
-            }),
-        )
-        .await
-        .expect("second response");
+        let second = registration
+            .run(
+                registration.get_model(),
+                context,
+                session("session-1", CacheRetention::Short),
+            )
+            .await;
         assert!(second.usage.cache_read > 0);
+    }
 
-        let third = complete(
-            registration.get_model(),
-            context,
-            Some(StreamOptions {
-                session_id: Some("session-2".to_string()),
-                cache_retention: Some(CacheRetention::Short),
-                ..StreamOptions::default()
-            }),
+    #[tokio::test]
+    async fn does_not_simulate_caching_when_cache_retention_is_none() {
+        let registration = register(Default::default()).await;
+        registration.set_responses([message("first"), message("second")]);
+
+        let mut context = Context::builder()
+            .message(Message::user_text("hello"))
+            .build();
+        registration
+            .run(
+                registration.get_model(),
+                context.clone(),
+                session("session-1", CacheRetention::None),
+            )
+            .await;
+        context
+            .messages
+            .push(Message::Assistant(faux_assistant_message(
+                "first",
+                FauxMessageOptions::default(),
+            )));
+        context.messages.push(Message::user_text("follow up"));
+        let second = registration
+            .run(
+                registration.get_model(),
+                context,
+                session("session-1", CacheRetention::None),
+            )
+            .await;
+        assert_eq!(second.usage.cache_read, 0);
+        assert_eq!(second.usage.cache_write, 0);
+    }
+
+    fn tool_use(blocks: Vec<FauxContentBlock>) -> FauxResponseStep {
+        faux_assistant_message(
+            blocks,
+            FauxMessageOptions {
+                stop_reason: Some(StopReason::ToolUse),
+                ..Default::default()
+            },
         )
-        .await
-        .expect("third response");
-        assert_eq!(third.usage.cache_read, 0);
-        assert!(third.usage.cache_write > 0);
+        .into()
+    }
 
-        registration.unregister();
+    #[tokio::test]
+    async fn streams_thinking_text_and_partial_tool_call_deltas() {
+        let registration = register(Default::default()).await;
+        registration.set_responses([tool_use(vec![
+            faux_thinking("thinking text"),
+            faux_text("answer text"),
+            faux_tool_call("echo", json!({ "text": "hi", "count": 12 }), Some("tool-1")),
+        ])]);
+
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        let types = event_types(&events);
+        for expected in [
+            "thinking_start",
+            "thinking_delta",
+            "text_start",
+            "text_delta",
+            "toolcall_start",
+            "toolcall_delta",
+            "toolcall_end",
+        ] {
+            assert!(types.contains(&expected), "{expected}");
+        }
+        let tool_call_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(tool_call_deltas.len() > 1);
+        let arguments: Value = serde_json::from_str(&tool_call_deltas.concat()).unwrap();
+        assert_eq!(arguments, json!({ "text": "hi", "count": 12 }));
     }
 
     #[tokio::test]
     async fn streams_an_exact_event_order_for_fixed_size_chunks() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+        let registration = register(RegisterFauxProviderOptions {
             token_size: Some(FauxTokenSize {
                 min: Some(1),
                 max: Some(1),
             }),
             ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message(
-            vec![
-                faux_thinking("go"),
-                faux_text("ok"),
-                faux_tool_call("echo", json!({}), Some("tool-1".to_string())),
-            ],
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::ToolUse),
-                ..Default::default()
-            }),
-        )]);
-
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
+        })
         .await;
+        registration.set_responses([tool_use(vec![
+            faux_thinking("go"),
+            faux_text("ok"),
+            faux_tool_call("echo", json!({}), Some("tool-1")),
+        ])]);
 
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        let AssistantMessageEvent::Start { partial } = &events[0] else {
+            panic!("expected start");
+        };
+        assert_eq!(partial.stop_reason, StopReason::Pending);
         assert_eq!(
-            events
-                .iter()
-                .map(|event| match event {
-                    AssistantMessageEvent::Start { .. } => "start",
-                    AssistantMessageEvent::ThinkingStart { .. } => "thinking_start",
-                    AssistantMessageEvent::ThinkingDelta { .. } => "thinking_delta",
-                    AssistantMessageEvent::ThinkingEnd { .. } => "thinking_end",
-                    AssistantMessageEvent::TextStart { .. } => "text_start",
-                    AssistantMessageEvent::TextDelta { .. } => "text_delta",
-                    AssistantMessageEvent::TextEnd { .. } => "text_end",
-                    AssistantMessageEvent::ToolCallStart { .. } => "toolcall_start",
-                    AssistantMessageEvent::ToolCallDelta { .. } => "toolcall_delta",
-                    AssistantMessageEvent::ToolCallEnd { .. } => "toolcall_end",
-                    AssistantMessageEvent::Done { .. } => "done",
-                    AssistantMessageEvent::Error { .. } => "error",
-                })
-                .collect::<Vec<_>>(),
+            event_types(&events),
             vec![
                 "start",
                 "thinking_start",
@@ -1593,516 +1838,356 @@ mod tests {
                 "done",
             ]
         );
-
-        registration.unregister();
-    }
-
-    #[tokio::test]
-    async fn streams_thinking_text_and_partial_tool_call_deltas() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message(
-            vec![
-                faux_thinking("thinking text"),
-                faux_text("answer text"),
-                faux_tool_call(
-                    "echo",
-                    json!({ "text": "hi", "count": 12 }),
-                    Some("tool-1".to_string()),
-                ),
-            ],
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::ToolUse),
-                ..Default::default()
-            }),
-        )]);
-
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
-        .await;
-
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::ThinkingStart { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::ThinkingDelta { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::TextStart { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::TextDelta { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::ToolCallStart { .. }))
-        );
-        let tool_call_deltas = events
-            .iter()
-            .filter_map(|event| match event {
-                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(tool_call_deltas.len() > 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&tool_call_deltas.join("")).expect("tool call json"),
-            json!({ "text": "hi", "count": 12 })
-        );
-
-        registration.unregister();
     }
 
     #[tokio::test]
     async fn streams_multiple_tool_calls_in_one_message() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message(
-            vec![
-                faux_tool_call("first_tool", json!({ "a": 1 }), Some("tool-1".to_string())),
-                faux_tool_call("second_tool", json!({ "b": 2 }), Some("tool-2".to_string())),
-            ],
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::ToolUse),
-                ..Default::default()
-            }),
-        )]);
+        let registration = register(Default::default()).await;
+        registration.set_responses([tool_use(vec![
+            faux_tool_call("echo", json!({ "text": "one" }), Some("tool-1")),
+            faux_tool_call("echo", json!({ "text": "two" }), Some("tool-2")),
+        ])]);
 
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
-        .await;
-
-        let ended_tools = events
-            .iter()
-            .filter_map(|event| match event {
-                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
-                    Some((tool_call.id.as_str(), tool_call.name.as_str()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        let types = event_types(&events);
         assert_eq!(
-            ended_tools,
-            [("tool-1", "first_tool"), ("tool-2", "second_tool")]
+            types
+                .iter()
+                .filter(|kind| **kind == "toolcall_start")
+                .count(),
+            2
         );
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Done {
-                reason: StopReason::ToolUse,
-                ..
-            })
-        ));
-        registration.unregister();
+        assert_eq!(
+            types.iter().filter(|kind| **kind == "toolcall_end").count(),
+            2
+        );
+    }
+
+    async fn explicit_terminal(stop_reason: StopReason, error_message: &str) {
+        let registration = register(RegisterFauxProviderOptions {
+            token_size: Some(FauxTokenSize {
+                min: Some(2),
+                max: Some(2),
+            }),
+            ..Default::default()
+        })
+        .await;
+        registration.set_responses([faux_assistant_message(
+            "partial",
+            FauxMessageOptions {
+                stop_reason: Some(stop_reason),
+                error_message: Some(error_message.to_string()),
+                ..Default::default()
+            },
+        )
+        .into()]);
+
+        let events = registration
+            .collect_events(registration.get_model(), hi(), None)
+            .await;
+        assert_eq!(
+            event_types(&events),
+            vec!["start", "text_start", "text_delta", "text_end", "error"]
+        );
+        let (reason, error) = terminal_error(events.last().unwrap());
+        assert_eq!(reason, stop_reason);
+        assert_eq!(error.stop_reason, stop_reason);
+        assert_eq!(error.error_message.as_deref(), Some(error_message));
     }
 
     #[tokio::test]
     async fn streams_an_explicit_assistant_error_message_as_a_terminal_error() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
-            token_size: Some(FauxTokenSize {
-                min: Some(2),
-                max: Some(2),
-            }),
-            ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message(
-            "partial",
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::Error),
-                error_message: Some("upstream failed".to_string()),
-                ..Default::default()
-            }),
-        )]);
-
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
-        .await;
-
-        assert_eq!(
-            events
-                .iter()
-                .map(|event| match event {
-                    AssistantMessageEvent::Start { .. } => "start",
-                    AssistantMessageEvent::TextStart { .. } => "text_start",
-                    AssistantMessageEvent::TextDelta { .. } => "text_delta",
-                    AssistantMessageEvent::TextEnd { .. } => "text_end",
-                    AssistantMessageEvent::Error { .. } => "error",
-                    _ => "other",
-                })
-                .collect::<Vec<_>>(),
-            vec!["start", "text_start", "text_delta", "text_end", "error"]
-        );
-        let Some(AssistantMessageEvent::Error {
-            reason,
-            error: message,
-        }) = events.last()
-        else {
-            panic!("expected terminal error");
-        };
-        assert_eq!(*reason, StopReason::Error);
-        assert_eq!(message.stop_reason, StopReason::Error);
-        assert_eq!(message.error_message.as_deref(), Some("upstream failed"));
-        registration.unregister();
+        explicit_terminal(StopReason::Error, "upstream failed").await;
     }
 
     #[tokio::test]
     async fn streams_an_explicit_assistant_aborted_message_as_a_terminal_error() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+        explicit_terminal(StopReason::Aborted, "Request was aborted").await;
+    }
+
+    fn paced(tokens_per_second: f64) -> RegisterFauxProviderOptions {
+        RegisterFauxProviderOptions {
+            tokens_per_second: Some(tokens_per_second),
             token_size: Some(FauxTokenSize {
-                min: Some(2),
-                max: Some(2),
+                min: Some(3),
+                max: Some(3),
             }),
             ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message(
-            "partial",
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::Aborted),
-                error_message: Some("Request was aborted".to_string()),
-                ..Default::default()
-            }),
-        )]);
+        }
+    }
 
-        let events = collect_events(
-            stream(
-                registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                None,
-            )
-            .expect("faux stream"),
-        )
-        .await;
-
-        assert_eq!(
-            events
-                .iter()
-                .map(|event| match event {
-                    AssistantMessageEvent::Start { .. } => "start",
-                    AssistantMessageEvent::TextStart { .. } => "text_start",
-                    AssistantMessageEvent::TextDelta { .. } => "text_delta",
-                    AssistantMessageEvent::TextEnd { .. } => "text_end",
-                    AssistantMessageEvent::Error { .. } => "error",
-                    _ => "other",
-                })
-                .collect::<Vec<_>>(),
-            vec!["start", "text_start", "text_delta", "text_end", "error"]
-        );
-        let Some(AssistantMessageEvent::Error {
-            reason,
-            error: message,
-        }) = events.last()
-        else {
-            panic!("expected terminal error");
-        };
-        assert_eq!(*reason, StopReason::Aborted);
-        assert_eq!(message.stop_reason, StopReason::Aborted);
-        assert_eq!(
-            message.error_message.as_deref(),
-            Some("Request was aborted")
-        );
-        registration.unregister();
+    fn with_signal(signal: &CancellationToken) -> Option<StreamOptions> {
+        Some(StreamOptions {
+            signal: Some(signal.clone()),
+            ..Default::default()
+        })
     }
 
     #[tokio::test]
     async fn supports_aborting_before_the_first_chunk() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message("hello", None)]);
-        let cancellation_token = CancellationToken::new();
-        cancellation_token.cancel();
+        let registration = register(paced(50.0)).await;
+        registration.set_responses([message("abcdefghijklmnopqrstuvwxyz")]);
 
-        let events = collect_events(
-            stream(
+        let controller = CancellationToken::new();
+        controller.cancel();
+        // Straight to the provider: `Models` auth resolution already stops
+        // on an aborted signal, before the faux stream starts.
+        let events: Vec<_> = registration
+            .provider
+            .stream(
                 registration.get_model(),
-                Context {
-                    messages: vec![Message::user_text("hi")],
-                    ..Context::default()
-                },
-                Some(StreamOptions {
-                    cancellation_token: Some(cancellation_token),
-                    ..StreamOptions::default()
-                }),
+                crate::utils::transcript::normalize_context(&hi()),
+                with_signal(&controller).unwrap(),
             )
-            .expect("faux stream"),
-        )
-        .await;
-
+            .collect()
+            .await;
         assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                ..
+        let (reason, error) = terminal_error(&events[0]);
+        assert_eq!(reason, StopReason::Aborted);
+        assert_eq!(error.stop_reason, StopReason::Aborted);
+    }
+
+    /// Abort on the first delta of `delta_type` and check the stream stops there.
+    async fn abort_mid_stream(
+        response: AssistantMessage,
+        delta_type: &str,
+        start_type: &str,
+        end_type: &str,
+    ) {
+        let registration = register(paced(100.0)).await;
+        registration.set_responses([response.into()]);
+
+        let controller = CancellationToken::new();
+        let mut events = Vec::new();
+        let mut delta_count = 0;
+        let mut s = registration.stream(registration.get_model(), hi(), with_signal(&controller));
+        while let Some(event) = s.next().await {
+            events.push(event.event_type());
+            if event.event_type() == delta_type {
+                delta_count += 1;
+                controller.cancel();
             }
-        ));
-        registration.unregister();
+        }
+
+        assert_eq!(delta_count, 1);
+        assert!(events.contains(&start_type));
+        assert!(events.contains(&delta_type));
+        assert!(events.contains(&"error"));
+        assert!(!events.contains(&end_type));
     }
 
     #[tokio::test]
     async fn supports_aborting_mid_text_stream_when_paced() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
-            tokens_per_second: Some(100.0),
-            token_size: Some(FauxTokenSize {
-                min: Some(3),
-                max: Some(3),
-            }),
-            ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message("abcdefghijklmnopqrstuvwxyz", None)]);
-
-        let cancellation_token = CancellationToken::new();
-        let mut stream = stream(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            Some(StreamOptions {
-                cancellation_token: Some(cancellation_token.clone()),
-                ..StreamOptions::default()
-            }),
+        abort_mid_stream(
+            faux_assistant_message("abcdefghijklmnopqrstuvwxyz", FauxMessageOptions::default()),
+            "text_delta",
+            "text_start",
+            "text_end",
         )
-        .expect("faux stream");
-        let mut text_delta_count = 0;
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
-                text_delta_count += 1;
-                cancellation_token.cancel();
-            }
-            events.push(event);
-        }
-
-        assert_eq!(text_delta_count, 1);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::TextStart { .. }))
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                ..
-            }
-        )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::TextEnd { .. }))
-        );
-
-        registration.unregister();
+        .await;
     }
 
     #[tokio::test]
     async fn supports_aborting_mid_thinking_stream_when_paced() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
-            tokens_per_second: Some(100.0),
-            token_size: Some(FauxTokenSize {
-                min: Some(3),
-                max: Some(3),
-            }),
-            ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message(
-            faux_thinking("abcdefghijklmnopqrstuvwxyz"),
-            None,
-        )]);
-
-        let cancellation_token = CancellationToken::new();
-        let mut stream = stream(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            Some(StreamOptions {
-                cancellation_token: Some(cancellation_token.clone()),
-                ..StreamOptions::default()
-            }),
+        abort_mid_stream(
+            faux_assistant_message(
+                faux_thinking("abcdefghijklmnopqrstuvwxyz"),
+                FauxMessageOptions::default(),
+            ),
+            "thinking_delta",
+            "thinking_start",
+            "thinking_end",
         )
-        .expect("faux stream");
-        let mut thinking_delta_count = 0;
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            if matches!(event, AssistantMessageEvent::ThinkingDelta { .. }) {
-                thinking_delta_count += 1;
-                cancellation_token.cancel();
-            }
-            events.push(event);
-        }
-
-        assert_eq!(thinking_delta_count, 1);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                ..
-            }
-        )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::ThinkingEnd { .. }))
-        );
-        registration.unregister();
+        .await;
     }
 
     #[tokio::test]
     async fn supports_aborting_mid_toolcall_stream_when_paced() {
-        let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
-            tokens_per_second: Some(100.0),
-            token_size: Some(FauxTokenSize {
-                min: Some(3),
-                max: Some(3),
-            }),
-            ..Default::default()
-        }));
-        registration.set_responses([faux_assistant_message(
-            faux_tool_call(
-                "echo",
-                json!({ "value": "abcdefghijklmnopqrstuvwxyz" }),
-                Some("tool-1".to_string()),
+        abort_mid_stream(
+            faux_assistant_message(
+                faux_tool_call(
+                    "echo",
+                    json!({ "text": "abcdefghijklmnopqrstuvwxyz", "count": 123456789 }),
+                    Some("tool-1"),
+                ),
+                FauxMessageOptions {
+                    stop_reason: Some(StopReason::ToolUse),
+                    ..Default::default()
+                },
             ),
-            Some(FauxAssistantMessageOptions {
-                stop_reason: Some(StopReason::ToolUse),
-                ..Default::default()
-            }),
-        )]);
-
-        let cancellation_token = CancellationToken::new();
-        let mut stream = stream(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            Some(StreamOptions {
-                cancellation_token: Some(cancellation_token.clone()),
-                ..StreamOptions::default()
-            }),
+            "toolcall_delta",
+            "toolcall_start",
+            "toolcall_end",
         )
-        .expect("faux stream");
-        let mut tool_delta_count = 0;
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            if matches!(event, AssistantMessageEvent::ToolCallDelta { .. }) {
-                tool_delta_count += 1;
-                cancellation_token.cancel();
-            }
-            events.push(event);
-        }
+        .await;
+    }
 
-        assert_eq!(tool_delta_count, 1);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                ..
-            }
-        )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AssistantMessageEvent::ToolCallEnd { .. }))
-        );
-        registration.unregister();
+    // providers.test.ts: fauxProvider
+
+    #[tokio::test]
+    async fn streams_queued_responses_through_a_models_collection() {
+        let faux = faux_provider(Default::default());
+        let models = create_models(Default::default());
+        models.set_provider(faux.provider.clone());
+        faux.set_responses([message("hello from faux")]);
+
+        let model = models.get_models(Some(faux.provider.id()))[0].clone();
+        let result = models
+            .complete_simple(&model, &hi(), SimpleStreamOptions::default())
+            .await;
+        assert_eq!(result.stop_reason, StopReason::Stop);
+        assert_eq!(result.content, vec![faux_text("hello from faux")]);
+        assert_eq!(faux.state().call_count, 1);
+    }
+
+    fn deferred_options(request: DeferredRequest) -> SimpleStreamOptions {
+        SimpleStreamOptions {
+            deferred: Some(request),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
-    async fn unregister_disables_registered_models() {
-        let registration = register_faux_provider(None);
-        registration.set_responses([faux_assistant_message("hello", None)]);
-        registration.unregister();
+    async fn submits_polls_and_redeems_deferred_responses() {
+        let faux = faux_provider(RegisterFauxProviderOptions {
+            deferred: Some(FauxDeferredOptions {
+                pending_fetches: Some(1),
+                poll_after_ms: Some(25),
+            }),
+            ..Default::default()
+        });
+        let models = create_models(Default::default());
+        models.set_provider(faux.provider.clone());
+        faux.set_responses([message("ready")]);
+        let model = faux.get_model();
 
-        let error = complete(
-            registration.get_model(),
-            Context {
-                messages: vec![Message::user_text("hi")],
-                ..Context::default()
-            },
-            None,
-        )
-        .await
-        .expect_err("provider should be unregistered");
-        assert!(matches!(
-            error,
-            Error::UnsupportedCapability {
-                capability: "language models",
-                ..
-            }
-        ));
+        let submission = models.stream_simple(
+            &model,
+            &hi(),
+            deferred_options(DeferredRequest::Window(Some(DeferredWindow::Hour1))),
+        );
+        let types: Vec<_> = submission
+            .clone()
+            .map(|event| event.event_type())
+            .collect()
+            .await;
+        let deferred = submission.result().await;
+        assert_eq!(types, vec!["start", "done"]);
+        assert_eq!(deferred.stop_reason, StopReason::Deferred);
+        assert!(deferred.content.is_empty());
+        let handle = deferred.deferred.clone().unwrap();
+        assert_eq!(
+            (
+                handle.provider.as_str(),
+                handle.model_id.as_str(),
+                handle.api.as_str()
+            ),
+            (
+                model.provider.as_str(),
+                model.id.as_str(),
+                model.api.as_str()
+            )
+        );
+        assert!(!handle.id.is_empty());
+        assert_eq!(handle.poll_after_ms, Some(25));
+        assert_eq!((handle.expires_at, handle.data.as_ref()), (None, None));
+
+        let pending = models
+            .fetch_deferred(&model, &handle, DeferredFetchOptions::default())
+            .await;
+        assert_eq!(pending.stop_reason, StopReason::Deferred);
+        assert_eq!(pending.deferred.as_ref(), Some(&handle));
+
+        let ready = models
+            .fetch_deferred(
+                &model,
+                &handle,
+                DeferredFetchOptions {
+                    wait: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(ready.stop_reason, StopReason::Stop);
+        assert_eq!(ready.content, vec![faux_text("ready")]);
+        assert!(ready.usage.total_tokens > 0);
+        let state = faux.state();
+        assert_eq!((state.call_count, state.deferred_fetch_count), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn records_cancellation_and_returns_deferred_fetch_failures_in_band() {
+        let faux = faux_provider(Default::default());
+        let models = create_models(Default::default());
+        models.set_provider(faux.provider.clone());
+        faux.set_responses([
+            FauxResponseStep::async_factory(|_, _, _, _| async {
+                Err(Error::message("deferred failed"))
+            }),
+            message("cancelled"),
+        ]);
+        let model = faux.get_model();
+
+        let failed_submission = models
+            .complete_simple(&model, &hi(), deferred_options(DeferredRequest::Flag(true)))
+            .await;
+        let failed = models
+            .fetch_deferred(
+                &model,
+                failed_submission.deferred.as_ref().unwrap(),
+                DeferredFetchOptions::default(),
+            )
+            .await;
+        assert_eq!(failed.stop_reason, StopReason::Error);
+        assert_eq!(failed.error_message.as_deref(), Some("deferred failed"));
+
+        let cancelled_submission = models
+            .complete_simple(&model, &hi(), deferred_options(DeferredRequest::Flag(true)))
+            .await;
+        let handle = cancelled_submission.deferred.unwrap();
+        models
+            .cancel_deferred(&model, &handle, DeferredCancelOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(faux.state().cancelled_deferred, vec![handle.clone()]);
+        let cancelled = models
+            .fetch_deferred(&model, &handle, DeferredFetchOptions::default())
+            .await;
+        assert_eq!(cancelled.stop_reason, StopReason::Error);
+        assert!(cancelled.error_message.unwrap().contains("was cancelled"));
+    }
+
+    // models-entry.test.ts
+
+    #[tokio::test]
+    async fn runs_a_faux_completion_through_an_explicit_models_collection() {
+        let models = create_models(Default::default());
+        let faux = faux_provider(Default::default());
+        models.set_provider(faux.provider.clone());
+        faux.set_responses([message("OK")]);
+        let response = models
+            .complete_simple(
+                &faux.get_model(),
+                &Context::default(),
+                SimpleStreamOptions::default(),
+            )
+            .await;
+        assert_eq!(response.content, vec![faux_text("OK")]);
     }
 
     #[test]
-    fn split_empty_text_into_one_chunk() {
-        assert_eq!(split_string_by_token_size("", 1, 1), vec![""]);
-    }
-
-    #[test]
-    fn split_text_uses_token_size_range() {
-        let text = "abcdefghijklmnopqrstuvwxyz0123456789";
-        let chunks = split_string_by_token_size(text, 1, 3);
-
-        assert_eq!(chunks.join(""), text);
-        assert!(chunks.iter().all(|chunk| utf16_len(chunk) <= 12));
-        assert!(chunks.iter().any(|chunk| utf16_len(chunk) > 4));
-    }
-
-    #[test]
-    fn estimates_tokens_using_utf16_length() {
-        assert_eq!(estimate_tokens("abcd"), 1);
-        assert_eq!(estimate_tokens("abcde"), 2);
+    fn splits_text_into_token_sized_chunks_and_estimates_utf16_units() {
+        assert_eq!(split_string_by_token_size("", 1, 1), vec![String::new()]);
+        assert_eq!(
+            split_string_by_token_size("abcdefghij", 1, 1),
+            vec!["abcd", "efgh", "ij"]
+        );
         assert_eq!(estimate_tokens("😀😀"), 1);
-        assert_eq!(estimate_tokens("😀😀a"), 2);
-    }
-
-    #[test]
-    fn content_helpers_return_assistant_content_variants() {
-        assert!(matches!(faux_text("x"), AssistantContent::Text(_)));
-        assert!(matches!(faux_thinking("x"), AssistantContent::Thinking(_)));
-        assert!(matches!(
-            faux_tool_call("echo", json!({}), None),
-            AssistantContent::ToolCall(_)
-        ));
+        assert_eq!(estimate_tokens("abcde"), 2);
+        assert_eq!(common_prefix_length("abc", "abd"), 2);
+        assert_eq!(random_base36(0), "0");
+        assert_eq!(random_base36(35), "z");
     }
 }

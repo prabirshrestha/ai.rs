@@ -1,19 +1,18 @@
+//! Port of `packages/ai/src/providers` for the in-scope providers, plus the
+//! pre-1.0 provider handles (`openai::builder()` and friends).
+
+pub mod all;
 pub mod anthropic;
-pub(crate) mod constrained_sampling;
-pub(crate) mod deferred_tools;
+pub mod catalog;
+pub mod cloudflare_auth;
+pub mod cloudflare_stream;
+pub mod cloudflare_workers_ai;
 pub mod faux;
 pub mod github_copilot;
-pub(crate) mod github_copilot_headers;
+pub(crate) mod handle;
+pub mod model_builder;
 pub mod openai;
-pub mod openai_completions;
-pub(crate) mod openai_embeddings;
-pub(crate) mod openai_images;
-pub(crate) mod openai_prompt_cache;
-pub mod openai_responses;
 pub mod openrouter;
-pub(crate) mod simple_options;
-pub(crate) mod transform_messages;
+pub mod typesafe;
 
-#[cfg(test)]
-#[path = "deferred_tools_tests.rs"]
-mod deferred_tools_tests;
+pub use model_builder::{ImageModelBuilder, ModelBuilder};
