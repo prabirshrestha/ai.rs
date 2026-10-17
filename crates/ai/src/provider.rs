@@ -5,9 +5,9 @@ use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::event_stream::AssistantEventStream;
 use crate::types::{
-    AssistantImages, Context, EmbeddingBatch, EmbeddingOptions, ImageGenerationOptions,
-    ImagesContext, Model, ModelCompat, ModelCost, ModelInput, ModelOutput, SimpleStreamOptions,
-    StreamOptions,
+    AssistantImages, Context, EmbeddingBatch, EmbeddingInput, EmbeddingOptions,
+    ImageGenerationOptions, ImagesContext, Model, ModelCompat, ModelCost, ModelInput, ModelOutput,
+    SimpleStreamOptions, StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -71,7 +71,7 @@ pub trait EmbeddingModelApi: dyn_clone::DynClone + Send + Sync + 'static {
     async fn embed_many(
         &self,
         model: Model,
-        inputs: Vec<String>,
+        inputs: Vec<EmbeddingInput>,
         options: EmbeddingOptions,
     ) -> Result<EmbeddingBatch>;
 }

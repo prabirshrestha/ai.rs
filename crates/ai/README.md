@@ -569,7 +569,7 @@ requests use `ImagesStopReason::Aborted`.
 
 ## Embeddings
 
-Use `embed` for one string and `embed_many` for multiple strings. Both call
+Use `embed` for one input and `embed_many` for multiple inputs. Both call
 the OpenAI-compatible `/embeddings` endpoint. A single input is sent upstream
 as a one-item array for compatibility with providers that reject scalar input.
 
@@ -588,6 +588,29 @@ async fn main() -> Result<()> {
     println!("single: {:?}, batch: {}", one.embedding, batch.embeddings.len());
     Ok(())
 }
+```
+
+Multimodal embedding models (EmbeddingGemma 2, Qwen3-VL-Embedding) also take
+images and audio. OpenAI's API has no shape for them, so `media_format` says
+which one the server uses: `ContentParts` (llama.cpp's `llama-server`, the
+default) sends each media input as an `input` item of OpenAI chat content
+parts next to the text in one request, and `ChatMessages` (vLLM) sends one
+chat-style request per media input.
+
+```rust
+use ai::{EmbeddingInput, EmbeddingMediaFormat, EmbeddingOptions, embed_many};
+
+let photo = std::fs::read("photo.jpg")?;
+let options = EmbeddingOptions {
+    media_format: EmbeddingMediaFormat::ContentParts,
+    ..Default::default()
+};
+let batch = embed_many(
+    model,
+    [EmbeddingInput::from("a red bicycle"), EmbeddingInput::image(photo, "image/jpeg")],
+    Some(options),
+)
+.await?;
 ```
 
 ## Thinking/Reasoning

@@ -1,9 +1,9 @@
-use crate::types::{Embedding, EmbeddingBatch, EmbeddingOptions, Model};
+use crate::types::{Embedding, EmbeddingBatch, EmbeddingInput, EmbeddingOptions, Model};
 use crate::{Error, Result};
 
 pub async fn embed(
     model: Model,
-    input: impl Into<String>,
+    input: impl Into<EmbeddingInput>,
     options: Option<EmbeddingOptions>,
 ) -> Result<Embedding> {
     let batch = embed_many(model, [input.into()], options).await?;
@@ -24,12 +24,12 @@ pub async fn embed_many<I, S>(
 ) -> Result<EmbeddingBatch>
 where
     I: IntoIterator<Item = S>,
-    S: Into<String>,
+    S: Into<EmbeddingInput>,
 {
     let inputs = inputs.into_iter().map(Into::into).collect::<Vec<_>>();
     if inputs.is_empty() {
         return Err(Error::Validation(
-            "embedding input must contain at least one string".to_string(),
+            "embedding input must contain at least one item".to_string(),
         ));
     }
     let api = model

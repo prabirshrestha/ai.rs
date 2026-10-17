@@ -300,6 +300,99 @@ pub struct EmbeddingOptions {
     pub dimensions: Option<u32>,
     pub encoding_format: Option<EmbeddingEncodingFormat>,
     pub user: Option<String>,
+    /// How image and audio inputs are sent. Text inputs always go in `input`.
+    pub media_format: EmbeddingMediaFormat,
+}
+
+/// One thing to embed: text, or the encoded bytes of an image or a sound.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EmbeddingInput {
+    Text(String),
+    Image { data: Vec<u8>, mime_type: String },
+    Audio { data: Vec<u8>, mime_type: String },
+}
+
+impl EmbeddingInput {
+    pub fn image(data: impl Into<Vec<u8>>, mime_type: impl Into<String>) -> Self {
+        Self::Image {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+
+    pub fn audio(data: impl Into<Vec<u8>>, mime_type: impl Into<String>) -> Self {
+        Self::Audio {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+
+    /// Bytes sent: UTF-8 text, or the encoded media before base64.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Image { data, .. } | Self::Audio { data, .. } => data.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl std::fmt::Debug for EmbeddingInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            Self::Image { data, mime_type } => f
+                .debug_struct("Image")
+                .field("mime_type", mime_type)
+                .field("bytes", &data.len())
+                .finish(),
+            Self::Audio { data, mime_type } => f
+                .debug_struct("Audio")
+                .field("mime_type", mime_type)
+                .field("bytes", &data.len())
+                .finish(),
+        }
+    }
+}
+
+impl From<String> for EmbeddingInput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for EmbeddingInput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<&String> for EmbeddingInput {
+    fn from(text: &String) -> Self {
+        Self::Text(text.clone())
+    }
+}
+
+/// The request shape for image and audio inputs. OpenAI's API has none, so
+/// servers differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EmbeddingMediaFormat {
+    /// llama.cpp's `llama-server` (also through proxies such as LiteLLM):
+    /// each media input is an `input` item holding OpenAI chat content parts,
+    /// `{"content": [{"type": "image_url", ...}]}` or `input_audio`, next to
+    /// plain text items in one request.
+    #[default]
+    ContentParts,
+    /// vLLM: one request per media input, as a chat message whose content is
+    /// an `image_url` or `audio_url` data URL part.
+    ChatMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,22 +404,50 @@ pub enum EmbeddingVector {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingUsage {
+    #[serde(default)]
     pub prompt_tokens: u32,
+    #[serde(default)]
     pub total_tokens: u32,
+    /// Prompt tokens the server served from its cache, when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
+}
+
+impl EmbeddingUsage {
+    /// Sums two optional usages; `None` only when both are.
+    pub fn sum(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(mut a), Some(b)) => {
+                a.add(&b);
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        }
+    }
+
+    pub fn add(&mut self, other: &EmbeddingUsage) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.total_tokens += other.total_tokens;
+        if let Some(cached) = other.cached_tokens {
+            *self.cached_tokens.get_or_insert(0) += cached;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Embedding {
     pub embedding: EmbeddingVector,
     pub model: String,
-    pub usage: EmbeddingUsage,
+    /// `None` when the server sent no `usage`.
+    pub usage: Option<EmbeddingUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingBatch {
     pub embeddings: Vec<EmbeddingVector>,
     pub model: String,
-    pub usage: EmbeddingUsage,
+    /// `None` when the server sent no `usage`.
+    pub usage: Option<EmbeddingUsage>,
 }
 
 #[derive(Clone, Default)]
