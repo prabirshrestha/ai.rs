@@ -95,47 +95,12 @@ pub(crate) async fn embed_many_openai(
         return Err(Error::MissingApiKey(model.provider.clone()));
     }
 
-    // vLLM takes one media input per request, as a chat message. Text still
-    // goes together in one request. Results are put back in input order.
-    if options.media_format == EmbeddingMediaFormat::ChatMessages
-        && inputs.iter().any(|input| !input.is_text())
-    {
-        let mut slots: Vec<Option<EmbeddingVector>> = vec![None; inputs.len()];
-        let mut usage: Option<EmbeddingUsage> = None;
-        let mut response_model = None;
-        let (texts, media): (Vec<_>, Vec<_>) = inputs
-            .into_iter()
-            .enumerate()
-            .partition(|(_, input)| input.is_text());
-        if !texts.is_empty() {
-            let (indices, texts): (Vec<_>, Vec<_>) = texts.into_iter().unzip();
-            let payload = build_payload(&model, &texts, &options);
-            let batch = send_embeddings(&model, payload, texts.len(), api_key, &options).await?;
-            usage = EmbeddingUsage::sum(usage, batch.usage);
-            response_model.get_or_insert(batch.model);
-            for (index, embedding) in indices.into_iter().zip(batch.embeddings) {
-                slots[index] = Some(embedding);
-            }
-        }
-        for (index, input) in media {
-            let payload = build_chat_media_payload(&model, &input, &options);
-            let batch = send_embeddings(&model, payload, 1, api_key, &options).await?;
-            usage = EmbeddingUsage::sum(usage, batch.usage);
-            response_model.get_or_insert(batch.model);
-            slots[index] = batch.embeddings.into_iter().next();
-        }
-        return Ok(EmbeddingBatch {
-            embeddings: slots
-                .into_iter()
-                .map(|slot| slot.expect("every slot filled"))
-                .collect(),
-            model: response_model.unwrap_or(model.id),
-            usage,
-        });
-    }
-
     let expected_count = inputs.len();
-    let payload = build_payload(&model, &inputs, &options);
+    let media_format = options
+        .media_format
+        .or(model.compat.openai_embeddings.embedding_media_format)
+        .unwrap_or_default();
+    let payload = build_payload(&model, &inputs, media_format, &options);
     send_embeddings(&model, payload, expected_count, api_key, &options).await
 }
 
@@ -208,51 +173,51 @@ async fn send_embeddings(
 fn build_payload(
     model: &Model,
     inputs: &[EmbeddingInput],
+    media_format: EmbeddingMediaFormat,
     options: &EmbeddingOptions,
 ) -> Map<String, Value> {
-    let input: Vec<Value> = inputs
-        .iter()
-        .map(|input| match input {
-            EmbeddingInput::Text(text) => json!(text),
-            EmbeddingInput::Image { data, mime_type } => json!({
-                "content": [{"type": "image_url", "image_url": {"url": data_url(mime_type, data)}}],
-            }),
-            EmbeddingInput::Audio { data, mime_type } => json!({
-                "content": [{
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": base64::engine::general_purpose::STANDARD.encode(data),
-                        "format": audio_format(mime_type),
-                    },
-                }],
-            }),
-        })
-        .collect();
     let mut payload = Map::new();
     payload.insert("model".to_string(), json!(model.id));
-    payload.insert("input".to_string(), Value::Array(input));
+    // Plain OpenAI `input` whenever there is no media, so text-only calls
+    // work on every server.
+    let all_text = inputs.iter().all(EmbeddingInput::is_text);
+    if all_text || media_format == EmbeddingMediaFormat::ContentParts {
+        let input: Vec<Value> = inputs.iter().map(content_item).collect();
+        payload.insert("input".to_string(), Value::Array(input));
+    } else {
+        let messages: Vec<Value> = inputs
+            .iter()
+            .map(|input| json!([{"role": "user", "content": [chat_part(input)]}]))
+            .collect();
+        payload.insert("messages".to_string(), Value::Array(messages));
+    }
     insert_common_options(&mut payload, options);
     payload
 }
 
-/// OpenAI's `input_audio.format`: the subtype of the audio MIME type.
-fn audio_format(mime_type: &str) -> &str {
-    match mime_type {
-        "audio/mpeg" | "audio/mp3" => "mp3",
-        "audio/x-wav" | "audio/wave" => "wav",
-        other => {
-            let subtype = other.split(';').next().unwrap_or(other).trim();
-            subtype.strip_prefix("audio/").unwrap_or(subtype)
-        }
+/// An `input` item: text as a string, media as OpenAI chat content parts
+/// (llama.cpp).
+fn content_item(input: &EmbeddingInput) -> Value {
+    match input {
+        EmbeddingInput::Text(text) => json!(text),
+        EmbeddingInput::Image { data, mime_type } => json!({
+            "content": [{"type": "image_url", "image_url": {"url": data_url(mime_type, data)}}],
+        }),
+        EmbeddingInput::Audio { data, mime_type } => json!({
+            "content": [{
+                "type": "input_audio",
+                "input_audio": {
+                    "data": base64::engine::general_purpose::STANDARD.encode(data),
+                    "format": audio_format(mime_type),
+                },
+            }],
+        }),
     }
 }
 
-fn build_chat_media_payload(
-    model: &Model,
-    input: &EmbeddingInput,
-    options: &EmbeddingOptions,
-) -> Map<String, Value> {
-    let part = match input {
+/// A chat content part (vLLM).
+fn chat_part(input: &EmbeddingInput) -> Value {
+    match input {
         EmbeddingInput::Text(text) => json!({"type": "text", "text": text}),
         EmbeddingInput::Image { data, mime_type } => json!({
             "type": "image_url",
@@ -262,15 +227,7 @@ fn build_chat_media_payload(
             "type": "audio_url",
             "audio_url": {"url": data_url(mime_type, data)},
         }),
-    };
-    let mut payload = Map::new();
-    payload.insert("model".to_string(), json!(model.id));
-    payload.insert(
-        "messages".to_string(),
-        json!([{"role": "user", "content": [part]}]),
-    );
-    insert_common_options(&mut payload, options);
-    payload
+    }
 }
 
 fn data_url(mime_type: &str, data: &[u8]) -> String {
@@ -278,6 +235,26 @@ fn data_url(mime_type: &str, data: &[u8]) -> String {
         "data:{mime_type};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(data)
     )
+}
+
+/// OpenAI's `input_audio.format` from a MIME type: `wav`, `mp3`, or the
+/// subtype (llama.cpp reads the bytes and ignores it).
+fn audio_format(mime_type: &str) -> String {
+    let essence = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let subtype = essence.strip_prefix("audio/").unwrap_or(&essence);
+    match subtype {
+        "mpeg" | "mp3" | "mpeg3" | "x-mpeg-3" => "mp3",
+        "wav" | "wave" | "x-wav" | "vnd.wave" | "x-pn-wav" => "wav",
+        "x-flac" => "flac",
+        "x-m4a" | "m4a" => "mp4",
+        other => other,
+    }
+    .to_string()
 }
 
 fn insert_common_options(payload: &mut Map<String, Value>, options: &EmbeddingOptions) {
@@ -372,7 +349,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::providers::openai;
-    use crate::types::{EmbeddingEncodingFormat, EmbeddingVector};
+    use crate::types::{EmbeddingEncodingFormat, EmbeddingVector, ModelInput};
 
     use super::*;
 
@@ -499,14 +476,13 @@ mod tests {
             r#"{"data":[{"embedding":[1.0],"index":0},{"embedding":[2.0],"index":1},{"embedding":[3.0],"index":2}],"usage":{"prompt_tokens":9,"total_tokens":9,"prompt_tokens_details":{"cached_tokens":4}}}"#,
         )
         .await;
-        let model = test_model(url);
 
         let output = crate::embed_many(
-            model,
+            media_model(url, None),
             [
-                EmbeddingInput::from("text"),
-                EmbeddingInput::image(b"png".to_vec(), "image/png"),
-                EmbeddingInput::audio(b"wav".to_vec(), "audio/wav"),
+                EmbeddingInput::text("text"),
+                EmbeddingInput::image(vec![0xffu8, 0x00, 0xfe], "image/png"),
+                EmbeddingInput::audio(b"wav".to_vec(), "audio/x-wav"),
             ],
             None,
         )
@@ -520,35 +496,28 @@ mod tests {
             payload["input"],
             json!([
                 "text",
-                {"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}]},
+                {"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,/wD+"}}]},
                 {"content": [{"type": "input_audio", "input_audio": {"data": "d2F2", "format": "wav"}}]},
             ])
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn chat_messages_send_each_media_input_alone_and_keep_order() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let url = spawn_multi_response_server(
+    async fn chat_messages_batch_every_input_as_a_conversation() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let url = spawn_response_server(
             Arc::clone(&captured),
-            vec![
-                r#"{"data":[{"embedding":[1.0],"index":0},{"embedding":[3.0],"index":1}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#,
-                r#"{"data":[{"embedding":[2.0],"index":0}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#,
-            ],
+            r#"{"data":[{"embedding":[1.0],"index":0},{"embedding":[2.0],"index":1},{"embedding":[3.0],"index":2}]}"#,
         )
         .await;
-        let model = test_model(url);
-        let options = EmbeddingOptions {
-            media_format: EmbeddingMediaFormat::ChatMessages,
-            ..Default::default()
-        };
+        let options = EmbeddingOptions::builder().dimensions(256).build();
 
         let output = crate::embed_many(
-            model,
+            media_model(url, Some(EmbeddingMediaFormat::ChatMessages)),
             [
-                EmbeddingInput::from("first"),
+                EmbeddingInput::text("first"),
                 EmbeddingInput::image(b"png".to_vec(), "image/png"),
-                EmbeddingInput::from("third"),
+                EmbeddingInput::audio(b"ogg".to_vec(), "audio/ogg; codecs=opus"),
             ],
             Some(options),
         )
@@ -563,56 +532,110 @@ mod tests {
                 EmbeddingVector::Float(vec![3.0]),
             ]
         );
-        assert_eq!(output.usage.map(|u| u.prompt_tokens), Some(7));
-        let requests = captured.lock().expect("requests").clone();
+        assert_eq!(output.usage, None, "no usage sent");
+        let payload = request_body_json(&captured.lock().expect("request").clone());
+        assert!(payload.get("input").is_none());
+        assert_eq!(payload["dimensions"], 256);
         assert_eq!(
-            request_body_json(&requests[0])["input"],
-            json!(["first", "third"])
-        );
-        assert_eq!(
-            request_body_json(&requests[1])["messages"],
-            json!([{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
-            ]}])
+            payload["messages"],
+            json!([
+                [{"role": "user", "content": [{"type": "text", "text": "first"}]}],
+                [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
+                ]}],
+                [{"role": "user", "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/ogg; codecs=opus;base64,b2dn"}}
+                ]}],
+            ])
         );
     }
 
-    fn test_model(url: String) -> Model {
-        openai::builder()
+    #[tokio::test(flavor = "current_thread")]
+    async fn text_only_calls_use_plain_input_in_every_format() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let url = spawn_response_server(
+            Arc::clone(&captured),
+            r#"{"data":[{"embedding":[1.0],"index":0}]}"#,
+        )
+        .await;
+
+        crate::embed(
+            media_model(url, Some(EmbeddingMediaFormat::ChatMessages)),
+            "hello",
+            None,
+        )
+        .await
+        .expect("embedding");
+
+        let payload = request_body_json(&captured.lock().expect("request").clone());
+        assert_eq!(payload["input"], json!(["hello"]));
+        assert!(payload.get("messages").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn option_media_format_overrides_the_model() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let url = spawn_response_server(
+            Arc::clone(&captured),
+            r#"{"data":[{"embedding":[1.0],"index":0}]}"#,
+        )
+        .await;
+        let options = EmbeddingOptions::builder()
+            .media_format(EmbeddingMediaFormat::ContentParts)
+            .build();
+
+        crate::embed(
+            media_model(url, Some(EmbeddingMediaFormat::ChatMessages)),
+            EmbeddingInput::image(b"png".to_vec(), "image/png"),
+            Some(options),
+        )
+        .await
+        .expect("embedding");
+
+        let payload = request_body_json(&captured.lock().expect("request").clone());
+        assert!(payload["input"][0]["content"].is_array());
+    }
+
+    #[test]
+    fn audio_format_follows_the_mime_type() {
+        for (mime, format) in [
+            ("audio/mpeg", "mp3"),
+            ("audio/mpeg; codecs=mp3", "mp3"),
+            ("Audio/WAV", "wav"),
+            ("audio/x-wav", "wav"),
+            ("audio/vnd.wave", "wav"),
+            ("audio/x-flac", "flac"),
+            ("audio/flac", "flac"),
+            ("audio/ogg; codecs=opus", "ogg"),
+            ("audio/x-m4a", "mp4"),
+        ] {
+            assert_eq!(audio_format(mime), format, "{mime}");
+        }
+    }
+
+    #[test]
+    fn media_format_round_trips_in_model_compat() {
+        let mut compat = crate::ModelCompat::default();
+        compat.openai_embeddings.embedding_media_format = Some(EmbeddingMediaFormat::ChatMessages);
+        let value = serde_json::to_value(&compat).expect("serialize");
+        assert_eq!(value["embeddingMediaFormat"], "chatMessages");
+        let back: crate::ModelCompat = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, compat);
+    }
+
+    /// An embedding model that declares image and audio input.
+    fn media_model(url: String, media_format: Option<EmbeddingMediaFormat>) -> Model {
+        let mut builder = openai::builder()
             .api_key(Some("test-key"))
             .base_url(url)
             .build()
             .expect("provider")
             .embedding_model("embeddinggemma-2")
-            .build_embedding()
-            .expect("model")
-    }
-
-    async fn spawn_multi_response_server(
-        captured: Arc<Mutex<Vec<String>>>,
-        bodies: Vec<&'static str>,
-    ) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            for body in bodies {
-                let (mut socket, _) = listener.accept().await.expect("accept");
-                let request = read_http_request(&mut socket).await;
-                captured.lock().expect("captured requests").push(request);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                socket
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write response");
-            }
-        });
-        format!("http://{addr}/v1")
+            .input(vec![ModelInput::Text, ModelInput::Image, ModelInput::Audio]);
+        if let Some(media_format) = media_format {
+            builder = builder.embedding_media_format(media_format);
+        }
+        builder.build_embedding().expect("model")
     }
 
     async fn spawn_response_server(captured: Arc<Mutex<String>>, body: &'static str) -> String {

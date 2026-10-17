@@ -81,7 +81,8 @@ async fn main() -> Result<()> {
 
 ### Embeddings
 
-Use `embed` for one string and `embed_many` for multiple strings.
+Use `embed` for one input and `embed_many` for several. Inputs are text, or
+images and audio for multimodal models; see `crates/ai/README.md`.
 
 ```rust
 use ai::{embed, embed_many, providers::openai, Result};

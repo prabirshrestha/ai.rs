@@ -590,27 +590,53 @@ async fn main() -> Result<()> {
 }
 ```
 
-Multimodal embedding models (EmbeddingGemma 2, Qwen3-VL-Embedding) also take
-images and audio. OpenAI's API has no shape for them, so `media_format` says
-which one the server uses: `ContentParts` (llama.cpp's `llama-server`, the
-default) sends each media input as an `input` item of OpenAI chat content
-parts next to the text in one request, and `ChatMessages` (vLLM) sends one
-chat-style request per media input.
+`embed` and `embed_many` return `usage: None` when the server sends no
+`usage` object. Options have a builder:
+`EmbeddingOptions::builder().dimensions(512).timeout_ms(30_000).build()`.
+
+### Images and audio
+
+Multimodal embedding models (EmbeddingGemma 2, Qwen3-VL-Embedding) also embed
+images and audio into the same space as text. Declare the inputs on the
+model; `embed_many` rejects image or audio input for a model that does not
+declare it, before any request. OpenAI's API has no request shape for media,
+so `embedding_media_format` says which one the server uses:
+
+- `ContentParts` (default): llama.cpp's `llama-server`, also through LiteLLM.
+  Each media input is an `input` item of OpenAI chat content parts
+  (`image_url`, `input_audio`) next to the text strings.
+- `ChatMessages`: vLLM. Every input, text too, is one conversation in a
+  batched `messages` list, so text and media get the same chat template.
+
+Calls with only text use the plain `input` array in both formats.
 
 ```rust
-use ai::{EmbeddingInput, EmbeddingMediaFormat, EmbeddingOptions, embed_many};
+use ai::{EmbeddingInput, EmbeddingMediaFormat, ModelInput, embed_many, providers::openai};
 
-let photo = std::fs::read("photo.jpg")?;
-let options = EmbeddingOptions {
-    media_format: EmbeddingMediaFormat::ContentParts,
-    ..Default::default()
-};
-let batch = embed_many(
-    model,
-    [EmbeddingInput::from("a red bicycle"), EmbeddingInput::image(photo, "image/jpeg")],
-    Some(options),
-)
-.await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let server = openai::builder()
+        .base_url("http://localhost:8080/v1")
+        .build()?;
+    let model = server
+        .embedding_model("embeddinggemma-2")
+        .input(vec![ModelInput::Text, ModelInput::Image, ModelInput::Audio])
+        .embedding_media_format(EmbeddingMediaFormat::ContentParts)
+        .build_embedding()?;
+
+    let photo = std::fs::read("photo.jpg")?;
+    let batch = embed_many(
+        model,
+        [
+            EmbeddingInput::text("a red bicycle"),
+            EmbeddingInput::image(photo, "image/jpeg"),
+        ],
+        None,
+    )
+    .await?;
+    println!("{} vectors", batch.embeddings.len());
+    Ok(())
+}
 ```
 
 ## Thinking/Reasoning
