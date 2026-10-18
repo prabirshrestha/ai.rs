@@ -304,6 +304,10 @@ pub struct EmbeddingOptions {
     /// Overrides the model's `compat.openai_embeddings.media_format` for
     /// this call.
     pub media_format: Option<EmbeddingMediaFormat>,
+    /// Largest response body accepted, in bytes; a larger one fails with
+    /// `InvalidProviderResponse` without being held in memory. Default
+    /// 256 MiB.
+    pub max_response_bytes: Option<usize>,
 }
 
 impl EmbeddingOptions {
@@ -350,6 +354,12 @@ impl EmbeddingOptionsBuilder {
     /// Overrides the model's media format for this call.
     pub fn media_format(mut self, media_format: EmbeddingMediaFormat) -> Self {
         self.options.media_format = Some(media_format);
+        self
+    }
+
+    /// Largest response body accepted, in bytes. Default 256 MiB.
+    pub fn max_response_bytes(mut self, max_response_bytes: usize) -> Self {
+        self.options.max_response_bytes = Some(max_response_bytes);
         self
     }
 

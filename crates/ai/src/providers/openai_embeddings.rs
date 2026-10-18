@@ -132,9 +132,18 @@ async fn send_embeddings(
     .await?;
     let status = response.status();
     let response_headers = response.headers().clone();
-    let body = response.text().await?;
+    let limit = options
+        .max_response_bytes
+        .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
+    let (body, cut) = read_limited(response, limit).await?;
+    let body = String::from_utf8_lossy(&body).into_owned();
     if !status.is_success() {
         return Err(Error::ApiStatus { status, body });
+    }
+    if cut {
+        return Err(Error::InvalidProviderResponse(format!(
+            "embeddings response is larger than {limit} bytes"
+        )));
     }
     if let Some(on_response) = &options.base.on_response {
         on_response(
@@ -296,6 +305,25 @@ fn build_headers(
     }
     crate::utils::headers::apply_provider_headers(&mut headers, option_headers)?;
     Ok(headers)
+}
+
+/// Default cap on an embeddings response body: room for about 2,000
+/// 3,072-number float vectors.
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 << 20;
+
+/// Reads at most `limit` bytes of a body, chunk by chunk, so a server can't
+/// make the client hold an unbounded reply. `true` when there was more.
+async fn read_limited(mut response: reqwest::Response, limit: usize) -> Result<(Vec<u8>, bool)> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = limit - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,6 +622,26 @@ mod tests {
 
         let payload = request_body_json(&captured.lock().expect("request").clone());
         assert!(payload["input"][0]["content"].is_array());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_larger_than_the_limit_is_refused() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let url = spawn_response_server(
+            Arc::clone(&captured),
+            r#"{"data":[{"embedding":[1.0,2.0,3.0,4.0],"index":0}]}"#,
+        )
+        .await;
+        let options = EmbeddingOptions::builder().max_response_bytes(16).build();
+
+        let error = crate::embed(media_model(url, None), "hello", Some(options))
+            .await
+            .expect_err("too large");
+
+        assert!(
+            matches!(&error, Error::InvalidProviderResponse(message) if message.contains("16 bytes")),
+            "{error}"
+        );
     }
 
     #[test]
