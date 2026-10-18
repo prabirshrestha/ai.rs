@@ -5,9 +5,9 @@ use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::event_stream::AssistantEventStream;
 use crate::types::{
-    AssistantImages, Context, EmbeddingBatch, EmbeddingOptions, ImageGenerationOptions,
-    ImagesContext, Model, ModelCompat, ModelCost, ModelInput, ModelOutput, SimpleStreamOptions,
-    StreamOptions,
+    AssistantImages, Context, EmbeddingBatch, EmbeddingInput, EmbeddingMediaFormat,
+    EmbeddingOptions, ImageGenerationOptions, ImagesContext, Model, ModelCompat, ModelCost,
+    ModelInput, ModelOutput, SimpleStreamOptions, StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -71,7 +71,7 @@ pub trait EmbeddingModelApi: dyn_clone::DynClone + Send + Sync + 'static {
     async fn embed_many(
         &self,
         model: Model,
-        inputs: Vec<String>,
+        inputs: Vec<EmbeddingInput>,
         options: EmbeddingOptions,
     ) -> Result<EmbeddingBatch>;
 }
@@ -170,6 +170,13 @@ impl ModelBuilder {
 
     pub fn max_tokens(mut self, max_tokens: u32) -> Self {
         self.model.max_tokens = max_tokens;
+        self
+    }
+
+    /// How an OpenAI-compatible embedding server takes image and audio
+    /// inputs. Declare them with [`input`](Self::input) too.
+    pub fn embedding_media_format(mut self, media_format: EmbeddingMediaFormat) -> Self {
+        self.model.compat.openai_embeddings.embedding_media_format = Some(media_format);
         self
     }
 
