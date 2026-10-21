@@ -21,7 +21,7 @@ bytes = "1"
 dyn-clone = "1.0.17"
 futures = "0.3.31"
 httpdate = "1.0.3"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 reqwest = { version = "0.13.0", features = ["json", "rustls", "stream"], default-features = false }
 regex = "1.11.1"
 ring = "0.17.14"
