@@ -57,10 +57,6 @@ pub(crate) async fn run_generate_images_openai(
         .filter(|api_key| !api_key.trim().is_empty())
         .ok_or_else(|| Error::MissingApiKey(model.provider.clone()))?;
 
-    let has_images = context
-        .input
-        .iter()
-        .any(|item| matches!(item, UserContent::Image(_)));
     let mut payload = build_payload(model, context, &options.base.provider_options)?;
     if let Some(on_payload) = &options.base.on_payload
         && let Some(next_payload) = on_payload(Value::Object(payload.clone()), model).await?
@@ -71,6 +67,11 @@ pub(crate) async fn run_generate_images_openai(
     }
 
     let client = options.base.http_client.clone().unwrap_or_default();
+    // Pick the endpoint from the final payload so on_payload changes count.
+    let has_images = payload
+        .get("images")
+        .and_then(Value::as_array)
+        .is_some_and(|images| !images.is_empty());
     let path = if has_images {
         edits_path
     } else {
@@ -463,6 +464,10 @@ mod tests {
                         data: "abc".to_string(),
                         mime_type: "image/png".to_string(),
                     }),
+                    UserContent::Image(ImageContent {
+                        data: "def".to_string(),
+                        mime_type: "image/jpeg".to_string(),
+                    }),
                 ])
                 .build(),
             None,
@@ -478,6 +483,10 @@ mod tests {
         assert_eq!(
             payload["images"][0]["image_url"],
             "data:image/png;base64,abc"
+        );
+        assert_eq!(
+            payload["images"][1]["image_url"],
+            "data:image/jpeg;base64,def"
         );
     }
 
