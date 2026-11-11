@@ -3,14 +3,20 @@ use std::sync::Arc;
 use crate::env_api_keys::{KnownProvider, get_env_api_key};
 use crate::event_stream::AssistantEventStream;
 use crate::oauth::{GitHubCopilotOAuthProvider, OAuthApiKey, OAuthCredentials};
-use crate::provider::{LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities};
+use async_trait::async_trait;
+
+use crate::provider::{
+    ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
+};
 use crate::providers::github_copilot_headers::copilot_static_headers;
 use crate::providers::{
-    anthropic, openai_completions, openai_embeddings, openai_responses, simple_options,
+    anthropic, openai_completions, openai_embeddings, openai_images, openai_responses,
+    simple_options,
 };
 use crate::types::{
-    Context, Model, ModelCompat, ModelInput, OpenAICompletionsCompat, OpenAIResponsesCompat,
-    SimpleStreamOptions, StreamOptions,
+    AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
+    ModelInput, ModelOutput, OpenAICompletionsCompat, OpenAIResponsesCompat, SimpleStreamOptions,
+    StreamOptions,
 };
 use crate::{Error, Result};
 
@@ -75,6 +81,58 @@ impl GitHubCopilot {
             .headers(copilot_static_headers())
             .input(vec![ModelInput::Text])
     }
+
+    pub fn image_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(GitHubCopilotImageModelApi {
+            api_key: self.api_key.clone(),
+            http_client: self.http_client.clone(),
+        });
+        ModelBuilder::new_image(&self.provider_id, id, runtime)
+            .base_url(
+                self.base_url
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            )
+            .headers(copilot_static_headers())
+            .input(vec![ModelInput::Text])
+            .output(vec![ModelOutput::Image])
+    }
+}
+
+#[derive(Clone)]
+struct GitHubCopilotImageModelApi {
+    api_key: Option<String>,
+    http_client: Option<reqwest::Client>,
+}
+
+#[async_trait]
+impl ImageModelApi for GitHubCopilotImageModelApi {
+    fn id(&self) -> &str {
+        crate::types::KnownApi::OpenaiImages.as_str()
+    }
+
+    async fn generate_images(
+        &self,
+        model: Model,
+        context: ImagesContext,
+        mut options: ImageGenerationOptions,
+    ) -> Result<AssistantImages> {
+        if options
+            .base
+            .api_key
+            .as_deref()
+            .is_none_or(|api_key| api_key.trim().is_empty())
+        {
+            options.base.api_key = self.api_key.clone();
+        }
+        if options.base.http_client.is_none() {
+            options.base.http_client = self.http_client.clone();
+        }
+        // Return upstream failures as errors so callers keep the HTTP status.
+        let mut output = AssistantImages::empty_for(&model);
+        openai_images::run_generate_images_openai(&model, context, &options, &mut output).await?;
+        Ok(output)
+    }
 }
 
 impl Provider for GitHubCopilot {
@@ -85,7 +143,7 @@ impl Provider for GitHubCopilot {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             language_models: true,
-            image_models: false,
+            image_models: true,
             embedding_models: true,
         }
     }
@@ -537,5 +595,23 @@ mod tests {
         assert_eq!(model.api_id(), "openai-embeddings");
         assert_eq!(model.base_url, "https://copilot.example");
         assert_eq!(model.input, vec![ModelInput::Text]);
+    }
+
+    #[test]
+    fn image_model_uses_openai_images_api() {
+        let provider = builder()
+            .api_key("test-token")
+            .base_url("https://copilot.example")
+            .build()
+            .expect("provider");
+        let model = provider
+            .image_model("gpt-image-2.5-flare")
+            .build_image()
+            .expect("model");
+
+        assert_eq!(model.api_id(), "openai-images");
+        assert_eq!(model.base_url, "https://copilot.example");
+        assert_eq!(model.output, vec![ModelOutput::Image]);
+        assert!(model.image_api().is_some());
     }
 }
