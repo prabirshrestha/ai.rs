@@ -20,7 +20,8 @@ pub(crate) async fn generate_images_openai(
 ) -> AssistantImages {
     let mut output = AssistantImages::empty_for(&model);
 
-    match run_generate_images_openai(&model, context, &options, &mut output).await {
+    match run_generate_images_openai(&model, context, &options, "/images/edits", &mut output).await
+    {
         Ok(()) => output,
         Err(error) => {
             output.stop_reason = if matches!(error, Error::Cancelled) {
@@ -38,6 +39,7 @@ pub(crate) async fn run_generate_images_openai(
     model: &Model,
     context: ImagesContext,
     options: &ImageGenerationOptions,
+    edits_path: &str,
     output: &mut AssistantImages,
 ) -> Result<()> {
     if model.api != KnownApi::OpenaiImages.as_str() {
@@ -55,6 +57,10 @@ pub(crate) async fn run_generate_images_openai(
         .filter(|api_key| !api_key.trim().is_empty())
         .ok_or_else(|| Error::MissingApiKey(model.provider.clone()))?;
 
+    let has_images = context
+        .input
+        .iter()
+        .any(|item| matches!(item, UserContent::Image(_)));
     let mut payload = build_payload(model, context, &options.base.provider_options)?;
     if let Some(on_payload) = &options.base.on_payload
         && let Some(next_payload) = on_payload(Value::Object(payload.clone()), model).await?
@@ -65,10 +71,12 @@ pub(crate) async fn run_generate_images_openai(
     }
 
     let client = options.base.http_client.clone().unwrap_or_default();
-    let url = format!(
-        "{}/images/generations",
-        model.base_url.trim_end_matches('/')
-    );
+    let path = if has_images {
+        edits_path
+    } else {
+        "/images/generations"
+    };
+    let url = format!("{}{path}", model.base_url.trim_end_matches('/'));
     let headers = build_headers(api_key, &model.headers, &options.base.headers)?;
     let response = send_with_retries(&options.base, || {
         client
@@ -126,10 +134,13 @@ fn build_payload(
     context: ImagesContext,
     provider_options: &std::collections::HashMap<String, Value>,
 ) -> Result<Map<String, Value>> {
-    let prompt = prompt_from_context(context)?;
+    let (prompt, images) = prompt_from_context(context);
     let mut payload = Map::new();
     payload.insert("model".to_string(), json!(model.id));
     payload.insert("prompt".to_string(), json!(prompt));
+    if !images.is_empty() {
+        payload.insert("images".to_string(), Value::Array(images));
+    }
     if model.base_url != DEFAULT_OPENAI_BASE_URL {
         payload.insert("response_format".to_string(), json!("b64_json"));
     }
@@ -139,19 +150,20 @@ fn build_payload(
     Ok(payload)
 }
 
-fn prompt_from_context(context: ImagesContext) -> Result<String> {
+/// Splits the context into the prompt text and edit input images. Input images
+/// use the JSON `images[].image_url` form of the edits endpoint.
+fn prompt_from_context(context: ImagesContext) -> (String, Vec<Value>) {
     let mut text = Vec::new();
+    let mut images = Vec::new();
     for item in context.input {
         match item {
             UserContent::Text(content) => text.push(content.text),
-            UserContent::Image(_) => {
-                return Err(Error::Provider(
-                    "openai-images generations only support text input".to_string(),
-                ));
-            }
+            UserContent::Image(image) => images.push(json!({
+                "image_url": format!("data:{};base64,{}", image.mime_type, image.data)
+            })),
         }
     }
-    Ok(text.join("\n\n"))
+    (text.join("\n\n"), images)
 }
 
 fn image_provider_options(
@@ -426,9 +438,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn generations_endpoint_rejects_image_inputs() {
+    async fn image_inputs_use_edits_endpoint() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let url = spawn_response_server(
+            Arc::clone(&captured),
+            200,
+            r#"{ "created": 1, "data": [{ "b64_json": "ZWRpdA==" }] }"#,
+        )
+        .await;
         let provider = openai::builder()
             .api_key(Some("test-key"))
+            .base_url(url)
             .images()
             .build()
             .expect("provider");
@@ -450,10 +470,14 @@ mod tests {
         .await
         .expect("generate images");
 
-        assert_eq!(output.stop_reason, ImagesStopReason::Error);
+        assert_eq!(output.stop_reason, ImagesStopReason::Stop);
+        let request = captured.lock().expect("captured request").clone();
+        assert!(request.starts_with("POST /v1/images/edits HTTP/1.1"));
+        let payload = request_body_json(&request);
+        assert_eq!(payload["prompt"], "Edit this image");
         assert_eq!(
-            output.error_message.as_deref(),
-            Some("provider error: openai-images generations only support text input")
+            payload["images"][0]["image_url"],
+            "data:image/png;base64,abc"
         );
     }
 

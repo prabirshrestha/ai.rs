@@ -130,7 +130,15 @@ impl ImageModelApi for GitHubCopilotImageModelApi {
         }
         // Return upstream failures as errors so callers keep the HTTP status.
         let mut output = AssistantImages::empty_for(&model);
-        openai_images::run_generate_images_openai(&model, context, &options, &mut output).await?;
+        // Copilot serves edits only under the /v1 prefix.
+        openai_images::run_generate_images_openai(
+            &model,
+            context,
+            &options,
+            "/v1/images/edits",
+            &mut output,
+        )
+        .await?;
         Ok(output)
     }
 }
