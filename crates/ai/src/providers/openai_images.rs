@@ -34,7 +34,7 @@ pub(crate) async fn generate_images_openai(
     }
 }
 
-async fn run_generate_images_openai(
+pub(crate) async fn run_generate_images_openai(
     model: &Model,
     context: ImagesContext,
     options: &ImageGenerationOptions,

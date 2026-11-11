@@ -128,7 +128,10 @@ impl ImageModelApi for GitHubCopilotImageModelApi {
         if options.base.http_client.is_none() {
             options.base.http_client = self.http_client.clone();
         }
-        Ok(openai_images::generate_images_openai(model, context, options).await)
+        // Return upstream failures as errors so callers keep the HTTP status.
+        let mut output = AssistantImages::empty_for(&model);
+        openai_images::run_generate_images_openai(&model, context, &options, &mut output).await?;
+        Ok(output)
     }
 }
 
