@@ -35,6 +35,8 @@ default = ["harness"]
 harness = ["tokio/process", "tokio/net", "dep:tokio-tungstenite"]
 # Harness adapters (`@ai-sdk/harness-*`), each opt-in.
 harness-acp = ["harness"]
+harness-cursor = ["harness-acp"]
+harness-github-copilot = ["harness-acp"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

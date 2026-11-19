@@ -432,7 +432,7 @@ async fn requires_credential_environment_and_brokering_settings_together() {
     );
 
     let mut settings = agent_settings("codex-acp");
-    settings.credential_brokering = Some(Arc::new(|_| Vec::new()));
+    settings.credential_brokering = Some(Arc::new(|_| Ok(Vec::new())));
     let error = create_acp(harness_settings(settings, &bridge))
         .err()
         .unwrap();

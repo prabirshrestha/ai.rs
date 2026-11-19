@@ -465,7 +465,7 @@ impl ACPV1Harness {
                 env: &brokering_environment,
                 sandbox_env: Some(&sandbox_agent_environment),
                 headers: start_options.headers.as_ref(),
-            });
+            })?;
             if !request_transformations.is_empty() {
                 network
                     .add_request_transformations(request_transformations)

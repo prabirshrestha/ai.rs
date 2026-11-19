@@ -13,7 +13,7 @@ mod acp_harness_flow_tests;
 #[cfg(test)]
 mod acp_harness_lifecycle_tests;
 #[cfg(test)]
-mod acp_harness_test_support;
+pub(crate) mod acp_harness_test_support;
 #[cfg(test)]
 mod acp_harness_tests;
 #[cfg(test)]

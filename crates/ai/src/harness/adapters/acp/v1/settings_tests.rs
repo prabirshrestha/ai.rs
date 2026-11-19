@@ -46,7 +46,7 @@ fn base_settings() -> ACPV1Settings {
 }
 
 fn brokering() -> Option<ACPCredentialBrokering> {
-    Some(Arc::new(|_| Vec::new()))
+    Some(Arc::new(|_| Ok(Vec::new())))
 }
 
 fn validate(configure: impl FnOnce(&mut ACPV1Settings)) -> Result<(), String> {

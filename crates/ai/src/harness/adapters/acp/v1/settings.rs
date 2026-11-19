@@ -124,9 +124,12 @@ pub struct ACPCredentialBrokeringOptions<'a> {
     pub headers: Option<&'a IndexMap<String, String>>,
 }
 
-/// `ACPCredentialBrokering`.
+/// `ACPCredentialBrokering`. [rust] A TS callback can throw; this returns
+/// the error.
 pub type ACPCredentialBrokering = Arc<
-    dyn Fn(ACPCredentialBrokeringOptions<'_>) -> Vec<HarnessV1RequestTransformation> + Send + Sync,
+    dyn Fn(ACPCredentialBrokeringOptions<'_>) -> HarnessResult<Vec<HarnessV1RequestTransformation>>
+        + Send
+        + Sync,
 >;
 
 /// `ACPAuthenticationFile`.

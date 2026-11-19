@@ -82,14 +82,14 @@ fn brokering(
                 options.headers.cloned(),
             ));
             let Some(placeholder) = options.sandbox_env.and_then(|env| env.get(variable)) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
-            vec![transformation(
+            Ok(vec![transformation(
                 host,
                 path_starts_with,
                 placeholder,
                 options.env.get(variable).map(String::as_str).unwrap_or(""),
-            )]
+            )])
         }),
         calls,
     )
@@ -245,7 +245,7 @@ async fn materializes_private_authentication_files_with_brokered_credentials() {
     let (credential_forwarding, _) = forwarding(|_| Ok("sandbox-secret".into()));
     let mut settings = agent_settings("authentication-file-acp");
     settings.credential_env = Some(vec!["PROVIDER_API_KEY".into()]);
-    settings.credential_brokering = Some(Arc::new(|_| Vec::new()));
+    settings.credential_brokering = Some(Arc::new(|_| Ok(Vec::new())));
     settings.credential_forwarding = Some(credential_forwarding);
     settings.authentication_files = Some({
         let file_calls = file_calls.clone();
@@ -475,14 +475,14 @@ async fn uses_new_placeholders_after_a_brokered_cold_restore_changes_credential_
     let bridge = FakeBridge::default();
     let sandbox = brokering_sandbox();
     let credential_brokering: ACPCredentialBrokering = Arc::new(|options| {
-        ["GITHUB_TOKEN", "GITLAB_TOKEN"]
+        Ok(["GITHUB_TOKEN", "GITLAB_TOKEN"]
             .into_iter()
             .filter_map(|name| {
                 let secret = options.env.get(name)?;
                 let placeholder = options.sandbox_env?.get(name)?;
                 Some(transformation("tokens.example", None, placeholder, secret))
             })
-            .collect()
+            .collect())
     });
     let create_harness = |process_env: Env| {
         let mut settings = agent_settings("changing-credentials-acp");
@@ -634,7 +634,7 @@ async fn aborts_before_spawning_when_credential_forwarding_fails() {
     let mut settings = agent_settings("failed-forwarding-acp");
     settings.forward_env = Some(Vec::new());
     settings.credential_env = Some(vec!["PROVIDER_API_KEY".into()]);
-    settings.credential_brokering = Some(Arc::new(|_| Vec::new()));
+    settings.credential_brokering = Some(Arc::new(|_| Ok(Vec::new())));
     settings.credential_forwarding = Some(credential_forwarding);
     let mut process_env = test_env();
     process_env.insert("PROVIDER_API_KEY".into(), "direct-secret".into());
