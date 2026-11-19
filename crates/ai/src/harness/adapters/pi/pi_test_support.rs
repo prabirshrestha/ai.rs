@@ -28,6 +28,8 @@ pub(crate) struct LocalSandboxCalls {
 pub(crate) struct LocalSandbox {
     pub cwd: Option<String>,
     pub calls: Arc<Mutex<LocalSandboxCalls>>,
+    /// Variables set for every command.
+    pub env: Vec<(String, String)>,
 }
 
 impl LocalSandbox {
@@ -35,7 +37,14 @@ impl LocalSandbox {
         Self {
             cwd: Some(cwd.into()),
             calls: Arc::default(),
+            env: Vec::new(),
         }
+    }
+
+    /// Run commands with `HOME` set to `home`.
+    pub fn with_home(mut self, home: impl Into<String>) -> Self {
+        self.env.push(("HOME".into(), home.into()));
+        self
     }
 
     fn command(&self, options: &SandboxProcessOptions) -> tokio::process::Command {
@@ -44,6 +53,7 @@ impl LocalSandbox {
         if let Some(dir) = options.working_directory.as_ref().or(self.cwd.as_ref()) {
             command.current_dir(dir);
         }
+        command.envs(self.env.iter().cloned());
         if let Some(env) = &options.env {
             command.envs(env);
         }

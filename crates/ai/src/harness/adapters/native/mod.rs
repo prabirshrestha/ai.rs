@@ -160,6 +160,9 @@ impl Harness for NativeHarness {
             cancellation_token: options.cancellation_token,
             persist: None,
             turn_sender: Some(turn_sender),
+            prepare_turn: None,
+            thinking_level: None,
+            resume_state: None,
         })))
     }
 }

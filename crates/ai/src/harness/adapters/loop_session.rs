@@ -49,7 +49,7 @@ pub type LoopModelResolver = Arc<dyn Fn(Option<&str>) -> AgentResult<Model> + Se
 /// Whether a builtin of `kind` must be approved under `mode`.
 pub type LoopApprovalPolicy = Arc<dyn Fn(PermissionMode, BuiltinToolKind) -> bool + Send + Sync>;
 
-/// Called with the whole history after each turn, to persist it.
+/// Called with each turn's new messages once they are in the history.
 pub type LoopPersistFn = Arc<
     dyn Fn(Vec<AgentMessage>) -> Pin<Box<dyn Future<Output = AgentResult<()>> + Send>>
         + Send
@@ -78,6 +78,53 @@ pub struct LoopSessionOptions {
     pub cancellation_token: Option<CancellationToken>,
     pub persist: Option<LoopPersistFn>,
     pub turn_sender: Option<LoopTurnSenderSlot>,
+    /// Builds the turn's system prompt and prompt message. Without it, the
+    /// skills follow `system_prompt` and the instructions are framed into the
+    /// first message of a fresh session.
+    pub prepare_turn: Option<LoopPrepareTurnFn>,
+    /// The thinking level of turns that do not set one.
+    pub thinking_level: Option<crate::ThinkingLevel>,
+    /// Builds the resume state from the history. Without it, the state holds
+    /// the serialized history.
+    pub resume_state: Option<LoopResumeStateFn>,
+}
+
+pub type LoopResumeStateFn = Arc<
+    dyn Fn(
+            Vec<AgentMessage>,
+        ) -> Pin<Box<dyn Future<Output = AgentResult<HarnessResumeState>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// What [`LoopSessionOptions::prepare_turn`] gets.
+pub struct LoopTurnInput {
+    pub settings: crate::harness::session::HarnessTurnSettings,
+    pub message: AgentMessage,
+    /// Whether the session has no history yet.
+    pub is_first_turn: bool,
+    /// The names of the tools the model sees this turn.
+    pub tool_names: Vec<String>,
+    pub cancellation_token: CancellationToken,
+}
+
+/// What [`LoopSessionOptions::prepare_turn`] returns.
+pub struct LoopTurnPrep {
+    pub system_prompt: String,
+    pub message: AgentMessage,
+}
+
+pub type LoopPrepareTurnFn = Arc<
+    dyn Fn(LoopTurnInput) -> Pin<Box<dyn Future<Output = AgentResult<LoopTurnPrep>> + Send>>
+        + Send
+        + Sync,
+>;
+
+fn push_section(system_prompt: &mut String, section: &str) {
+    if !system_prompt.is_empty() {
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str(section);
 }
 
 struct LoopState {
@@ -274,6 +321,16 @@ impl LoopSession {
         }
     }
 
+    async fn build_resume_state(
+        &self,
+        messages: Vec<AgentMessage>,
+    ) -> AgentResult<HarnessResumeState> {
+        match &self.options.resume_state {
+            Some(resume_state) => resume_state(messages).await,
+            None => Ok(loop_resume_state(&self.options.harness_id, &messages)),
+        }
+    }
+
     fn active_builtins(&self) -> Vec<LoopBuiltinTool> {
         self.options
             .builtins
@@ -386,23 +443,44 @@ impl HarnessSession for LoopSession {
             tools.push(tool.clone());
         }
 
-        let mut system_prompt = self.options.system_prompt.clone();
-        let extra = [
-            render_skills_prompt(&settings.skills),
-            response_format
-                .as_ref()
-                .and_then(render_response_format_prompt),
-        ];
-        for part in extra.into_iter().flatten() {
-            if !system_prompt.is_empty() {
-                system_prompt.push_str("\n\n");
+        let history = self.state.lock().await.messages.clone();
+        let turn_token = self.session_token.child_token();
+        let (mut system_prompt, message) = match &self.options.prepare_turn {
+            Some(prepare_turn) => {
+                let prep = prepare_turn(LoopTurnInput {
+                    settings: settings.clone(),
+                    message,
+                    is_first_turn: history.is_empty(),
+                    tool_names: tools.iter().map(|tool| tool.definition().name).collect(),
+                    cancellation_token: turn_token.clone(),
+                })
+                .await?;
+                (prep.system_prompt, prep.message)
             }
-            system_prompt.push_str(&part);
+            None => {
+                let mut system_prompt = self.options.system_prompt.clone();
+                if let Some(skills) = render_skills_prompt(&settings.skills) {
+                    push_section(&mut system_prompt, &skills);
+                }
+                let message = match settings.instructions.as_deref() {
+                    Some(instructions) if history.is_empty() && !instructions.is_empty() => {
+                        frame_first_message(message, instructions)
+                    }
+                    _ => message,
+                };
+                (system_prompt, message)
+            }
+        };
+        if let Some(format) = response_format
+            .as_ref()
+            .and_then(render_response_format_prompt)
+        {
+            push_section(&mut system_prompt, &format);
         }
 
         let model = (self.options.resolve_model)(settings.model.as_deref())?;
         let mut config = AgentLoopConfig::new(model);
-        if let Some(level) = settings.thinking_level {
+        if let Some(level) = settings.thinking_level.or(self.options.thinking_level) {
             config.options.reasoning = Some(level.into());
         }
         config.after_tool_call = after_tool_call;
@@ -416,15 +494,6 @@ impl HarnessSession for LoopSession {
             }));
         }
 
-        let history = self.state.lock().await.messages.clone();
-        let message = match settings.instructions.as_deref() {
-            Some(instructions) if history.is_empty() && !instructions.is_empty() => {
-                frame_first_message(message, instructions)
-            }
-            _ => message,
-        };
-
-        let turn_token = self.session_token.child_token();
         if let Some(token) = cancellation_token {
             let turn_token = turn_token.clone();
             tokio::spawn(async move {
@@ -475,13 +544,13 @@ impl HarnessSession for LoopSession {
                 *slot.lock().unwrap() = None;
             }
             let new_messages = result?;
-            let all = {
-                let mut state = state.lock().await;
-                state.messages.extend(new_messages.iter().cloned());
-                state.messages.clone()
-            };
+            state
+                .lock()
+                .await
+                .messages
+                .extend(new_messages.iter().cloned());
             if let Some(persist) = persist {
-                persist(all).await?;
+                persist(new_messages.clone()).await?;
             }
             Ok(new_messages)
         });
@@ -504,17 +573,20 @@ impl HarnessSession for LoopSession {
     }
 
     async fn detach(&self) -> AgentResult<HarnessResumeState> {
-        let state = self.state.lock().await;
-        Ok(loop_resume_state(&self.options.harness_id, &state.messages))
+        let messages = self.state.lock().await.messages.clone();
+        self.build_resume_state(messages).await
     }
 
     async fn stop(&self) -> AgentResult<HarnessResumeState> {
         self.session_token.cancel();
         // Wait for a running turn to record its messages.
         let _turn = self.turn_lock.lock().await;
-        let mut state = self.state.lock().await;
-        state.stopped = true;
-        Ok(loop_resume_state(&self.options.harness_id, &state.messages))
+        let messages = {
+            let mut state = self.state.lock().await;
+            state.stopped = true;
+            state.messages.clone()
+        };
+        self.build_resume_state(messages).await
     }
 
     async fn destroy(&self) -> AgentResult<()> {
