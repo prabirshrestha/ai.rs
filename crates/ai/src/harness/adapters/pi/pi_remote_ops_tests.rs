@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use bytes::Bytes;
 use parking_lot::Mutex;
 
@@ -116,7 +115,10 @@ impl SandboxSession for MockSandbox {
             .map(Bytes::from))
     }
 
-    async fn read_text_file(&self, _o: SandboxReadTextFileOptions) -> HarnessResult<Option<String>> {
+    async fn read_text_file(
+        &self,
+        _o: SandboxReadTextFileOptions,
+    ) -> HarnessResult<Option<String>> {
         unimplemented!()
     }
 
@@ -220,7 +222,9 @@ fn make_ops(behaviors: Behaviors) -> (MockSandbox, PiRemoteOps) {
 
 fn run(stdout: &str, exit_code: i32) -> Option<RunBehavior> {
     let stdout = stdout.to_string();
-    Some(Arc::new(move |_| Some((stdout.clone(), String::new(), exit_code))))
+    Some(Arc::new(move |_| {
+        Some((stdout.clone(), String::new(), exit_code))
+    }))
 }
 
 fn read_map(entries: Vec<(String, Vec<u8>)>) -> Option<ReadBehavior> {
@@ -234,7 +238,11 @@ fn read_map(entries: Vec<(String, Vec<u8>)>) -> Option<ReadBehavior> {
 
 fn alias_realpath(alias: String, target: String) -> Option<RealpathBehavior> {
     Some(Arc::new(move |path| {
-        Some(if path == alias { target.clone() } else { path.into() })
+        Some(if path == alias {
+            target.clone()
+        } else {
+            path.into()
+        })
     }))
 }
 
@@ -274,7 +282,11 @@ fn local_workspace() -> LocalWorkspace {
 }
 
 fn local_ops(local: &LocalWorkspace) -> PiRemoteOps {
-    ops_for(Arc::new(local.sandbox.clone()), mapper(&local.workspace), None)
+    ops_for(
+        Arc::new(local.sandbox.clone()),
+        mapper(&local.workspace),
+        None,
+    )
 }
 
 fn read(path: &str) -> Option<String> {
@@ -417,7 +429,10 @@ mod with_local_bash {
         bash(&local.sandbox, &setup.join(" && "));
 
         let ops = local_ops(&local);
-        assert_eq!(ops.read_buffer("read-alias").await.unwrap(), b"inside read\n");
+        assert_eq!(
+            ops.read_buffer("read-alias").await.unwrap(),
+            b"inside read\n"
+        );
         ops.write_file("write-alias", "updated inside\n")
             .await
             .unwrap();
@@ -468,8 +483,11 @@ mod with_local_bash {
             .contains("escapes the workspace")
         );
         assert!(
-            err_text(ops.edit_file("outside-link/edit.txt", "old", "updated").await)
-                .contains("escapes the readable roots")
+            err_text(
+                ops.edit_file("outside-link/edit.txt", "old", "updated")
+                    .await
+            )
+            .contains("escapes the readable roots")
         );
         assert!(
             err_text(ops.find_files("*.txt", Some("outside-link"), None).await)
@@ -503,7 +521,10 @@ mod read_buffer {
     #[tokio::test]
     async fn reads_via_read_binary_file_and_returns_a_buffer() {
         let (_, ops) = make_ops(Behaviors {
-            read_binary: read_map(vec![(format!("{SANDBOX_WORK_DIR}/hello.txt"), b"hi".to_vec())]),
+            read_binary: read_map(vec![(
+                format!("{SANDBOX_WORK_DIR}/hello.txt"),
+                b"hi".to_vec(),
+            )]),
             ..Default::default()
         });
         assert_eq!(ops.read_buffer("hello.txt").await.unwrap(), b"hi");
@@ -550,7 +571,9 @@ mod read_buffer {
         invalid.push(0xff);
         let replacement = format!("{SANDBOX_WORK_DIR}/raw-\u{fffd}");
         let (sandbox, ops) = make_ops(Behaviors {
-            realpath_bytes: Some(Arc::new(move |path| (path == alias).then(|| invalid.clone()))),
+            realpath_bytes: Some(Arc::new(move |path| {
+                (path == alias).then(|| invalid.clone())
+            })),
             read_binary: read_map(vec![(replacement, b"outside secret".to_vec())]),
             ..Default::default()
         });
@@ -566,11 +589,7 @@ mod read_buffer {
     #[tokio::test]
     async fn rejects_a_later_configured_root_record() {
         let b64 = |value: &[u8]| base64::engine::general_purpose::STANDARD.encode(value);
-        for record in [
-            "not-base64!".to_string(),
-            b64(&[0xff]),
-            b64(b"relative"),
-        ] {
+        for record in ["not-base64!".to_string(), b64(&[0xff]), b64(b"relative")] {
             let root = "/tmp/pi-artifacts";
             let stdout = [
                 b64(format!("{SANDBOX_WORK_DIR}/notes.txt").as_bytes()),
@@ -595,7 +614,10 @@ mod read_buffer {
             );
             let expected = format!("Unable to resolve path: {root}");
             assert_eq!(err_text(ops.read_buffer("notes.txt").await), expected);
-            assert_eq!(err_text(ops.write_file("notes.txt", "blocked").await), expected);
+            assert_eq!(
+                err_text(ops.write_file("notes.txt", "blocked").await),
+                expected
+            );
             assert!(sandbox.calls.lock().reads.is_empty());
             assert!(sandbox.calls.lock().writes.is_empty());
         }
@@ -618,7 +640,11 @@ mod read_buffer {
                     shell_quote(&format!("{workspace}/raw-"))
                 ),
                 "printf 'inside\\n' > \"$raw_path\"".into(),
-                format!("ln -s {} {}", shell_quote(&secret), shell_quote(&replacement)),
+                format!(
+                    "ln -s {} {}",
+                    shell_quote(&secret),
+                    shell_quote(&replacement)
+                ),
                 format!("ln -s \"$raw_path\" {}", shell_quote(&alias)),
             ]
             .join("; "),
@@ -644,10 +670,17 @@ mod write_file {
         ops.write_file("src/new.ts", "export {};").await.unwrap();
         let calls = sandbox.calls.lock();
         assert!(calls.runs[1].0.contains("mkdir -p"));
-        assert!(calls.runs[1].0.contains(&format!("'{SANDBOX_WORK_DIR}/src'")));
+        assert!(
+            calls.runs[1]
+                .0
+                .contains(&format!("'{SANDBOX_WORK_DIR}/src'"))
+        );
         assert_eq!(
             calls.writes,
-            vec![(format!("{SANDBOX_WORK_DIR}/src/new.ts"), "export {};".into())]
+            vec![(
+                format!("{SANDBOX_WORK_DIR}/src/new.ts"),
+                "export {};".into()
+            )]
         );
     }
 
@@ -712,7 +745,12 @@ mod write_file {
         );
         let calls = sandbox.calls.lock();
         assert!(calls.writes.is_empty());
-        assert!(!calls.runs.iter().any(|(command, _)| command.contains("mkdir -p")));
+        assert!(
+            !calls
+                .runs
+                .iter()
+                .any(|(command, _)| command.contains("mkdir -p"))
+        );
     }
 }
 
@@ -729,7 +767,9 @@ mod edit_file {
         });
         let ops = ops_for(Arc::new(sandbox), mapper(SANDBOX_WORK_DIR), None);
         assert_eq!(
-            ops.edit_file("a.txt", "old text", "new text").await.unwrap(),
+            ops.edit_file("a.txt", "old text", "new text")
+                .await
+                .unwrap(),
             "new text here, and old text again"
         );
     }
@@ -995,7 +1035,10 @@ mod grep_files {
     #[tokio::test]
     async fn returns_text_matches_when_the_workspace_also_contains_matching_binary_data() {
         let local = local_workspace();
-        write(&format!("{}/text.txt", local.workspace), "hello from text\n");
+        write(
+            &format!("{}/text.txt", local.workspace),
+            "hello from text\n",
+        );
         std::fs::write(
             format!("{}/data.bin", local.workspace),
             [0, 104, 101, 108, 108, 111, 10],
@@ -1304,8 +1347,11 @@ mod with_denied_roots {
             err_text(ops.write_file("private/new.txt", "new private\n").await).contains(DENIED)
         );
         assert!(
-            err_text(ops.edit_file("private/notes.txt", "private", "changed").await)
-                .contains(DENIED)
+            err_text(
+                ops.edit_file("private/notes.txt", "private", "changed")
+                    .await
+            )
+            .contains(DENIED)
         );
         assert!(local.sandbox.calls.lock().binary_reads.is_empty());
         assert!(local.sandbox.calls.lock().text_writes.is_empty());
@@ -1329,8 +1375,11 @@ mod with_denied_roots {
         let fixture = make_path_policy_fixture();
         let ops = &fixture.ops;
         assert!(
-            err_text(ops.read_buffer(&format!("{}/token.txt", fixture.denied)).await)
-                .contains(DENIED)
+            err_text(
+                ops.read_buffer(&format!("{}/token.txt", fixture.denied))
+                    .await
+            )
+            .contains(DENIED)
         );
         assert!(err_text(ops.list_directory(Some(&fixture.denied), None).await).contains(DENIED));
         assert!(err_text(ops.read_buffer("private/..backup/token.txt").await).contains(DENIED));
@@ -1365,7 +1414,9 @@ mod with_denied_roots {
         assert!(err_text(ops.read_buffer("token-link.txt").await).contains(DENIED));
         assert!(err_text(ops.read_buffer(&format!("{alias}/token.txt")).await).contains(DENIED));
         assert!(err_text(ops.find_files("*.txt", Some(&alias), None).await).contains(DENIED));
-        assert!(err_text(ops.grep_files("needle", grep(Some(&alias), false)).await).contains(DENIED));
+        assert!(
+            err_text(ops.grep_files("needle", grep(Some(&alias), false)).await).contains(DENIED)
+        );
         assert!(fixture.local.sandbox.calls.lock().binary_reads.is_empty());
     }
 
@@ -1373,8 +1424,13 @@ mod with_denied_roots {
     async fn refuses_to_write_inside_a_denied_root() {
         let fixture = make_path_policy_fixture();
         assert!(
-            err_text(fixture.ops.write_file("private/journal.txt", "overwritten\n").await)
-                .contains(DENIED)
+            err_text(
+                fixture
+                    .ops
+                    .write_file("private/journal.txt", "overwritten\n")
+                    .await
+            )
+            .contains(DENIED)
         );
         assert!(
             err_text(
@@ -1413,7 +1469,10 @@ mod with_denied_roots {
                 .unwrap()
                 .is_empty()
         );
-        let output = ops.grep_files("needle", grep(Some(home), true)).await.unwrap();
+        let output = ops
+            .grep_files("needle", grep(Some(home), true))
+            .await
+            .unwrap();
         assert!(output.contains("notes.txt:1:needle notes"));
         assert!(output.contains("docs/credentials/public.txt:1:needle nested public"));
         assert!(!output.contains("needle token"));
@@ -1432,7 +1491,10 @@ mod with_denied_roots {
         let w = local.workspace.clone();
         write(&format!("{w}/docs/notes.txt"), "needle notes\n");
         write(&format!("{w}/private/token.txt"), "needle token\n");
-        write(&format!("{w}/..private/token.txt"), "needle dotted secret\n");
+        write(
+            &format!("{w}/..private/token.txt"),
+            "needle dotted secret\n",
+        );
         let ops = ops_for(
             Arc::new(local.sandbox.clone()),
             create_pi_path_mapper(CreatePiPathMapperOptions {

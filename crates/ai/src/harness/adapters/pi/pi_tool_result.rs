@@ -3,7 +3,7 @@
 //! (`core/tools/truncate.js`: `DEFAULT_MAX_BYTES`, `formatSize`,
 //! `truncateHead`, `truncateTail`).
 
-use crate::harness::utils::HarnessToolModelOutputContent;
+use crate::{TextContent, ToolResultContent};
 
 /// Pi's `DEFAULT_MAX_LINES`.
 pub const DEFAULT_MAX_LINES: usize = 2000;
@@ -252,14 +252,14 @@ pub fn truncate_pi_tool_output_head(text: &str, continuation: &str) -> String {
 /// [rust] TS returns the input array itself when nothing is truncated;
 /// this returns an equal copy.
 pub fn truncate_pi_tool_model_output(
-    content: &[HarnessToolModelOutputContent],
+    content: &[ToolResultContent],
     continuation: &str,
-) -> Vec<HarnessToolModelOutputContent> {
+) -> Vec<ToolResultContent> {
     let text = content
         .iter()
         .filter_map(|part| match part {
-            HarnessToolModelOutputContent::Text { text } => Some(text.as_str()),
-            HarnessToolModelOutputContent::Image { .. } => None,
+            ToolResultContent::Text(TextContent { text, .. }) => Some(text.as_str()),
+            ToolResultContent::Image(_) => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -270,7 +270,7 @@ pub fn truncate_pi_tool_model_output(
     let mut offset = 0;
     let mut last_text_index = None;
     for part in content {
-        let HarnessToolModelOutputContent::Text { text } = part else {
+        let ToolResultContent::Text(TextContent { text, .. }) = part else {
             truncated.push(part.clone());
             continue;
         };
@@ -280,27 +280,23 @@ pub fn truncate_pi_tool_model_output(
         offset += text.len() + 1;
         if !prefix.is_empty() {
             last_text_index = Some(truncated.len());
-            truncated.push(HarnessToolModelOutputContent::Text {
-                text: prefix.to_string(),
-            });
+            truncated.push(ToolResultContent::text(prefix));
         }
     }
     match last_text_index {
         Some(index) => {
-            if let HarnessToolModelOutputContent::Text { text } = &mut truncated[index] {
+            if let ToolResultContent::Text(TextContent { text, .. }) = &mut truncated[index] {
                 *text = join_content_and_notice(text, &notice);
             }
         }
         None => {
             let index = content
                 .iter()
-                .position(|part| matches!(part, HarnessToolModelOutputContent::Text { .. }))
+                .position(|part| matches!(part, ToolResultContent::Text(_)))
                 .unwrap_or(0);
             truncated.insert(
                 index,
-                HarnessToolModelOutputContent::Text {
-                    text: join_content_and_notice("", &notice),
-                },
+                ToolResultContent::text(join_content_and_notice("", &notice)),
             );
         }
     }
@@ -328,22 +324,22 @@ mod tests {
 
     const CONTINUATION: &str = "Call the tool again with narrower parameters.";
 
-    fn image() -> HarnessToolModelOutputContent {
-        HarnessToolModelOutputContent::Image {
+    fn image() -> ToolResultContent {
+        ToolResultContent::Image(crate::ImageContent {
             data: "iVBORw==".into(),
-            media_type: "image/png".into(),
-        }
+            mime_type: "image/png".into(),
+        })
     }
 
-    fn text(text: impl Into<String>) -> HarnessToolModelOutputContent {
-        HarnessToolModelOutputContent::Text { text: text.into() }
+    fn text(text: impl Into<String>) -> ToolResultContent {
+        ToolResultContent::text(text)
     }
 
-    fn texts(parts: &[HarnessToolModelOutputContent]) -> String {
+    fn texts(parts: &[ToolResultContent]) -> String {
         parts
             .iter()
             .filter_map(|part| match part {
-                HarnessToolModelOutputContent::Text { text } => Some(text.as_str()),
+                ToolResultContent::Text(TextContent { text, .. }) => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -353,7 +349,10 @@ mod tests {
     #[test]
     fn preserves_untruncated_content() {
         for content in [vec![], vec![image()], vec![text("small"), image()]] {
-            assert_eq!(truncate_pi_tool_model_output(&content, CONTINUATION), content);
+            assert_eq!(
+                truncate_pi_tool_model_output(&content, CONTINUATION),
+                content
+            );
         }
     }
 
@@ -401,7 +400,7 @@ mod tests {
             assert_eq!(
                 result
                     .iter()
-                    .filter(|part| matches!(part, HarnessToolModelOutputContent::Image { .. }))
+                    .filter(|part| matches!(part, ToolResultContent::Image(_)))
                     .count(),
                 4
             );
@@ -410,8 +409,8 @@ mod tests {
             let kinds: Vec<&str> = result
                 .iter()
                 .map(|part| match part {
-                    HarnessToolModelOutputContent::Text { .. } => "text",
-                    HarnessToolModelOutputContent::Image { .. } => "image",
+                    ToolResultContent::Text(_) => "text",
+                    ToolResultContent::Image(_) => "image",
                 })
                 .collect();
             let expected = if limit == "bytes" {
@@ -431,7 +430,10 @@ mod tests {
             truncate_pi_tool_model_output(&content, CONTINUATION),
             vec![
                 image(),
-                text(truncate_pi_tool_output_head(&format!("\n{big}"), CONTINUATION)),
+                text(truncate_pi_tool_output_head(
+                    &format!("\n{big}"),
+                    CONTINUATION
+                )),
                 image(),
                 image(),
             ]

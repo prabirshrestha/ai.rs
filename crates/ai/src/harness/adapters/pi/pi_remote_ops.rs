@@ -14,12 +14,12 @@ use super::pi_paths::{
     CreatePiPathMapperOptions, PiPathMapper, PiReadablePathRoot, basename_posix,
     create_pi_path_mapper, relative_posix,
 };
-use crate::harness::errors::{BoxError, HarnessResult};
+use crate::harness::error::{BoxError, HarnessResult};
+use crate::harness::paths::{dirname_posix, is_absolute_posix};
 use crate::harness::sandbox::{
     SandboxPathOptions, SandboxProcessOptions, SandboxRunOptions, SandboxSession,
     SandboxWriteTextFileOptions,
 };
-use crate::harness::spec::paths::{dirname_posix, is_absolute_posix};
 use crate::harness::utils::shell_quote::shell_quote;
 use crate::harness::utils::{plain_error, random_uuid};
 
@@ -40,8 +40,7 @@ impl PiRemoteFileChangeKind {
 }
 
 /// `onFileChange(event, relativePath, content)`.
-pub type PiRemoteFileChangeHandler =
-    Arc<dyn Fn(PiRemoteFileChangeKind, &str, &[u8]) + Send + Sync>;
+pub type PiRemoteFileChangeHandler = Arc<dyn Fn(PiRemoteFileChangeKind, &str, &[u8]) + Send + Sync>;
 
 /// `PiRemoteOpsOptions`.
 #[derive(Clone)]
@@ -146,7 +145,10 @@ fn is_base64_path(encoded: &str) -> bool {
     }
     let is_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/';
     let padding = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
-    padding <= 2 && bytes[..bytes.len() - padding].iter().all(|byte| is_char(*byte))
+    padding <= 2
+        && bytes[..bytes.len() - padding]
+            .iter()
+            .all(|byte| is_char(*byte))
 }
 
 fn parse_framed_path(output: &str) -> Option<String> {
@@ -253,15 +255,15 @@ async fn resolve_sandbox_paths(
     records
         .iter()
         .zip(targets)
-        .map(|(record, target)| {
-            match parse_framed_path(&format!("{record}{REALPATH_FRAME}")) {
+        .map(
+            |(record, target)| match parse_framed_path(&format!("{record}{REALPATH_FRAME}")) {
                 Some(resolved) if is_absolute_posix(&resolved) => Ok(resolved),
                 _ => Err(PiSandboxPathResolutionError::boxed(format!(
                     "Unable to resolve path: {}",
                     target.input_path
                 ))),
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -434,7 +436,11 @@ impl PiRemoteOps {
         })
     }
 
-    fn relative_denied_roots(&self, remote_path: &str, resolved: &ResolvedSandboxPath) -> Vec<String> {
+    fn relative_denied_roots(
+        &self,
+        remote_path: &str,
+        resolved: &ResolvedSandboxPath,
+    ) -> Vec<String> {
         let roots: IndexSet<String> = self
             .options
             .paths
@@ -546,9 +552,7 @@ impl PiRemoteOps {
         let result = self
             .run_shell(
                 [
-                    format!(
-                        "if [ ! -e {quoted} ]; then echo \"__PI_LS_NOT_FOUND__\"; exit 2; fi"
-                    ),
+                    format!("if [ ! -e {quoted} ]; then echo \"__PI_LS_NOT_FOUND__\"; exit 2; fi"),
                     format!("if [ ! -d {quoted} ]; then echo \"__PI_LS_NOT_DIR__\"; exit 3; fi"),
                     format!("cd {quoted}"),
                     "ls -1AF".into(),
@@ -661,14 +665,14 @@ impl PiRemoteOps {
             .await?;
         let resolved_path = resolved.path.clone();
         let relative_target = resolved.paths.to_relative_path(&resolved_path);
-        let target_path = if relative_target.starts_with("../") || is_absolute_posix(&relative_target)
-        {
-            resolved_path.clone()
-        } else if relative_target.starts_with('-') {
-            format!("./{relative_target}")
-        } else {
-            relative_target
-        };
+        let target_path =
+            if relative_target.starts_with("../") || is_absolute_posix(&relative_target) {
+                resolved_path.clone()
+            } else if relative_target.starts_with('-') {
+                format!("./{relative_target}")
+            } else {
+                relative_target
+            };
         let relative_denied_roots = self.relative_denied_roots(&remote_path, &resolved);
         let limit = input.limit.unwrap_or(100).max(1);
         let mut common_flags: Vec<String> = vec!["-n".into()];

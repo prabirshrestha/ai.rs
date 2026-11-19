@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::harness::errors::HarnessError;
-use crate::harness::spec::paths::{is_absolute_posix, normalize_posix, posix_join};
+use crate::harness::error::HarnessError;
+use crate::harness::paths::{is_absolute_posix, normalize_posix, posix_join};
 
 /// `path.posix.resolve(path)` for the absolute or root-relative paths used
 /// here: normalized, without a trailing separator.
@@ -502,7 +502,9 @@ mod tests {
             mapper.assert_sandbox_path("/tmp/output.json").unwrap(),
             "/tmp/output.json"
         );
-        assert!(err(mapper.to_sandbox_path("/tmp-evil/output.json")).contains("escapes the workspace"));
+        assert!(
+            err(mapper.to_sandbox_path("/tmp-evil/output.json")).contains("escapes the workspace")
+        );
         assert!(
             err(mapper.to_readable_sandbox_path("/tmp-evil/output.json"))
                 .contains("escapes the workspace")
@@ -559,7 +561,8 @@ mod tests {
                 .contains("inside a denied root")
         );
         assert!(
-            err(mapper.to_sandbox_path("/tmp/private/result.json")).contains("inside a denied root")
+            err(mapper.to_sandbox_path("/tmp/private/result.json"))
+                .contains("inside a denied root")
         );
         assert_eq!(
             mapper

@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use parking_lot::Mutex;
 use tokio::io::AsyncReadExt as _;
 
-use crate::harness::errors::HarnessResult;
+use crate::harness::error::HarnessResult;
 use crate::harness::sandbox::*;
 
 /// What a [`LocalSandbox`] was asked to do.
