@@ -15,7 +15,7 @@ pub mod pi_tools;
 pub mod pi_utils;
 
 #[cfg(test)]
-pub(crate) mod pi_test_support;
+pub(crate) use super::local_sandbox as pi_test_support;
 
 #[cfg(feature = "harness-pi")]
 pub use pi_harness::{PI_HARNESS_ID, PiHarness, PiHarnessSettings, PiResources, PiSandboxSkill};

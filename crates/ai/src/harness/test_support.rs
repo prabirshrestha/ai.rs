@@ -314,3 +314,25 @@ pub fn quoted_values(command: &str) -> Vec<String> {
         .map(|c| c[1].to_string())
         .collect()
 }
+
+/// `expect(actual).toMatchObject(expected)`: every key of `expected` matches,
+/// recursively; arrays match element by element.
+pub fn assert_match_object(actual: &serde_json::Value, expected: &serde_json::Value) {
+    use serde_json::Value;
+    fn matches(actual: &Value, expected: &Value) -> bool {
+        match (actual, expected) {
+            (Value::Object(actual), Value::Object(expected)) => expected
+                .iter()
+                .all(|(key, value)| actual.get(key).is_some_and(|actual| matches(actual, value))),
+            (Value::Array(actual), Value::Array(expected)) => {
+                actual.len() == expected.len()
+                    && actual.iter().zip(expected).all(|(a, e)| matches(a, e))
+            }
+            _ => actual == expected,
+        }
+    }
+    assert!(
+        matches(actual, expected),
+        "expected {actual:#} to match {expected:#}"
+    );
+}

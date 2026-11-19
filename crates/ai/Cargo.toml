@@ -35,6 +35,12 @@ harness = ["tokio/process"]
 # Harness adapters, each opt-in.
 harness-native = ["harness"]
 harness-pi = ["harness"]
+harness-claude-code = ["harness"]
+harness-codex = ["harness"]
+harness-acp = ["harness"]
+harness-cursor = ["harness-acp"]
+harness-github-copilot = ["harness-acp"]
+harness-opencode = ["harness"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
