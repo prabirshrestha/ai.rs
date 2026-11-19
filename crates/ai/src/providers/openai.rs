@@ -8,8 +8,8 @@ use crate::provider::{
     ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
 };
 use crate::providers::{
-    openai_completions, openai_decisions, openai_embeddings, openai_images, openai_responses,
-    simple_options, typesafe_system_one,
+    llama_cpp_classify, openai_completions, openai_decisions, openai_embeddings, openai_images,
+    openai_responses, simple_options, typesafe_system_one,
 };
 use crate::types::{
     AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
@@ -95,6 +95,23 @@ impl OpenAi {
             self.allows_missing_api_key(),
             self.http_client.clone(),
             "/systemone",
+        ));
+        ModelBuilder::new_classifier(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![ModelInput::Text])
+    }
+
+    /// A classifier made from a chat model on llama.cpp's `llama-server`.
+    /// Each question is one prompt with single-token answer labels, and the
+    /// answer is the softmax over the labels' next-token log-probabilities.
+    /// It uses `/tokenize`, `/apply-template` and `/completion` on the server
+    /// root (a trailing `/v1` on the base URL is dropped). It takes text
+    /// only. `ClassifierOptions::temperature` above 1 softens the
+    /// probabilities.
+    pub fn llama_cpp_classifier_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(llama_cpp_classify::LlamaCppClassifierApi::new(
+            self.api_key.clone(),
+            self.http_client.clone(),
         ));
         ModelBuilder::new_classifier(&self.provider_id, id, runtime)
             .base_url(self.base_url.clone())

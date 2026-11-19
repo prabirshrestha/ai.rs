@@ -249,8 +249,9 @@ impl ClassifierResult {
 #[derive(Clone, Default)]
 pub struct ClassifierOptions {
     pub base: RequestOptions,
-    /// Sampling temperature, for APIs that take one. System One and OpenAI
-    /// Decisions do not, and ignore it.
+    /// Divides the label log-probabilities of `llama-cpp-classify` before the
+    /// softmax (default 1; above 1 softens them). System One and OpenAI
+    /// Decisions ignore it.
     pub temperature: Option<f64>,
 }
 
