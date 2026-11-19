@@ -314,7 +314,9 @@ pub fn to_ui_message_stream(
             message_id,
             original_messages: options.original_messages.unwrap_or_default(),
             on_step_end: options.on_step_end.or(options.on_step_finish),
+            on_step_finish: None,
             on_end: options.on_end.or(options.on_finish),
+            on_finish: None,
             on_error: on_error.unwrap_or_else(|| Arc::new(|_| DEFAULT_ERROR_TEXT.to_string())),
             get_outcome: Some(Arc::new(move || outcome.lock().outcome.clone())),
         },
@@ -356,7 +358,11 @@ pub struct HandleUIMessageStreamFinishOptions {
     pub message_id: Option<String>,
     pub original_messages: Vec<UIMessage>,
     pub on_step_end: Option<UIMessageStreamOnStepEndCallback>,
+    /// Deprecated: use `on_step_end`.
+    pub on_step_finish: Option<UIMessageStreamOnStepEndCallback>,
     pub on_end: Option<UIMessageStreamOnEndCallback>,
+    /// Deprecated: use `on_end`.
+    pub on_finish: Option<UIMessageStreamOnEndCallback>,
     pub on_error: UIMessageStreamOnErrorFn,
     /// The operation-level outcome declared by the stream owner (`None`
     /// is `unknown`).
@@ -454,7 +460,7 @@ impl Drop for EndGuard {
 }
 
 /// `handleUIMessageStreamFinish({ stream, messageId, originalMessages,
-/// onStepEnd, onEnd, onError, getOutcome })`.
+/// onStepEnd, onStepFinish, onEnd, onFinish, onError, getOutcome })`.
 pub fn handle_ui_message_stream_finish(
     stream: BoxStream<'static, UIMessageChunk>,
     options: HandleUIMessageStreamFinishOptions,
@@ -484,7 +490,9 @@ pub fn handle_ui_message_stream_finish(
         other => other,
     };
 
-    if options.on_end.is_none() && options.on_step_end.is_none() {
+    let on_step_end = options.on_step_end.or(options.on_step_finish);
+    let on_end = options.on_end.or(options.on_finish);
+    if on_end.is_none() && on_step_end.is_none() {
         return stream.map(move |chunk| Ok(inject(chunk))).boxed();
     }
 
@@ -497,10 +505,9 @@ pub fn handle_ui_message_stream_finish(
         original_messages: options.original_messages,
         is_aborted: false,
         processing_error: None,
-        on_end: options.on_end,
+        on_end,
         get_outcome: options.get_outcome,
     }));
-    let on_step_end = options.on_step_end;
     let on_error = options.on_error;
 
     async_stream::stream! {
@@ -558,3 +565,7 @@ pub fn handle_ui_message_stream_finish(
 #[cfg(test)]
 #[path = "to_ui_message_stream_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "handle_ui_message_stream_finish_tests.rs"]
+mod finish_tests;
