@@ -52,9 +52,7 @@ fn make_session() -> (MockSandbox, Arc<Mutex<Vec<RunRecord>>>) {
 
 /// An `onBootstrap` hook recording each call's work dir and the number of
 /// runs before it.
-fn recording_hook(
-    runs: Arc<Mutex<Vec<RunRecord>>>,
-) -> (OnBootstrapFn, HookCalls) {
+fn recording_hook(runs: Arc<Mutex<Vec<RunRecord>>>) -> (OnBootstrapFn, HookCalls) {
     let calls: HookCalls = Arc::default();
     let recorded = calls.clone();
     let hook: OnBootstrapFn = Arc::new(move |o| {
