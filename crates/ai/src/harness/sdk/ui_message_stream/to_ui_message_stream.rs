@@ -129,7 +129,24 @@ pub fn get_response_ui_message_id(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Captured warnings (`globalThis.AI_SDK_LOG_WARNINGS = spy` in TS).
+    pub(crate) static CAPTURED_WARNINGS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn log_warning(message: &str) {
+    #[cfg(test)]
+    if CAPTURED_WARNINGS.with(|captured| {
+        captured
+            .borrow_mut()
+            .as_mut()
+            .map(|warnings| warnings.push(message.to_string()))
+            .is_some()
+    }) {
+        return;
+    }
     static LOGGED_BEFORE: AtomicBool = AtomicBool::new(false);
     // [rust] The `AI_SDK_LOG_WARNINGS` global is an environment variable.
     if std::env::var("AI_SDK_LOG_WARNINGS").is_ok_and(|v| v == "false") {
@@ -537,3 +554,7 @@ pub fn handle_ui_message_stream_finish(
     }
     .boxed()
 }
+
+#[cfg(test)]
+#[path = "to_ui_message_stream_tests.rs"]
+mod tests;

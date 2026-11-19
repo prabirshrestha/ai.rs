@@ -284,3 +284,7 @@ pub fn to_ui_message_chunk(
         TextStreamPart::ToolInputEnd { .. } | TextStreamPart::Raw { .. } => return None,
     })
 }
+
+#[cfg(test)]
+#[path = "to_ui_message_chunk_tests.rs"]
+mod tests;
