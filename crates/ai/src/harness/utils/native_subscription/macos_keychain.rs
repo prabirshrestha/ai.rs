@@ -8,7 +8,7 @@ pub async fn read_macos_keychain_password(service: &str, account: &str) -> Optio
     read_with(&SystemExecFile, service, account).await
 }
 
-async fn read_with(exec: &dyn ExecFile, service: &str, account: &str) -> Option<String> {
+pub(crate) async fn read_with(exec: &dyn ExecFile, service: &str, account: &str) -> Option<String> {
     let args = ["find-generic-password", "-s", service, "-a", account, "-w"].map(String::from);
     let stdout = exec
         .exec_file("/usr/bin/security", &args, None)

@@ -37,6 +37,7 @@ harness = ["tokio/process", "tokio/net", "dep:tokio-tungstenite"]
 harness-acp = ["harness"]
 harness-cursor = ["harness-acp"]
 harness-github-copilot = ["harness-acp"]
+harness-claude-code = ["harness"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
