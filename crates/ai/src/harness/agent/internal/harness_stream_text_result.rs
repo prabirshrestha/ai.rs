@@ -509,8 +509,8 @@ impl HarnessStreamTextResult {
         let normalized_usage = as_language_model_usage(usage);
         let unified = finish_reason.unified;
         let raw = finish_reason.raw.clone();
-        let warnings = (!state.current_step_warnings.is_empty())
-            .then(|| state.current_step_warnings.clone());
+        let warnings =
+            (!state.current_step_warnings.is_empty()).then(|| state.current_step_warnings.clone());
         let step = self.new_step_result(
             state.step_number,
             &state.model_id.clone(),
@@ -638,8 +638,12 @@ impl HarnessStreamTextResult {
             .resolve(steps.iter().flat_map(|s| s.tool_results()).collect());
         p.static_tool_results
             .resolve(steps.iter().flat_map(|s| s.static_tool_results()).collect());
-        p.dynamic_tool_results
-            .resolve(steps.iter().flat_map(|s| s.dynamic_tool_results()).collect());
+        p.dynamic_tool_results.resolve(
+            steps
+                .iter()
+                .flat_map(|s| s.dynamic_tool_results())
+                .collect(),
+        );
         let (finish_reason, raw_finish_reason, usage, warnings, provider_metadata) = {
             let state = self.inner.state.lock();
             (
@@ -732,11 +736,13 @@ impl HarnessStreamTextResult {
                 id,
                 provider_metadata,
             } => {
-                state.current_step_content.push(ContentPart::Text(TextContent {
-                    text: String::new(),
-                    citations: None,
-                    provider_metadata: provider_metadata.clone(),
-                }));
+                state
+                    .current_step_content
+                    .push(ContentPart::Text(TextContent {
+                        text: String::new(),
+                        citations: None,
+                        provider_metadata: provider_metadata.clone(),
+                    }));
                 let index = state.current_step_content.len() - 1;
                 state.current_step_text_content.insert(id.clone(), index);
             }
@@ -748,11 +754,13 @@ impl HarnessStreamTextResult {
                 let index = match state.current_step_text_content.get(id) {
                     Some(index) => *index,
                     None => {
-                        state.current_step_content.push(ContentPart::Text(TextContent {
-                            text: String::new(),
-                            citations: None,
-                            provider_metadata: provider_metadata.clone(),
-                        }));
+                        state
+                            .current_step_content
+                            .push(ContentPart::Text(TextContent {
+                                text: String::new(),
+                                citations: None,
+                                provider_metadata: provider_metadata.clone(),
+                            }));
                         let index = state.current_step_content.len() - 1;
                         state.current_step_text_content.insert(id.clone(), index);
                         index
@@ -794,7 +802,9 @@ impl HarnessStreamTextResult {
                         provider_metadata: provider_metadata.clone(),
                     }));
                 let index = state.current_step_content.len() - 1;
-                state.current_step_reasoning_content.insert(id.clone(), index);
+                state
+                    .current_step_reasoning_content
+                    .insert(id.clone(), index);
             }
             TextStreamPart::ReasoningDelta {
                 id,
@@ -811,7 +821,9 @@ impl HarnessStreamTextResult {
                                 provider_metadata: provider_metadata.clone(),
                             }));
                         let index = state.current_step_content.len() - 1;
-                        state.current_step_reasoning_content.insert(id.clone(), index);
+                        state
+                            .current_step_reasoning_content
+                            .insert(id.clone(), index);
                         index
                     }
                 };
@@ -837,7 +849,9 @@ impl HarnessStreamTextResult {
                 }
             }
             TextStreamPart::ToolCall(c) => {
-                state.current_step_content.push(ContentPart::ToolCall(c.clone()));
+                state
+                    .current_step_content
+                    .push(ContentPart::ToolCall(c.clone()));
             }
             TextStreamPart::ToolApprovalRequest(r) => state
                 .current_step_content
@@ -846,10 +860,14 @@ impl HarnessStreamTextResult {
                 .current_step_content
                 .push(ContentPart::ToolApprovalResponse(r.clone())),
             TextStreamPart::ToolResult(r) => {
-                state.current_step_content.push(ContentPart::ToolResult(r.clone()));
+                state
+                    .current_step_content
+                    .push(ContentPart::ToolResult(r.clone()));
             }
             TextStreamPart::ToolError(e) => {
-                state.current_step_content.push(ContentPart::ToolError(e.clone()));
+                state
+                    .current_step_content
+                    .push(ContentPart::ToolError(e.clone()));
             }
             // Boundary, raw, error, and finish parts are not content parts.
             _ => {}

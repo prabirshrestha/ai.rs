@@ -33,20 +33,20 @@ use crate::harness::agent::internal::translate_stream_part::{
     TranslateOptions, TranslatedToolCallInfo, translate_stream_part,
 };
 use crate::harness::agent::internal::turn_telemetry::{
-    HarnessAgentLifecycleCallbacks, LanguageModelCallEndInput, TurnLifecycle,
-    TurnLifecycleOptions, create_turn_lifecycle,
+    HarnessAgentLifecycleCallbacks, LanguageModelCallEndInput, TurnLifecycle, TurnLifecycleOptions,
+    create_turn_lifecycle,
 };
 use crate::harness::agent::settings::HarnessAgentToolApprovalConfiguration;
 use crate::harness::errors::{AbortError, HarnessError, HarnessResult};
 use crate::harness::provider::{
-    JsonObject, JsonValue, LanguageModelV4FinishReason, LanguageModelV4Usage,
-    LanguageModelV4UnifiedFinishReason, SharedV4ProviderMetadata, safe_parse_json,
+    JsonObject, JsonValue, LanguageModelV4FinishReason, LanguageModelV4UnifiedFinishReason,
+    LanguageModelV4Usage, SharedV4ProviderMetadata, safe_parse_json,
 };
 use crate::harness::sandbox::SandboxSession;
 use crate::harness::sdk::content::{
     ContentPart, Context, ProviderMetadata, ReasoningOutput, StepResult, TextContent,
-    ToolApprovalRequestOutput, ToolApprovalResponseOutput, ToolOutput, ToolsContext,
-    TypedToolCall, TypedToolError, TypedToolResult,
+    ToolApprovalRequestOutput, ToolApprovalResponseOutput, ToolOutput, ToolsContext, TypedToolCall,
+    TypedToolError, TypedToolResult,
 };
 use crate::harness::sdk::error_value::{ErrorValue, generate_id};
 use crate::harness::sdk::messages::{
@@ -106,9 +106,10 @@ fn unwrap_tool_result_output(tool_result: &ToolResultPart) -> HarnessV1Completed
             }
             (JsonValue::Object(o), None)
         }
-        content @ ToolResultOutput::Content { .. } => {
-            (serde_json::to_value(content).unwrap_or(JsonValue::Null), None)
-        }
+        content @ ToolResultOutput::Content { .. } => (
+            serde_json::to_value(content).unwrap_or(JsonValue::Null),
+            None,
+        ),
     };
     HarnessV1CompletedToolResult {
         output,
@@ -303,7 +304,9 @@ fn get_stream_error(outcome: &HostToolOutcome) -> Option<ErrorValue> {
 fn to_tool_output(tool_call: &TypedToolCall, outcome: &HostToolOutcome) -> ToolOutput {
     match outcome {
         HostToolOutcome::Ok(output) => ToolOutput::ToolResult(tool_call.to_result(output.clone())),
-        HostToolOutcome::Err { error, .. } => ToolOutput::ToolError(tool_call.to_error(error.clone())),
+        HostToolOutcome::Err { error, .. } => {
+            ToolOutput::ToolError(tool_call.to_error(error.clone()))
+        }
     }
 }
 
@@ -481,7 +484,10 @@ pub fn run_prompt(input: RunPromptInput) -> RunPromptOutput {
         model_id: input.model.clone().unwrap_or_default(),
         output: input.output.clone(),
     });
-    let active_tools = input.active_tools.clone().unwrap_or_else(|| input.tools.clone());
+    let active_tools = input
+        .active_tools
+        .clone()
+        .unwrap_or_else(|| input.tools.clone());
     let builtin_tools = input.harness.builtin_tools();
     let active_tool_names: Vec<String> = input
         .tools
@@ -584,8 +590,12 @@ fn settle_failure(ctx: &Ctx, err: ErrorValue) {
         f();
     }
     if is_aborted(ctx) {
-        ctx.result
-            .abort(err, Some(crate::harness::sdk::error_value::get_error_message(&AbortError)));
+        ctx.result.abort(
+            err,
+            Some(crate::harness::sdk::error_value::get_error_message(
+                &AbortError,
+            )),
+        );
         return;
     }
     ctx.result.fail(err);
@@ -762,8 +772,13 @@ impl Ctx {
     }
 
     async fn publish_tool_executions(&self) {
-        let executions: Vec<Arc<ToolExecution>> =
-            self.state.lock().tool_executions.values().cloned().collect();
+        let executions: Vec<Arc<ToolExecution>> = self
+            .state
+            .lock()
+            .tool_executions
+            .values()
+            .cloned()
+            .collect();
         for execution in &executions {
             self.publish_tool_execution_end(execution).await;
         }
@@ -959,14 +974,15 @@ impl Ctx {
         reason: Option<String>,
         provider_executed: Option<bool>,
     ) {
-        self.result
-            .enqueue(TextStreamPart::ToolApprovalResponse(ToolApprovalResponseOutput {
+        self.result.enqueue(TextStreamPart::ToolApprovalResponse(
+            ToolApprovalResponseOutput {
                 approval_id: approval_id.to_string(),
                 tool_call: tool_call.clone(),
                 approved,
                 reason,
                 provider_executed,
-            }));
+            },
+        ));
     }
 
     fn enqueue_approval_response(
@@ -1152,11 +1168,13 @@ impl Ctx {
             } else {
                 HostToolOutcome::Ok(submission.output.clone())
             };
-            state.buffered_tool_outcomes.push(BufferedToolOutcome::Host {
-                tool_call: parsed,
-                outcome,
-                is_continuation: None,
-            });
+            state
+                .buffered_tool_outcomes
+                .push(BufferedToolOutcome::Host {
+                    tool_call: parsed,
+                    outcome,
+                    is_continuation: None,
+                });
         }
         Ok(())
     }
@@ -1543,9 +1561,13 @@ async fn run_loop(
 ) -> HarnessResult<()> {
     let input = &ctx.input;
     let builtin_tools = input.harness.builtin_tools();
-    let mut strip_tool_input_work_dir = create_tool_input_work_dir_stripper(&input.session_work_dir);
-    let mut final_finish: Option<(LanguageModelV4FinishReason, LanguageModelV4Usage, Option<HarnessV1Metadata>)> =
-        None;
+    let mut strip_tool_input_work_dir =
+        create_tool_input_work_dir_stripper(&input.session_work_dir);
+    let mut final_finish: Option<(
+        LanguageModelV4FinishReason,
+        LanguageModelV4Usage,
+        Option<HarnessV1Metadata>,
+    )> = None;
     let mut host_input_pause_requested = false;
     let mut deferred_pause_finish_step: Option<FinishStepPart> = None;
     let release_pending_stop_boundary =
@@ -1643,9 +1665,11 @@ async fn run_loop(
                         f().await;
                     }
                     release_pending_stop_boundary(pending_stop_boundary);
-                    let usage = steps.iter().fold(create_null_language_model_usage(), |total, step| {
-                        add_language_model_usage(&total, &step.usage)
-                    });
+                    let usage = steps
+                        .iter()
+                        .fold(create_null_language_model_usage(), |total, step| {
+                            add_language_model_usage(&total, &step.usage)
+                        });
                     ctx.lifecycle.end(&steps, usage).await;
                     ctx.result.finish(None).await;
                     return Ok(());
@@ -1661,7 +1685,8 @@ async fn run_loop(
             if let Some(model_id) = &model_id {
                 ctx.result.set_model_id(model_id.clone());
             }
-            ctx.result.add_warnings(warnings.as_deref().unwrap_or_default());
+            ctx.result
+                .add_warnings(warnings.as_deref().unwrap_or_default());
             ctx.lifecycle.start(model_id).await;
         }
 
@@ -1797,7 +1822,10 @@ async fn run_loop(
                 let state = ctx.state.lock();
                 (
                     state.tool_calls_by_tool_call_id.get(tool_call_id).cloned(),
-                    state.raw_tool_calls_by_tool_call_id.get(tool_call_id).cloned(),
+                    state
+                        .raw_tool_calls_by_tool_call_id
+                        .get(tool_call_id)
+                        .cloned(),
                 )
             };
             let Some(tool_call) = tool_call else {
@@ -1842,8 +1870,12 @@ async fn run_loop(
 
         // Settle failures before the translate-and-forward step, so the
         // translated `error` part never reaches the consumer stream.
-        if let (HarnessV1StreamPart::Error { error }, HarnessV1StreamPart::Error { error: display_error }) =
-            (&value, &display_value)
+        if let (
+            HarnessV1StreamPart::Error { error },
+            HarnessV1StreamPart::Error {
+                error: display_error,
+            },
+        ) = (&value, &display_value)
         {
             ctx.wait_for_outstanding_host_tool_executions().await?;
             settle_lifecycle(ctx, error.clone()).await;
@@ -1911,7 +1943,8 @@ async fn run_loop(
                     .tool_calls_by_tool_call_id
                     .insert(tool_call_id.clone(), display_tool_call.clone());
             }
-            ctx.result.enqueue(TextStreamPart::ToolCall(display_tool_call));
+            ctx.result
+                .enqueue(TextStreamPart::ToolCall(display_tool_call));
         }
 
         match &value {
@@ -2014,8 +2047,14 @@ async fn run_loop(
                 let state = ctx.state.lock();
                 (
                     state.tool_calls_by_tool_call_id.get(tool_call_id).cloned(),
-                    state.raw_tool_calls_by_tool_call_id.get(tool_call_id).cloned(),
-                    state.pending_approvals_by_approval_id.get(approval_id).cloned(),
+                    state
+                        .raw_tool_calls_by_tool_call_id
+                        .get(tool_call_id)
+                        .cloned(),
+                    state
+                        .pending_approvals_by_approval_id
+                        .get(approval_id)
+                        .cloned(),
                 )
             };
             let Some(tool_call) = tool_call else {
@@ -2043,12 +2082,14 @@ async fn run_loop(
             });
             {
                 let mut state = ctx.state.lock();
-                state
-                    .pending_approvals_by_approval_id
-                    .insert(pending_approval.approval_id.clone(), pending_approval.clone());
-                state
-                    .pending_approvals_by_tool_call_id
-                    .insert(pending_approval.tool_call_id.clone(), pending_approval.clone());
+                state.pending_approvals_by_approval_id.insert(
+                    pending_approval.approval_id.clone(),
+                    pending_approval.clone(),
+                );
+                state.pending_approvals_by_tool_call_id.insert(
+                    pending_approval.tool_call_id.clone(),
+                    pending_approval.clone(),
+                );
             }
             if let Some(continuation) = ctx
                 .continuations_by_approval_id
@@ -2082,7 +2123,11 @@ async fn run_loop(
             ctx.wait_for_outstanding_host_tool_executions().await?;
             ctx.complete_step(finish_reason, usage, as_provider_metadata(harness_metadata))
                 .await;
-            if input.stop_conditions.as_ref().is_some_and(|c| !c.is_empty()) {
+            if input
+                .stop_conditions
+                .as_ref()
+                .is_some_and(|c| !c.is_empty())
+            {
                 *pending_stop_boundary = Some(checkpoint.as_ref().map(|c| c.pin()));
             }
         }
@@ -2258,12 +2303,14 @@ async fn run_loop(
             if let Some(pending_approval) = pending_approval {
                 {
                     let mut state = ctx.state.lock();
-                    state
-                        .pending_approvals_by_approval_id
-                        .insert(pending_approval.approval_id.clone(), pending_approval.clone());
-                    state
-                        .pending_approvals_by_tool_call_id
-                        .insert(pending_approval.tool_call_id.clone(), pending_approval.clone());
+                    state.pending_approvals_by_approval_id.insert(
+                        pending_approval.approval_id.clone(),
+                        pending_approval.clone(),
+                    );
+                    state.pending_approvals_by_tool_call_id.insert(
+                        pending_approval.tool_call_id.clone(),
+                        pending_approval.clone(),
+                    );
                 }
                 if let Some(continuation) = ctx
                     .continuations_by_approval_id

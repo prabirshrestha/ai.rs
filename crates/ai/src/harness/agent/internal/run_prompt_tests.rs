@@ -13,10 +13,10 @@ use crate::harness::errors::BoxError;
 use crate::harness::sdk::stop_condition::{has_tool_call, is_step_count, stop_condition};
 use crate::harness::sdk::telemetry::{SharedTelemetry, Telemetry, TelemetryEvent};
 use crate::harness::sdk::tool::{Schema, Tool, json_schema};
+use crate::harness::spec::harness::HarnessV1Emit;
 use crate::harness::spec::lifecycle_state::{
     ContinueTurnType, HarnessV1ContinueTurnState, HarnessV1ResumeSessionState, ResumeSessionType,
 };
-use crate::harness::spec::harness::HarnessV1Emit;
 use crate::harness::spec::literal::HarnessV1SpecificationVersion;
 use crate::harness::spec::tools::HarnessV1BuiltinTool;
 use crate::harness::test_support::MockSandbox;
@@ -108,6 +108,7 @@ pub(super) fn tools(entries: Vec<(&str, Tool)>) -> ToolSet {
 pub(super) struct FakeHarness {
     pub id: String,
     pub builtin_tools: IndexMap<String, HarnessV1BuiltinTool>,
+    pub supports_builtin_tool_approvals: bool,
 }
 
 impl FakeHarness {
@@ -115,6 +116,7 @@ impl FakeHarness {
         Arc::new(Self {
             id: id.into(),
             builtin_tools: IndexMap::new(),
+            supports_builtin_tool_approvals: false,
         })
     }
 
@@ -125,7 +127,15 @@ impl FakeHarness {
                 .iter()
                 .map(|(n, t)| (n.clone(), HarnessV1BuiltinTool::from(t.clone())))
                 .collect(),
+            supports_builtin_tool_approvals: false,
         })
+    }
+
+    /// A harness with built-in tools that supports built-in approvals.
+    pub fn with_builtin_approvals(id: &str, builtins: &ToolSet) -> Arc<Self> {
+        let mut harness = Arc::into_inner(Self::with_builtins(id, builtins)).unwrap();
+        harness.supports_builtin_tool_approvals = true;
+        Arc::new(harness)
     }
 }
 
@@ -136,6 +146,9 @@ impl HarnessV1 for FakeHarness {
     }
     fn builtin_tools(&self) -> &IndexMap<String, HarnessV1BuiltinTool> {
         &self.builtin_tools
+    }
+    fn supports_builtin_tool_approvals(&self) -> bool {
+        self.supports_builtin_tool_approvals
     }
     async fn do_start(
         &self,
@@ -184,7 +197,7 @@ impl HarnessV1PromptControl for FakeControl {
     }
     fn done(&self) -> BoxFuture<'static, HarnessResult<()>> {
         let done = self.done.clone();
-        Box::pin(async move { done.await.map_err(|e| plain_error(e)) })
+        Box::pin(async move { done.await.map_err(plain_error) })
     }
 }
 
@@ -563,7 +576,9 @@ async fn preserves_native_name_in_builtin_tool_approval_metadata() {
         call_without_type.as_object_mut().unwrap().remove("type");
         assert_eq!(
             of_type(&parts, "tool-approval-request"),
-            vec![&json!({ "type": "tool-approval-request", "approvalId": "a1", "toolCall": call_without_type })]
+            vec![
+                &json!({ "type": "tool-approval-request", "approvalId": "a1", "toolCall": call_without_type })
+            ]
         );
         let steps = output.result.steps().await.unwrap();
         assert_eq!(to_json(&steps[0].tool_calls()), json!([call_without_type]));
@@ -571,10 +586,7 @@ async fn preserves_native_name_in_builtin_tool_approval_metadata() {
 }
 
 fn questions_tools() -> ToolSet {
-    tools(vec![(
-        "askUserQuestions",
-        tool(&[("questions", "array")]),
-    )])
+    tools(vec![("askUserQuestions", tool(&[("questions", "array")]))])
 }
 
 mod filtered_builtin_dynamic_calls {
@@ -624,7 +636,10 @@ mod filtered_builtin_dynamic_calls {
                 &parts,
                 json!({ "type": "tool-result", "toolCallId": "replacement-call", "output": "MCP result", "dynamic": true })
             ));
-            assert_eq!(output.result.steps().await.unwrap()[0].tool_results().len(), 1);
+            assert_eq!(
+                output.result.steps().await.unwrap()[0].tool_results().len(),
+                1
+            );
             assert!(pending.lock().is_empty());
         }
     }
@@ -743,7 +758,10 @@ async fn strips_the_work_dir_for_consumers_but_executes_host_tools_with_the_abso
         *executed.lock(),
         vec![json!({ "path": format!("{WORK_DIR}/src/foo.ts") })]
     );
-    assert_eq!(of_type(&parts, "tool-call")[0]["input"], json!({ "path": "src/foo.ts" }));
+    assert_eq!(
+        of_type(&parts, "tool-call")[0]["input"],
+        json!({ "path": "src/foo.ts" })
+    );
     assert_eq!(
         of_type(&parts, "tool-result")[0]["output"],
         json!("src/foo.ts\nsrc/bar.ts\n")
@@ -954,7 +972,12 @@ mod telemetry_lifecycle {
         assert!(!settled.load(Ordering::SeqCst));
         integration.language_model_end.open();
         wait_for(|| {
-            snapshot() == ["language-model-end:start", "language-model-end:done", "step-end:start"]
+            snapshot()
+                == [
+                    "language-model-end:start",
+                    "language-model-end:done",
+                    "step-end:start",
+                ]
         })
         .await;
         assert!(!settled.load(Ordering::SeqCst));
@@ -1004,9 +1027,11 @@ impl Telemetry for EndRecorder {
 #[tokio::test]
 async fn reports_the_usage_of_every_step_as_the_turn_total_when_a_stop_condition_ends_the_turn() {
     let finish_step = |input: u64, output: u64| {
-        p(json!({ "type": "finish-step", "finishReason": { "unified": "stop", "raw": "end_turn" },
+        p(
+            json!({ "type": "finish-step", "finishReason": { "unified": "stop", "raw": "end_turn" },
             "usage": { "inputTokens": { "total": input, "noCache": input, "cacheRead": 0, "cacheWrite": 0 },
-                       "outputTokens": { "total": output, "text": output, "reasoning": 0 } } }))
+                       "outputTokens": { "total": output, "text": output, "reasoning": 0 } } }),
+        )
     };
     let recorder = Arc::new(EndRecorder::default());
     let mut run = base_input(
@@ -1070,9 +1095,21 @@ async fn forwards_a_raw_part_that_arrives_right_after_the_step_a_stop_condition_
     );
     run.stop_conditions = Some(vec![stop_condition(|steps| steps.len() == 1)]);
     let (parts, _) = run_collect(run).await;
-    let raws: Vec<&JsonValue> = of_type(&parts, "raw").iter().map(|p| &p["rawValue"]).collect();
+    let raws: Vec<&JsonValue> = of_type(&parts, "raw")
+        .iter()
+        .map(|p| &p["rawValue"])
+        .collect();
     assert_eq!(raws, vec![&json!({ "marker": "usage-after-step" })]);
 }
 
 #[path = "run_prompt_tests_steps.rs"]
 mod steps;
+
+#[path = "run_prompt_tests_tools.rs"]
+mod tool_outputs;
+
+#[path = "run_prompt_tests_generators.rs"]
+mod generators;
+
+#[path = "run_prompt_tests_pauses.rs"]
+mod pauses;

@@ -195,13 +195,13 @@ pub fn get_harness_error_message(error: &(dyn StdError + 'static)) -> String {
     }
 }
 
-/// `new DOMException('Aborted', 'AbortError')`: what an aborted operation
-/// rejects with.
+/// `abortSignal.reason`: what an aborted operation rejects with.
 ///
 /// [rust] A `CancellationToken` carries no `reason`, so every abort uses
-/// this error.
+/// this error. Its message is the one of the `DOMException` that
+/// `AbortController.abort()` sets as the default reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, thiserror::Error)]
-#[error("Aborted")]
+#[error("This operation was aborted")]
 pub struct AbortError;
 
 impl AbortError {

@@ -26,15 +26,29 @@ async fn preserves_adapter_warnings_on_the_step_and_aggregate_result() {
 
 #[tokio::test]
 async fn records_one_step_per_finish_step_without_counting_terminal_finish() {
-    let mut script = parts(vec![json!({ "type": "text-delta", "id": "t1", "delta": "first" })]);
+    let mut script = parts(vec![
+        json!({ "type": "text-delta", "id": "t1", "delta": "first" }),
+    ]);
     script.push(resumable_finish_step());
-    script.push(p(json!({ "type": "text-delta", "id": "t2", "delta": "second" })));
-    let run = base_input(fake_harness(), FakeSession::new(with_finish(script)), ToolSet::new());
+    script.push(p(
+        json!({ "type": "text-delta", "id": "t2", "delta": "second" }),
+    ));
+    let run = base_input(
+        fake_harness(),
+        FakeSession::new(with_finish(script)),
+        ToolSet::new(),
+    );
     let (_, output) = run_collect(run).await;
     let steps = output.result.steps().await.unwrap();
     assert_eq!(steps.len(), 2);
-    assert_eq!(steps.iter().map(|s| s.step_number).collect::<Vec<_>>(), [0, 1]);
-    assert_eq!(steps.iter().map(|s| s.text()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(
+        steps.iter().map(|s| s.step_number).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(
+        steps.iter().map(|s| s.text()).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
     assert!(is_step_count(2)(&steps).await);
 }
 
@@ -55,7 +69,11 @@ async fn keeps_tool_calls_and_results_in_one_predicate_compatible_step() {
     let steps = output.result.steps().await.unwrap();
     assert_eq!(steps.len(), 1);
     assert_eq!(
-        steps[0].content.iter().map(|p| p.type_name()).collect::<Vec<_>>(),
+        steps[0]
+            .content
+            .iter()
+            .map(|p| p.type_name())
+            .collect::<Vec<_>>(),
         ["tool-call", "tool-result"]
     );
     assert_eq!(steps[0].tool_calls().len(), 1);
@@ -134,10 +152,17 @@ async fn surfaces_a_failed_provider_executed_tool_result_as_a_tool_error_carryin
         &parts,
         json!({ "type": "tool-error", "toolCallId": "c1", "toolName": "weather", "error": "weather service unreachable", "providerExecuted": true })
     ));
-    assert!(!contains_matching(&parts, json!({ "type": "tool-result", "toolCallId": "c1" })));
+    assert!(!contains_matching(
+        &parts,
+        json!({ "type": "tool-result", "toolCallId": "c1" })
+    ));
     let steps = output.result.steps().await.unwrap();
     assert_eq!(
-        steps[0].content.iter().map(|p| p.type_name()).collect::<Vec<_>>(),
+        steps[0]
+            .content
+            .iter()
+            .map(|p| p.type_name())
+            .collect::<Vec<_>>(),
         ["tool-call", "tool-error"]
     );
 }
@@ -147,7 +172,9 @@ async fn surfaces_a_failed_provider_executed_tool_result_as_a_tool_error_carryin
 async fn stream_failed_host_tool(provider_executed: Option<bool>) -> Vec<JsonValue> {
     let weather = tool(&[("city", "string")])
         .with_description("Get weather")
-        .with_execute(|_, _| async { Err::<JsonValue, BoxError>(plain_error("weather unavailable")) });
+        .with_execute(|_, _| async {
+            Err::<JsonValue, BoxError>(plain_error("weather unavailable"))
+        });
     let mut call = json!({ "type": "tool-call", "toolCallId": "c1", "toolName": "weather", "input": "{\"city\":\"SF\"}" });
     if let Some(pe) = provider_executed {
         call["providerExecuted"] = json!(pe);
@@ -165,7 +192,10 @@ async fn stream_failed_host_tool(provider_executed: Option<bool>) -> Vec<JsonVal
 
 fn expect_host_tool_failure(parts: &[JsonValue]) {
     // Marking this provider-executed would bypass the consumer's `onError`.
-    assert!(!contains_matching(parts, json!({ "type": "tool-error", "toolCallId": "c1" })));
+    assert!(!contains_matching(
+        parts,
+        json!({ "type": "tool-error", "toolCallId": "c1" })
+    ));
     assert!(contains_matching(
         parts,
         json!({ "type": "tool-result", "toolCallId": "c1", "output": { "error": "Error: weather unavailable" } })
@@ -239,12 +269,19 @@ fn counter() -> (Arc<AtomicUsize>, Arc<dyn Fn() + Send + Sync>) {
 #[tokio::test]
 async fn closes_a_deliberately_suspended_mid_step_stream_without_failing_the_turn() {
     let (failed, on_turn_failed) = counter();
-    let mut run = base_input(fake_harness(), FakeSession::new(partial_text_script()), ToolSet::new());
+    let mut run = base_input(
+        fake_harness(),
+        FakeSession::new(partial_text_script()),
+        ToolSet::new(),
+    );
     run.is_turn_suspending = Some(Arc::new(|| true));
     run.on_turn_failed = Some(on_turn_failed);
     let (parts, output) = run_collect(run).await;
     assert!(of_type(&parts, "error").is_empty());
-    assert!(contains_matching(&parts, json!({ "type": "text-delta", "text": "partial" })));
+    assert!(contains_matching(
+        &parts,
+        json!({ "type": "text-delta", "text": "partial" })
+    ));
     assert_eq!(failed.load(Ordering::SeqCst), 0);
     assert!(output.result.steps().await.unwrap().is_empty());
 }
@@ -252,7 +289,11 @@ async fn closes_a_deliberately_suspended_mid_step_stream_without_failing_the_tur
 #[tokio::test]
 async fn fails_a_mid_step_stream_that_closes_without_an_intentional_suspension() {
     let (failed, on_turn_failed) = counter();
-    let mut run = base_input(fake_harness(), FakeSession::new(partial_text_script()), ToolSet::new());
+    let mut run = base_input(
+        fake_harness(),
+        FakeSession::new(partial_text_script()),
+        ToolSet::new(),
+    );
     run.on_turn_failed = Some(on_turn_failed);
     let (parts, output) = run_collect(run).await;
     let errors = of_type(&parts, "error");
@@ -298,7 +339,11 @@ async fn fails_when_terminal_finish_receives_unclosed_step_content() {
 
 #[tokio::test]
 async fn allows_an_empty_terminal_turn_without_recording_a_step() {
-    let run = base_input(fake_harness(), FakeSession::new(vec![finish()]), ToolSet::new());
+    let run = base_input(
+        fake_harness(),
+        FakeSession::new(vec![finish()]),
+        ToolSet::new(),
+    );
     let (_, output) = run_collect(run).await;
     assert!(output.result.steps().await.unwrap().is_empty());
     assert_eq!(output.result.text().await.unwrap(), "");
@@ -342,7 +387,14 @@ async fn evaluates_stop_conditions_only_after_real_finish_step_events() {
     assert_eq!(*step_counts.lock(), [1, 2]);
     assert_eq!(stops.load(Ordering::SeqCst), 1);
     assert_eq!(
-        output.result.steps().await.unwrap().iter().map(|s| s.text()).collect::<Vec<_>>(),
+        output
+            .result
+            .steps()
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.text())
+            .collect::<Vec<_>>(),
         ["first", "second"]
     );
 }
@@ -385,7 +437,9 @@ async fn stops_before_a_next_step_tool_call_when_the_completed_step_has_no_tool_
         FakeSession::new(vec![
             p(json!({ "type": "text-delta", "id": "t1", "delta": "first" })),
             finish_step(),
-            p(json!({ "type": "tool-call", "toolCallId": "c1", "toolName": "weather", "input": "{\"city\":\"Lima\"}", "providerExecuted": true })),
+            p(
+                json!({ "type": "tool-call", "toolCallId": "c1", "toolName": "weather", "input": "{\"city\":\"Lima\"}", "providerExecuted": true }),
+            ),
         ]),
         tools(vec![("weather", weather)]),
     );
@@ -395,7 +449,14 @@ async fn stops_before_a_next_step_tool_call_when_the_completed_step_has_no_tool_
     assert_eq!(stops.load(Ordering::SeqCst), 1);
     assert!(of_type(&parts, "tool-call").is_empty());
     assert_eq!(
-        output.result.steps().await.unwrap().iter().map(|s| s.text()).collect::<Vec<_>>(),
+        output
+            .result
+            .steps()
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.text())
+            .collect::<Vec<_>>(),
         ["first"]
     );
 }
@@ -429,7 +490,14 @@ async fn processes_a_lookahead_event_exactly_once_when_stop_conditions_do_not_ma
         1
     );
     assert_eq!(
-        output.result.steps().await.unwrap().iter().map(|s| s.text()).collect::<Vec<_>>(),
+        output
+            .result
+            .steps()
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.text())
+            .collect::<Vec<_>>(),
         ["first", "second"]
     );
 }
