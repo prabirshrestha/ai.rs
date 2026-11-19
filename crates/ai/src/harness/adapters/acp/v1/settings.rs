@@ -326,6 +326,8 @@ pub struct ACPSessionSettings {
 /// [rust] The deprecated `mintBridgeToken` is not ported.
 #[derive(Clone)]
 pub struct ACPV1Settings {
+    /// The ACP protocol version; only `"v1"` is supported.
+    pub version: Option<String>,
     pub harness_id: String,
     pub mcp_servers: Option<IndexMap<String, JsonValue>>,
     /// Classifies an ACP tool call that did not resolve to a host tool as a
@@ -409,6 +411,7 @@ impl ACPV1Settings {
         resolve_host_tool_call: ACPResolveHostToolCall,
     ) -> Self {
         Self {
+            version: None,
             harness_id: harness_id.into(),
             mcp_servers: None,
             is_mcp_tool_call,

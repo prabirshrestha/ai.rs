@@ -3,6 +3,7 @@
 pub mod bootstrap;
 pub mod bridge;
 pub mod bridge_protocol;
+pub mod harness;
 pub mod lifecycle;
 pub mod prompt;
 pub mod settings;

@@ -13,6 +13,7 @@ pub mod bridge_web_socket;
 pub mod classify_disk_log;
 pub mod credential_forwarding;
 pub mod extract_harness_prompt_content;
+pub mod harness_bridge_capability_unsupported_error;
 pub mod is_sandbox_write_protected_path;
 pub mod native_subscription;
 pub mod oauth_access_token;
@@ -48,6 +49,7 @@ pub use credential_forwarding::*;
 pub use extract_harness_prompt_content::{
     HarnessPromptContent, HarnessPromptContentPart, extract_harness_prompt_content,
 };
+pub use harness_bridge_capability_unsupported_error::*;
 pub use is_sandbox_write_protected_path::*;
 pub use native_subscription::{
     get_jwt_expires_at, parse_jwt_payload, read_linux_secret_service_password,

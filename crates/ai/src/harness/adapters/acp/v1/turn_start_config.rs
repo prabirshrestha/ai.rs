@@ -1,7 +1,7 @@
 //! Port of `harness-acp/src/v1/acp-v1-turn-start-config.ts`.
 
 use indexmap::IndexMap;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use crate::harness::adapters::acp::acp_auth::ACPAuthenticationProfileIdentity;
 use crate::harness::agent::internal::sha256_hex;
@@ -137,6 +137,7 @@ fn sort_value(value: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::harness::adapters::acp::acp_auth::ACPProviderKind;
+    use serde_json::json;
 
     fn profile() -> ACPAuthenticationProfileIdentity {
         serde_json::from_value(json!({ "digest": "d", "providerKind": "direct" })).unwrap()
