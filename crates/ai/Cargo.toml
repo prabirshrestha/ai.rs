@@ -31,7 +31,7 @@ tokio-util.workspace = true
 [features]
 default = ["harness"]
 # Port of the Vercel AI SDK harness (`@ai-sdk/harness`).
-harness = []
+harness = ["tokio/process"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,8 +1,14 @@
 //! Port of `@ai-sdk/harness/utils`: helpers harness adapters share.
 
+pub mod ai_gateway_auth;
+pub mod authentication_environment;
+pub mod credential_forwarding;
 pub mod extract_harness_prompt_content;
 pub mod is_sandbox_write_protected_path;
+pub mod native_subscription;
+pub mod oauth_access_token;
 pub mod os;
+pub mod sandbox_credential_brokering;
 pub mod sandbox_home_dir;
 pub mod shell_quote;
 pub mod sleep;
@@ -11,11 +17,21 @@ pub mod write_instructions;
 pub mod write_skills;
 
 pub use crate::harness::spec::paths::encode_harness_path_segment;
+pub use ai_gateway_auth::*;
+pub use authentication_environment::*;
+pub use credential_forwarding::*;
 pub use extract_harness_prompt_content::{
     HarnessPromptContent, HarnessPromptContentPart, extract_harness_prompt_content,
 };
 pub use is_sandbox_write_protected_path::*;
+pub use native_subscription::{
+    get_jwt_expires_at, parse_jwt_payload, read_linux_secret_service_password,
+    read_macos_keychain_password, read_windows_credential_manager_password,
+    should_resolve_native_subscription,
+};
+pub use oauth_access_token::*;
 pub use os::*;
+pub use sandbox_credential_brokering::*;
 pub use sandbox_home_dir::*;
 pub use shell_quote::*;
 pub use sleep::*;
