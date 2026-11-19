@@ -11,6 +11,8 @@ pub mod codex;
 pub mod cursor;
 #[cfg(feature = "harness-github-copilot")]
 pub mod github_copilot;
+#[cfg(any(feature = "harness-acp", feature = "harness-opencode"))]
+pub(crate) mod host_relay;
 pub mod host_tools;
 #[cfg(feature = "harness-github-copilot")]
 pub(crate) mod jsonc;
@@ -19,6 +21,8 @@ pub mod loop_session;
 pub mod mcp_host;
 #[cfg(feature = "harness-native")]
 pub mod native;
+#[cfg(feature = "harness-opencode")]
+pub mod opencode;
 #[cfg(any(feature = "harness-native", feature = "harness-pi"))]
 pub mod pi;
 pub(crate) mod sandbox_paths;

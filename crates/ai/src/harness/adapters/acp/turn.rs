@@ -21,12 +21,14 @@ use crate::{
 
 use super::client::{AcpConnection, METHOD_NOT_FOUND};
 use super::permissions::{AutoApproval, cancelled, permission_options, selected};
-use super::relay::{HostRelay, RelayEvent, TurnBinding};
 use super::settings::{
     AcpConfigValue, AcpHarnessSettings, AcpHostToolMcpTransport, AcpInstructionMapping,
     AcpModelMapping, AcpOutputSchemaMapping, AcpPermissionModeMapping, AcpPermissionModeTarget,
 };
 use super::translator::{AcpBuiltinToolMapping, Finish, Translator};
+use crate::harness::adapters::host_relay::{
+    HostRelay, RelayAnswer, RelayConfig, RelayEvent, TurnBinding,
+};
 
 /// `acp.PROTOCOL_VERSION`.
 pub const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -684,12 +686,17 @@ async fn start_session(
         conn.request("authenticate", params).await?;
     }
     let mut mcp_servers = external_mcp_servers(settings, &initialization)?;
+    let relay_config = RelayConfig {
+        server_name: super::settings::HOST_TOOL_MCP_SERVER_NAME.to_string(),
+        agent_label: "this ACP agent".to_string(),
+        images: settings.image_content,
+    };
     let relay = match settings.host_tool_mcp_transport {
         AcpHostToolMcpTransport::Stdio => {
             HostRelay::start_stdio(
                 session.sandbox.as_ref(),
                 &format!("{}/host-tools", session.private_dir),
-                settings.image_content,
+                relay_config,
             )
             .await?
         }
@@ -702,7 +709,12 @@ async fn start_session(
                     "This harness exposes host tools through an HTTP MCP server, but the ACP agent does not advertise support for HTTP MCP servers.",
                 ));
             }
-            HostRelay::start_http(&settings.http_relay, settings.image_content).await?
+            HostRelay::start_http(
+                settings.http_relay.bind,
+                settings.http_relay.url_host.clone(),
+                relay_config,
+            )
+            .await?
         }
     };
     relay.set_tools(tools);
@@ -1038,7 +1050,7 @@ fn handle_relay(translator: &mut Translator, event: RelayEvent, model: &str) {
             let assistant = translator
                 .current_assistant()
                 .unwrap_or_else(|| empty_assistant(super::ACP_API, "", model));
-            let _ = reply.send((id, assistant));
+            let _ = reply.send(RelayAnswer::Run { id, assistant });
         }
         RelayEvent::Update { id, partial } => translator.turn.tool_update(&id, partial),
         RelayEvent::End {

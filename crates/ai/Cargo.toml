@@ -40,7 +40,7 @@ harness-codex = ["harness"]
 harness-acp = ["harness", "tokio/net"]
 harness-cursor = ["harness-acp"]
 harness-github-copilot = ["harness-acp"]
-harness-opencode = ["harness"]
+harness-opencode = ["harness", "tokio/net"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

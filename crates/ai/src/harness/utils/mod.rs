@@ -43,6 +43,7 @@ pub(crate) fn plain_error(message: impl Into<String>) -> BoxError {
 }
 
 /// `new Date().toISOString()`.
+#[allow(dead_code)] // [rust] Used only by some adapter features.
 pub(crate) fn iso_timestamp_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -51,6 +52,7 @@ pub(crate) fn iso_timestamp_now() -> String {
 }
 
 /// `new Date(millis).toISOString()`.
+#[allow(dead_code)] // [rust] Used only by some adapter features.
 pub(crate) fn iso_timestamp(millis: i64) -> String {
     let secs = millis.div_euclid(1000);
     let ms = millis.rem_euclid(1000);

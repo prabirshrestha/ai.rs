@@ -106,6 +106,7 @@ pub(crate) fn resolve_posix(base: &str, path: &str) -> String {
 }
 
 /// `posix.dirname`.
+#[allow(dead_code)] // [rust] Used only by some adapter features.
 pub(crate) fn dirname_posix(path: &str) -> String {
     let trimmed = if path.len() > 1 {
         path.trim_end_matches('/')

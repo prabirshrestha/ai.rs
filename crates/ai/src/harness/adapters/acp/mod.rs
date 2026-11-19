@@ -16,7 +16,6 @@
 pub mod auth;
 mod client;
 pub mod permissions;
-mod relay;
 pub mod settings;
 pub mod translator;
 mod turn;

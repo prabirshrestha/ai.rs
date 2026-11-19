@@ -252,8 +252,19 @@ impl HarnessTurnSender {
     }
 }
 
+impl HarnessTurnSender {
+    /// [rust] A sender and its receiver, for work outside a turn whose
+    /// events an adapter collects itself (OpenCode compaction).
+    #[allow(dead_code)]
+    pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<HarnessEvent>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self { sender }, receiver)
+    }
+}
+
 /// [rust] A sender whose events go nowhere, for adapter unit tests.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn test_turn_sender() -> (HarnessTurnSender, mpsc::UnboundedReceiver<HarnessEvent>) {
     let (sender, receiver) = mpsc::unbounded_channel();
     (HarnessTurnSender { sender }, receiver)

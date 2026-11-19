@@ -1,6 +1,9 @@
 //! Test-only sandbox doubles, mirroring the ad-hoc `as unknown as
 //! Experimental_SandboxSession` objects in Vercel's tests.
 
+// [rust] Each adapter feature uses a different subset.
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 

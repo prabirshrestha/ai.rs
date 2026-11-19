@@ -1,6 +1,6 @@
-//! [rust] The host tool MCP server the ACP agent reaches, in place of the TS
-//! bridge's `host-tool-relay.ts`, `host-tool-mcp.ts` and
-//! `host-tool-mcp-http.ts`.
+//! [rust] The host tool MCP server an agent reaches, in place of the TS
+//! bridges' host tool relays (`host-tool-relay.ts`, `host-tool-mcp.ts`,
+//! `host-tool-mcp-http.ts`, and OpenCode's `harness-tools` MCP server).
 //!
 //! Over stdio, the agent starts a shell command that copies its MCP stdio
 //! to a pair of FIFOs in the sandbox; this process holds the other ends
@@ -23,8 +23,6 @@ use crate::harness::session::NoticeLevel;
 use crate::harness::utils::{random_uuid, shell_quote};
 use crate::{AgentToolResult, AssistantMessage, Tool, ToolCall};
 
-use super::settings::{AcpHttpRelayOptions, HOST_TOOL_MCP_SERVER_NAME};
-
 /// What the relay asks of the running turn.
 pub(super) enum RelayEvent {
     /// The agent called a host tool. The turn records the call and answers
@@ -32,7 +30,7 @@ pub(super) enum RelayEvent {
     Call {
         name: String,
         args: Value,
-        reply: oneshot::Sender<(String, AssistantMessage)>,
+        reply: oneshot::Sender<RelayAnswer>,
     },
     Update {
         id: String,
@@ -47,6 +45,31 @@ pub(super) enum RelayEvent {
     Notice(NoticeLevel, String),
 }
 
+/// How the turn answers a [`RelayEvent::Call`].
+#[cfg_attr(not(feature = "harness-opencode"), allow(dead_code))]
+pub(super) enum RelayAnswer {
+    /// Run the host tool under this call id, in this assistant message.
+    Run {
+        id: String,
+        assistant: AssistantMessage,
+    },
+    /// Answer with this MCP `CallToolResult` without running a host tool.
+    Result(Value),
+    /// Refuse the call.
+    Deny(String),
+}
+
+/// What the relay serves.
+#[derive(Debug, Clone)]
+pub(super) struct RelayConfig {
+    /// The MCP server name.
+    pub server_name: String,
+    /// The agent, in notices ("this ACP agent").
+    pub agent_label: String,
+    /// Whether the agent can receive image results.
+    pub images: bool,
+}
+
 /// The turn the relay runs tools for.
 #[derive(Clone)]
 pub(super) struct TurnBinding {
@@ -54,6 +77,7 @@ pub(super) struct TurnBinding {
     pub events: mpsc::UnboundedSender<RelayEvent>,
 }
 
+#[cfg_attr(not(feature = "harness-acp"), allow(dead_code))]
 enum Transport {
     Stdio {
         process: Arc<JsonLineProcess>,
@@ -68,6 +92,7 @@ enum Transport {
 
 /// A running relay.
 pub(super) struct HostRelay {
+    config: RelayConfig,
     tools: Arc<StdMutex<Vec<Tool>>>,
     binding: Arc<StdMutex<Option<TurnBinding>>>,
     transport: Transport,
@@ -76,6 +101,18 @@ pub(super) struct HostRelay {
 /// The FIFO side the agent starts: its stdin goes to `req`, `res` to its
 /// stdout.
 const AGENT_SIDE_SCRIPT: &str = r#"cat "$1/res" & r=$!; cat > "$1/req"; kill $r 2>/dev/null"#;
+
+/// The command an agent starts to reach the stdio relay in `directory`.
+#[allow(dead_code)]
+pub(super) fn agent_side_command(directory: &str) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        AGENT_SIDE_SCRIPT.into(),
+        "relay".into(),
+        directory.to_string(),
+    ]
+}
 
 /// The side this process holds. Opening both FIFOs read-write keeps them
 /// open across agent-side restarts.
@@ -91,20 +128,21 @@ kill $c 2>/dev/null"#;
 struct Shared {
     tools: Arc<StdMutex<Vec<Tool>>>,
     binding: Arc<StdMutex<Option<TurnBinding>>>,
-    images: bool,
+    config: RelayConfig,
 }
 
 impl Shared {
     fn server(&self) -> McpHostServer {
         let tools = self.tools.lock().unwrap().clone();
         let binding = self.binding.clone();
-        let images = self.images;
+        let config = self.config.clone();
         let call: McpCallFn = Arc::new(move |name, args, _meta| {
             let binding = binding.lock().unwrap().clone();
-            Box::pin(async move { call_tool(binding, name, args, images).await })
+            let config = config.clone();
+            Box::pin(async move { call_tool(binding, name, args, &config).await })
         });
         McpHostServer {
-            name: HOST_TOOL_MCP_SERVER_NAME.to_string(),
+            name: self.config.server_name.clone(),
             tools: tools
                 .into_iter()
                 .map(|tool| (tool, McpToolExtras::default()))
@@ -118,7 +156,12 @@ fn error_result(message: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": message }], "isError": true })
 }
 
-async fn call_tool(binding: Option<TurnBinding>, name: String, args: Value, images: bool) -> Value {
+async fn call_tool(
+    binding: Option<TurnBinding>,
+    name: String,
+    args: Value,
+    config: &RelayConfig,
+) -> Value {
     let Some(binding) = binding else {
         return error_result("No HarnessAgent turn is running.");
     };
@@ -134,8 +177,11 @@ async fn call_tool(binding: Option<TurnBinding>, name: String, args: Value, imag
     {
         return error_result("No HarnessAgent turn is running.");
     }
-    let Ok((id, assistant)) = recorded.await else {
-        return error_result("No HarnessAgent turn is running.");
+    let (id, assistant) = match recorded.await {
+        Ok(RelayAnswer::Run { id, assistant }) => (id, assistant),
+        Ok(RelayAnswer::Result(result)) => return result,
+        Ok(RelayAnswer::Deny(reason)) => return error_result(&reason),
+        Err(_) => return error_result("No HarnessAgent turn is running."),
     };
     let call = ToolCall {
         id: id.clone(),
@@ -154,12 +200,13 @@ async fn call_tool(binding: Option<TurnBinding>, name: String, args: Value, imag
     });
     let (result, is_error) = binding.host.run(&call, &assistant, Some(on_update)).await;
     let mut content = tool_result_mcp_content(&result);
-    if !images && content.iter().any(|part| part["type"] == "image") {
+    if !config.images && content.iter().any(|part| part["type"] == "image") {
         content.retain(|part| part["type"] != "image");
         let _ = binding.events.send(RelayEvent::Notice(
             NoticeLevel::Warning,
             format!(
-                "Tool {name} returned image output, which this ACP agent cannot receive; it was omitted."
+                "Tool {name} returned image output, which {} cannot receive; it was omitted.",
+                config.agent_label
             ),
         ));
     }
@@ -180,7 +227,7 @@ impl HostRelay {
     pub async fn start_stdio(
         sandbox: &dyn SandboxSession,
         directory: &str,
-        images: bool,
+        config: RelayConfig,
     ) -> HarnessResult<Self> {
         let command = format!(
             "mkdir -p {dir} && exec sh -c {script} relay {dir}",
@@ -190,7 +237,7 @@ impl HostRelay {
         let (process, mut requests) = JsonLineProcess::spawn(
             sandbox,
             SandboxProcessOptions::new(command),
-            "ACP host tool relay",
+            "host tool relay",
         )
         .await?;
         // The FIFOs exist once the relay says so; the agent may open them as
@@ -200,7 +247,7 @@ impl HostRelay {
             _ => {
                 process.kill().await;
                 return Err(HarnessError::new(format!(
-                    "The ACP host tool relay did not start: {}",
+                    "The host tool relay did not start: {}",
                     process.stderr_tail()
                 ))
                 .into());
@@ -211,7 +258,7 @@ impl HostRelay {
         let shared = Arc::new(Shared {
             tools: tools.clone(),
             binding: binding.clone(),
-            images,
+            config: config.clone(),
         });
         {
             let process = process.clone();
@@ -228,6 +275,7 @@ impl HostRelay {
             });
         }
         Ok(Self {
+            config,
             tools,
             binding,
             transport: Transport::Stdio {
@@ -238,13 +286,15 @@ impl HostRelay {
     }
 
     /// Serve the HTTP endpoint.
-    pub async fn start_http(options: &AcpHttpRelayOptions, images: bool) -> HarnessResult<Self> {
-        let listener = tokio::net::TcpListener::bind(options.bind).await?;
+    #[cfg_attr(not(feature = "harness-acp"), allow(dead_code))]
+    pub async fn start_http(
+        bind: std::net::SocketAddr,
+        url_host: Option<String>,
+        config: RelayConfig,
+    ) -> HarnessResult<Self> {
+        let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
-        let host = options
-            .url_host
-            .clone()
-            .unwrap_or_else(|| address.ip().to_string());
+        let host = url_host.unwrap_or_else(|| address.ip().to_string());
         let url = format!("http://{host}:{}/mcp", address.port());
         let token = random_uuid();
         let tools: Arc<StdMutex<Vec<Tool>>> = Arc::default();
@@ -252,7 +302,7 @@ impl HostRelay {
         let shared = Arc::new(Shared {
             tools: tools.clone(),
             binding: binding.clone(),
-            images,
+            config: config.clone(),
         });
         let expected = format!("Bearer {token}");
         let task = tokio::spawn(async move {
@@ -268,24 +318,36 @@ impl HostRelay {
             }
         });
         Ok(Self {
+            config,
             tools,
             binding,
             transport: Transport::Http { url, token, task },
         })
     }
 
-    /// The `McpServer` entry of `session/new`.
+    /// The URL and bearer token of an HTTP relay.
+    #[allow(dead_code)]
+    pub fn http_endpoint(&self) -> Option<(&str, &str)> {
+        match &self.transport {
+            Transport::Http { url, token, .. } => Some((url, token)),
+            Transport::Stdio { .. } => None,
+        }
+    }
+
+    /// The ACP `McpServer` entry of `session/new`.
+    #[allow(dead_code)]
     pub fn mcp_server_definition(&self) -> Value {
+        let name = &self.config.server_name;
         match &self.transport {
             Transport::Stdio { directory, .. } => json!({
-                "name": HOST_TOOL_MCP_SERVER_NAME,
+                "name": name,
                 "command": "sh",
                 "args": ["-c", AGENT_SIDE_SCRIPT, "relay", directory],
                 "env": [],
             }),
             Transport::Http { url, token, .. } => json!({
                 "type": "http",
-                "name": HOST_TOOL_MCP_SERVER_NAME,
+                "name": name,
                 "url": url,
                 "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
             }),
@@ -342,6 +404,7 @@ impl HostRelay {
 }
 
 /// One HTTP/1.1 connection: `POST /mcp` with a JSON-RPC message or batch.
+#[cfg_attr(not(feature = "harness-acp"), allow(dead_code))]
 async fn serve_http_connection(
     stream: tokio::net::TcpStream,
     shared: Arc<Shared>,
