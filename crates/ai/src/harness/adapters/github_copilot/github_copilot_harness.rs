@@ -18,21 +18,14 @@ use crate::harness::adapters::acp::{
     ACPAuthenticationMode, ACPClientApp, ACPHarnessSettings, ACPResolveHostToolCallOptions,
     ACPResolvedHostToolCall, ACPToolCall, create_acp,
 };
-use crate::harness::adapters::zod_schema::{
-    Field, array, boolean, enumeration, loose_object, nonnegative_integer, number, optional,
-    required, string,
-};
+use crate::harness::adapters::builtin_tool_catalog::load_builtin_tool_catalog;
 use crate::harness::errors::{BoxError, HarnessResult};
-use crate::harness::sdk::tool::Tool;
 use crate::harness::spec::network_sandbox::{
     HarnessV1PortEndpoint, HarnessV1RequestTransformation,
     HarnessV1RequestTransformationKeyValueMatcher, HarnessV1RequestTransformationMatch,
     HarnessV1RequestTransformationMatcher, HarnessV1RequestTransformationTransform,
 };
-use crate::harness::spec::tools::{
-    CommonToolOptions, HarnessV1BuiltinTool, HarnessV1BuiltinToolName, HarnessV1BuiltinToolUseKind,
-    common_tool,
-};
+use crate::harness::spec::tools::HarnessV1BuiltinTool;
 use crate::harness::spec::{HarnessV1CredentialForwarding, HarnessV1CredentialForwardingOptions};
 use crate::harness::utils::{
     SandboxChannelReconnectOptions, create_credential_request_transformation,
@@ -125,249 +118,15 @@ fn github_copilot_client_app() -> ACPClientApp {
     }
 }
 
-fn tool(
-    title: Option<&str>,
-    fields: &[Field],
-    tool_use_kind: Option<HarnessV1BuiltinToolUseKind>,
-) -> HarnessV1BuiltinTool {
-    let mut tool = Tool::new(loose_object(fields));
-    tool.title = title.map(str::to_string);
-    HarnessV1BuiltinTool {
-        tool,
-        native_name: None,
-        common_name: None,
-        tool_use_kind,
-    }
-}
-
-fn common(
-    common_name: HarnessV1BuiltinToolName,
-    tool_use_kind: HarnessV1BuiltinToolUseKind,
-    fields: &[Field],
-    title: Option<&str>,
-) -> HarnessV1BuiltinTool {
-    let mut tool = common_tool(
-        common_name,
-        CommonToolOptions {
-            native_name: common_name.as_str().into(),
-            tool_use_kind: Some(tool_use_kind),
-            description: None,
-            input_schema: loose_object(fields),
-        },
-    )
-    .expect("GitHub Copilot built-in schemas extend the standard schemas");
-    if let Some(title) = title {
-        tool.tool.title = Some(title.into());
-    }
-    tool
-}
-
 /// `GITHUB_COPILOT_BUILTIN_TOOLS`.
 ///
 /// This catalog reflects the stable, non-MCP tool surface emitted by GitHub
 /// Copilot CLI >=1.0.82. Loose object schemas preserve compatibility when
 /// the CLI adds fields without changing the established inputs.
 pub fn github_copilot_builtin_tools() -> IndexMap<String, HarnessV1BuiltinTool> {
-    use HarnessV1BuiltinToolName as N;
-    use HarnessV1BuiltinToolUseKind::{Bash, Edit, Readonly};
-    IndexMap::from([
-        (
-            "bash".into(),
-            common(
-                N::Bash,
-                Bash,
-                &[
-                    required("command", string()),
-                    optional("description", string()),
-                    optional("shellId", string()),
-                    optional("mode", enumeration(&["sync", "async"])),
-                    optional("detach", boolean()),
-                    optional("initial_wait", number()),
-                ],
-                None,
-            ),
-        ),
-        (
-            "read_bash".into(),
-            tool(
-                Some("Reading shell output"),
-                &[required("shellId", string()), required("delay", number())],
-                Some(Readonly),
-            ),
-        ),
-        (
-            "stop_bash".into(),
-            tool(
-                Some("Stopping shell session"),
-                &[required("shellId", string())],
-                Some(Bash),
-            ),
-        ),
-        (
-            "list_bash".into(),
-            tool(Some("list_bash"), &[], Some(Readonly)),
-        ),
-        (
-            "view".into(),
-            tool(
-                Some("Viewing "),
-                &[
-                    required("path", string()),
-                    optional("view_range", array(number())),
-                    optional("forceReadLargeFiles", boolean()),
-                ],
-                Some(Readonly),
-            ),
-        ),
-        (
-            "create".into(),
-            tool(
-                Some("Creating "),
-                &[required("path", string()), required("file_text", string())],
-                Some(Edit),
-            ),
-        ),
-        (
-            "edit".into(),
-            tool(
-                Some("Editing "),
-                &[
-                    required("path", string()),
-                    optional("old_str", string()),
-                    required("new_str", string()),
-                ],
-                Some(Edit),
-            ),
-        ),
-        (
-            "web_fetch".into(),
-            tool(
-                Some("Fetching "),
-                &[
-                    required("url", string()),
-                    optional("max_length", number()),
-                    optional("start_index", number()),
-                    optional("raw", boolean()),
-                ],
-                Some(Readonly),
-            ),
-        ),
-        (
-            "skill".into(),
-            tool(Some("Using skill: "), &[required("skill", string())], None),
-        ),
-        (
-            "sql".into(),
-            tool(
-                None,
-                &[
-                    required("description", string()),
-                    required("query", string()),
-                    optional("database", enumeration(&["session", "session_store"])),
-                ],
-                None,
-            ),
-        ),
-        (
-            "read_agent".into(),
-            tool(
-                Some("read_agent"),
-                &[
-                    required("agent_id", string()),
-                    optional("wait", boolean()),
-                    optional("timeout", number()),
-                    optional("since_turn", nonnegative_integer()),
-                ],
-                Some(Readonly),
-            ),
-        ),
-        (
-            "list_agents".into(),
-            tool(
-                Some("list_agents"),
-                &[
-                    optional("include_completed", boolean()),
-                    optional("scope", enumeration(&["siblings", "children", "all"])),
-                ],
-                Some(Readonly),
-            ),
-        ),
-        (
-            "write_agent".into(),
-            tool(
-                Some("write_agent"),
-                &[
-                    required("message", string()),
-                    optional("agent_id", string()),
-                    optional("agent_ids", array(string())),
-                    optional("scope", enumeration(&["siblings", "children"])),
-                ],
-                None,
-            ),
-        ),
-        (
-            "grep".into(),
-            common(
-                N::Grep,
-                Readonly,
-                &[
-                    required("pattern", string()),
-                    optional("path", string()),
-                    optional("paths", array(string())),
-                    optional("glob", string()),
-                    optional(
-                        "output_mode",
-                        enumeration(&["content", "files_with_matches", "count"]),
-                    ),
-                    optional("case_insensitive", boolean()),
-                    optional("multiline", boolean()),
-                    optional("head_limit", number()),
-                    optional("context", number()),
-                    optional("before_context", number()),
-                    optional("after_context", number()),
-                ],
-                Some("Searching for "),
-            ),
-        ),
-        (
-            "glob".into(),
-            common(
-                N::Glob,
-                Readonly,
-                &[
-                    required("pattern", string()),
-                    optional("paths", array(string())),
-                ],
-                Some("Finding files matching "),
-            ),
-        ),
-        (
-            "task".into(),
-            tool(
-                None,
-                &[
-                    required("name", string()),
-                    required("prompt", string()),
-                    required(
-                        "agent_type",
-                        enumeration(&[
-                            "explore",
-                            "task",
-                            "general-purpose",
-                            "code-review",
-                            "research",
-                            "security-review",
-                        ]),
-                    ),
-                    required("description", string()),
-                    optional("model", string()),
-                    optional("context_tier", enumeration(&["default", "long_context"])),
-                    optional("mode", enumeration(&["sync", "background"])),
-                ],
-                None,
-            ),
-        ),
-    ])
+    load_builtin_tool_catalog(include_str!(
+        "../../../../assets/harness/github-copilot/builtin-tools.json"
+    ))
 }
 
 /// The harness `createGitHubCopilot` returns.

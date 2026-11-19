@@ -9,8 +9,8 @@ pub mod cursor;
 pub mod github_copilot;
 
 #[cfg(feature = "harness-acp")]
+pub(crate) mod builtin_tool_catalog;
+#[cfg(feature = "harness-acp")]
 pub(crate) mod jsonc;
 #[cfg(all(test, feature = "harness-acp"))]
 pub(crate) mod test_temp_dir;
-#[cfg(feature = "harness-acp")]
-pub(crate) mod zod_schema;

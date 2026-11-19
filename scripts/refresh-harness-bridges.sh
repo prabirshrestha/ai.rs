@@ -14,7 +14,8 @@ if [ $# -ne 1 ]; then
 fi
 
 VERCEL_AI="$(cd "$1" && pwd)"
-ASSETS="$(cd "$(dirname "$0")/.." && pwd)/crates/ai/assets/harness"
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+ASSETS="$(cd "$SCRIPTS/.." && pwd)/crates/ai/assets/harness"
 
 # Adapter package -> asset directory. Each package's `build` script writes its
 # bridge into dist/bridge (index.mjs, package.json, pnpm-lockfile.yaml and,
@@ -29,13 +30,23 @@ BUNDLED=(
 MANIFEST_ONLY=(
   "harness-github-copilot:github-copilot"
 )
+# Adapter package -> asset directory and factory whose `builtinTools` catalog
+# is dumped to builtin-tools.json.
+CATALOGS=(
+  "harness-claude-code:claude-code:createClaudeCode"
+  "harness-codex:codex:createCodex"
+  "harness-cursor:cursor:createCursor"
+  "harness-github-copilot:github-copilot:createGitHubCopilot"
+  "harness-opencode:opencode:createOpenCode"
+)
 
 cd "$VERCEL_AI"
 echo "vercel/ai at $(git rev-parse --short HEAD)"
 
 filters=(--filter "@vercel/ai-tsdown-config")
-for entry in "${BUNDLED[@]}"; do
-  filters+=(--filter "@ai-sdk/${entry%%:*}...")
+for entry in "${BUNDLED[@]}" "${CATALOGS[@]}"; do
+  package="${entry%%:*}"
+  filters+=(--filter "@ai-sdk/$package...")
 done
 pnpm install --frozen-lockfile "${filters[@]}"
 
@@ -64,4 +75,16 @@ for entry in "${MANIFEST_ONLY[@]}"; do
   cp "packages/$package/src/bridge/pnpm-lock.yaml" "$target/pnpm-lockfile.yaml"
   cp "packages/$package/src/bridge/pnpm-workspace.yaml" "$target/pnpm-workspace.yaml"
   echo "refreshed $target"
+done
+
+for entry in "${CATALOGS[@]}"; do
+  IFS=: read -r package directory factory <<<"$entry"
+  target="$ASSETS/$directory"
+  if [ ! -f "packages/$package/dist/index.js" ]; then
+    (cd "packages/$package" && pnpm run build)
+  fi
+  mkdir -p "$target"
+  node "$SCRIPTS/dump-harness-builtin-tools.mjs" "$VERCEL_AI" "$package" "$factory" \
+    >"$target/builtin-tools.json"
+  echo "dumped $target/builtin-tools.json"
 done
