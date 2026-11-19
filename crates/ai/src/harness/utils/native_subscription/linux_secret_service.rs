@@ -13,7 +13,10 @@ pub async fn read_linux_secret_service_password(
     read_with(&SystemExecFile, attributes).await
 }
 
-async fn read_with(exec: &dyn ExecFile, attributes: &IndexMap<String, String>) -> Option<String> {
+pub(crate) async fn read_with(
+    exec: &dyn ExecFile,
+    attributes: &IndexMap<String, String>,
+) -> Option<String> {
     let args: Vec<String> = std::iter::once("lookup".to_string())
         .chain(
             attributes

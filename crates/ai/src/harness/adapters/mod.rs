@@ -10,12 +10,32 @@ pub mod github_copilot;
 
 #[cfg(feature = "harness-claude-code")]
 pub mod claude_code;
+#[cfg(feature = "harness-codex")]
+pub mod codex;
 
-#[cfg(all(test, any(feature = "harness-acp", feature = "harness-claude-code")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "harness-acp",
+        feature = "harness-claude-code",
+        feature = "harness-codex"
+    )
+))]
 pub(crate) mod bridge_test_support;
-#[cfg(any(feature = "harness-acp", feature = "harness-claude-code"))]
+#[cfg(any(
+    feature = "harness-acp",
+    feature = "harness-claude-code",
+    feature = "harness-codex"
+))]
 pub(crate) mod builtin_tool_catalog;
 #[cfg(feature = "harness-acp")]
 pub(crate) mod jsonc;
-#[cfg(all(test, any(feature = "harness-acp", feature = "harness-claude-code")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "harness-acp",
+        feature = "harness-claude-code",
+        feature = "harness-codex"
+    )
+))]
 pub(crate) mod test_temp_dir;

@@ -41,7 +41,7 @@ pub async fn read_windows_credential_manager_password(target_name: &str) -> Opti
     read_with(&SystemExecFile, target_name).await
 }
 
-async fn read_with(exec: &dyn ExecFile, target_name: &str) -> Option<String> {
+pub(crate) async fn read_with(exec: &dyn ExecFile, target_name: &str) -> Option<String> {
     let args = ["-NoProfile", "-NonInteractive", "-Command", COMMAND].map(String::from);
     let options = ExecFileOptions {
         env: IndexMap::from([
