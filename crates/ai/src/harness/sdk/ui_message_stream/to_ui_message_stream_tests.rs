@@ -893,3 +893,55 @@ async fn does_not_warn_for_provider_executed_tool_errors() {
     parts.push(test_step());
     assert!(warnings(parts, Default::default()).await.is_empty());
 }
+
+// ─── getResponseUIMessageId (get-response-ui-message-id.test.ts) ──────
+
+fn ui(id: &str, role: &str) -> UIMessage {
+    serde_json::from_value(json!({ "id": id, "role": role, "parts": [] })).unwrap()
+}
+
+fn new_id() -> IdGeneratorFn {
+    Arc::new(|| "new-id".into())
+}
+
+#[test]
+fn should_return_undefined_when_original_messages_is_null() {
+    assert_eq!(get_response_ui_message_id(None, &new_id()), None);
+}
+
+#[test]
+fn should_return_the_last_assistant_message_id_when_present() {
+    let messages = [ui("msg-1", "user"), ui("msg-2", "assistant")];
+    assert_eq!(
+        get_response_ui_message_id(Some(&messages), &new_id()).as_deref(),
+        Some("msg-2")
+    );
+}
+
+#[test]
+fn should_generate_new_id_when_last_message_is_not_from_assistant() {
+    let messages = [ui("msg-1", "assistant"), ui("msg-2", "user")];
+    assert_eq!(
+        get_response_ui_message_id(Some(&messages), &new_id()).as_deref(),
+        Some("new-id")
+    );
+}
+
+#[test]
+fn should_generate_new_id_when_messages_array_is_empty() {
+    assert_eq!(
+        get_response_ui_message_id(Some(&[]), &new_id()).as_deref(),
+        Some("new-id")
+    );
+}
+
+#[test]
+fn should_use_the_response_message_id_when_it_is_a_string() {
+    // [rust] `responseMessageId` is always a generator; a constant one
+    // stands in for the string.
+    let id: IdGeneratorFn = Arc::new(|| "response-id".into());
+    assert_eq!(
+        get_response_ui_message_id(Some(&[]), &id).as_deref(),
+        Some("response-id")
+    );
+}

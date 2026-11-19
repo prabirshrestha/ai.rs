@@ -174,3 +174,7 @@ pub fn create_ui_message_stream_response(
         body: sse_stream.map(|item| item.map(Bytes::from)).boxed(),
     })
 }
+
+#[cfg(test)]
+#[path = "ui_message_stream_response_tests.rs"]
+mod tests;
