@@ -47,9 +47,12 @@ use super::github_copilot_subscription::{
     normalize_github_host, resolve_github_copilot_subscription_environment,
 };
 
-const GITHUB_COPILOT_BRIDGE_PACKAGE_JSON: &str = include_str!("bridge/package.json");
-const GITHUB_COPILOT_BRIDGE_PNPM_LOCK_YAML: &str = include_str!("bridge/pnpm-lock.yaml");
-const GITHUB_COPILOT_BRIDGE_PNPM_WORKSPACE_YAML: &str = include_str!("bridge/pnpm-workspace.yaml");
+const GITHUB_COPILOT_BRIDGE_PACKAGE_JSON: &str =
+    include_str!("../../../../assets/harness/github-copilot/package.json");
+const GITHUB_COPILOT_BRIDGE_PNPM_LOCK_YAML: &str =
+    include_str!("../../../../assets/harness/github-copilot/pnpm-lockfile.yaml");
+const GITHUB_COPILOT_BRIDGE_PNPM_WORKSPACE_YAML: &str =
+    include_str!("../../../../assets/harness/github-copilot/pnpm-workspace.yaml");
 
 const GITHUB_COPILOT_TOKEN_ENVIRONMENT_VARIABLES: [&str; 3] =
     ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];

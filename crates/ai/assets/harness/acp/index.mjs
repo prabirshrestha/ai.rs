@@ -3677,6 +3677,7 @@ let streamCapture;
 let initializationDiagnostic;
 let hostToolRelay;
 let catalogRefreshError;
+let sessionPrompted = false;
 let sessionConfigurationFailure;
 let historicalUpdatesSuppressed = false;
 let coldRestorationMethod;
@@ -3877,12 +3878,15 @@ async function runTurn(start, turn) {
 	activeHostToolRelay.bindTurn({ turn: relayTurn });
 	try {
 		const promptMeta = createOutputSchemaPromptMeta({ start });
-		const startPrompt = () => promptActiveSession({
-			session: activeSession,
-			agent: connection.agent,
-			prompt: start.prompt,
-			meta: promptMeta
-		});
+		const startPrompt = () => {
+			sessionPrompted = true;
+			return promptActiveSession({
+				session: activeSession,
+				agent: connection.agent,
+				prompt: start.prompt,
+				meta: promptMeta
+			});
+		};
 		if (initialHostToolCatalogRefreshRequired) try {
 			await promptAndRefreshInitialHostToolCatalog({
 				startPrompt,
@@ -3982,6 +3986,7 @@ async function ensureSession({ start, turn }) {
 		if (sessionConfigurationFingerprint !== fingerprint) throw new Error("ACP authentication and session profile settings cannot change after the ACP session has started.");
 		const relay = hostToolRelay;
 		if (relay == null) throw new Error("The host tool MCP relay is unavailable.");
+		if (!sessionPrompted) return { initialHostToolCatalogRefreshRequired: true };
 		try {
 			await refreshHostToolCatalog({
 				relay,

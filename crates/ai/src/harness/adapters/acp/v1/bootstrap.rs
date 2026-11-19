@@ -1,8 +1,9 @@
 //! Port of `harness-acp/src/v1/acp-v1-bootstrap.ts`.
 //!
-//! [rust] The bridge bundle is the published `@ai-sdk/harness-acp` dist,
-//! vendored under `crates/ai/assets/harness/acp` and embedded at compile
-//! time instead of read from disk.
+//! [rust] The bridge bundle is the `@ai-sdk/harness-acp` dist built from the
+//! ported vercel/ai commit by `scripts/refresh-harness-bridges.sh`, vendored
+//! under `crates/ai/assets/harness/acp` and embedded at compile time instead
+//! of read from disk.
 
 use std::sync::{Arc, OnceLock};
 
