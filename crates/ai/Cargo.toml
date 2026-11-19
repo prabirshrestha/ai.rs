@@ -28,5 +28,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+[features]
+default = ["harness"]
+# Port of the Vercel AI SDK harness (`@ai-sdk/harness`).
+harness = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -7,6 +7,8 @@ pub mod embeddings;
 pub mod env_api_keys;
 pub mod error;
 pub mod event_stream;
+#[cfg(feature = "harness")]
+pub mod harness;
 pub mod images;
 mod models;
 pub mod oauth;
