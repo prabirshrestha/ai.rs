@@ -15,6 +15,7 @@ pub mod is_sandbox_write_protected_path;
 pub mod native_subscription;
 pub mod oauth_access_token;
 pub mod os;
+pub mod sandbox_channel;
 pub mod sandbox_credential_brokering;
 pub mod sandbox_home_dir;
 pub mod shell_quote;
@@ -50,6 +51,7 @@ pub use native_subscription::{
 };
 pub use oauth_access_token::*;
 pub use os::*;
+pub use sandbox_channel::*;
 pub use sandbox_credential_brokering::*;
 pub use sandbox_home_dir::*;
 pub use shell_quote::*;
