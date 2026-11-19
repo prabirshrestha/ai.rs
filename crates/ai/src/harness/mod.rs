@@ -17,6 +17,7 @@
 // public shape for no benefit.
 #![allow(clippy::large_enum_variant)]
 
+pub mod agent;
 pub mod errors;
 pub mod provider;
 pub mod sandbox;

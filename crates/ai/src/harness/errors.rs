@@ -101,13 +101,13 @@ impl HarnessError {
 
     /// `HarnessError.isInstance(error)`: true for every variant.
     pub fn is_instance(error: &(dyn StdError + 'static)) -> bool {
-        error.downcast_ref::<HarnessError>().is_some()
+        Self::downcast(error).is_some()
     }
 
     /// `HarnessCapabilityUnsupportedError.isInstance(error)`.
     pub fn is_capability_unsupported(error: &(dyn StdError + 'static)) -> bool {
         matches!(
-            error.downcast_ref::<HarnessError>(),
+            Self::downcast(error),
             Some(HarnessError::CapabilityUnsupported { .. })
         )
     }
@@ -115,7 +115,7 @@ impl HarnessError {
     /// `HarnessHistoryUnavailableError.isInstance(error)`.
     pub fn is_history_unavailable(error: &(dyn StdError + 'static)) -> bool {
         matches!(
-            error.downcast_ref::<HarnessError>(),
+            Self::downcast(error),
             Some(HarnessError::HistoryUnavailable { .. })
         )
     }
@@ -123,9 +123,14 @@ impl HarnessError {
     /// `HarnessSandboxAuthenticationError.isInstance(error)`.
     pub fn is_sandbox_authentication(error: &(dyn StdError + 'static)) -> bool {
         matches!(
-            error.downcast_ref::<HarnessError>(),
+            Self::downcast(error),
             Some(HarnessError::SandboxAuthentication { .. })
         )
+    }
+
+    /// Downcast an error (looking through a shared wrapper).
+    pub fn downcast<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a HarnessError> {
+        crate::harness::sdk::error_value::unwrap_shared(error).downcast_ref::<HarnessError>()
     }
 
     /// The TS error `name`.
@@ -179,6 +184,7 @@ const DEFAULT_ERROR_MESSAGE: &str = "An error occurred.";
 /// other errors are masked so provider, sandbox, and server details are not
 /// exposed to clients by default.
 pub fn get_harness_error_message(error: &(dyn StdError + 'static)) -> String {
+    let error = crate::harness::sdk::error_value::unwrap_shared(error);
     match error.downcast_ref::<HarnessError>() {
         Some(
             e @ (HarnessError::CapabilityUnsupported { .. }

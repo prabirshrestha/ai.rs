@@ -189,23 +189,150 @@ pub enum LanguageModelV4ToolResultContentPart {
     },
 }
 
+/// `TypeValidationContext`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeValidationContext {
+    pub field: Option<String>,
+    pub entity_name: Option<String>,
+    pub entity_id: Option<String>,
+}
+
 /// `TypeValidationError` from `@ai-sdk/provider`: a value failed a schema.
 ///
 /// [rust] Raised where TS runs a zod `parse` (stream parts, bridge frames,
-/// question tool input and output).
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("Type validation failed: Value: {value}.\nError message: {message}")]
+/// question tool input and output) and by [`validate_types`]. `message` is
+/// the cause's `getErrorMessage` text.
+#[derive(Debug, Clone)]
 pub struct TypeValidationError {
     pub value: JsonValue,
     pub message: String,
+    pub context: Option<Box<TypeValidationContext>>,
 }
+
+impl std::fmt::Display for TypeValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut prefix = String::from("Type validation failed");
+        if let Some(context) = &self.context {
+            if let Some(field) = context.field.as_deref().filter(|s| !s.is_empty()) {
+                prefix.push_str(&format!(" for {field}"));
+            }
+            let name = context.entity_name.as_deref().filter(|s| !s.is_empty());
+            let id = context.entity_id.as_deref().filter(|s| !s.is_empty());
+            if name.is_some() || id.is_some() {
+                let mut parts = Vec::new();
+                if let Some(name) = name {
+                    parts.push(name.to_string());
+                }
+                if let Some(id) = id {
+                    parts.push(format!("id: \"{id}\""));
+                }
+                prefix.push_str(&format!(" ({})", parts.join(", ")));
+            }
+        }
+        write!(
+            f,
+            "{prefix}: Value: {}.\nError message: {}",
+            self.value, self.message
+        )
+    }
+}
+
+impl std::error::Error for TypeValidationError {}
 
 impl TypeValidationError {
     pub fn new(value: JsonValue, message: impl Into<String>) -> Self {
         Self {
             value,
             message: message.into(),
+            context: None,
         }
+    }
+
+    /// `TypeValidationError.wrap({ value, cause, context })`: a
+    /// `TypeValidationError` cause for the same value and context is kept.
+    pub fn wrap(
+        value: JsonValue,
+        cause: &(dyn std::error::Error + 'static),
+        context: Option<TypeValidationContext>,
+    ) -> Self {
+        if let Some(existing) = cause.downcast_ref::<TypeValidationError>()
+            && existing.value == value
+            && existing.context.as_deref().cloned().unwrap_or_default()
+                == context.clone().unwrap_or_default()
+        {
+            return existing.clone();
+        }
+        Self {
+            value,
+            message: crate::harness::sdk::error_value::get_error_message(cause),
+            context: context.map(Box::new),
+        }
+    }
+}
+
+/// `JSONParseError` from `@ai-sdk/provider`.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("JSON parsing failed: Text: {text}.\nError message: {message}")]
+pub struct JsonParseError {
+    pub text: String,
+    pub message: String,
+}
+
+/// `validateTypes({ value, schema, context })`.
+pub fn validate_types(
+    value: &JsonValue,
+    schema: &crate::harness::sdk::Schema,
+    context: Option<TypeValidationContext>,
+) -> Result<JsonValue, TypeValidationError> {
+    schema
+        .validate_value(value)
+        .map_err(|cause| TypeValidationError::wrap(value.clone(), &*cause, context))
+}
+
+/// `safeParseJSON({ text })` / `parseJSON` failure.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ParseJsonError {
+    #[error(transparent)]
+    Json(#[from] JsonParseError),
+    #[error(transparent)]
+    Validation(#[from] TypeValidationError),
+}
+
+/// `safeParseJSON({ text, schema })`. `secureJsonParse` rejects nothing
+/// `serde_json` accepts except `__proto__` / `constructor.prototype` keys.
+pub fn safe_parse_json(
+    text: &str,
+    schema: Option<&crate::harness::sdk::Schema>,
+) -> Result<JsonValue, ParseJsonError> {
+    let value: JsonValue = serde_json::from_str(text).map_err(|e| JsonParseError {
+        text: text.to_string(),
+        message: format!("SyntaxError: {e}"),
+    })?;
+    if has_forbidden_prototype_keys(&value) {
+        return Err(JsonParseError {
+            text: text.to_string(),
+            message: "SyntaxError: Object contains forbidden prototype property".into(),
+        }
+        .into());
+    }
+    match schema {
+        None => Ok(value),
+        Some(schema) => Ok(validate_types(&value, schema, None)?),
+    }
+}
+
+fn has_forbidden_prototype_keys(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Object(map) => {
+            map.contains_key("__proto__")
+                || map
+                    .get("constructor")
+                    .and_then(|c| c.as_object())
+                    .is_some_and(|c| c.contains_key("prototype"))
+                || map.values().any(has_forbidden_prototype_keys)
+        }
+        JsonValue::Array(items) => items.iter().any(has_forbidden_prototype_keys),
+        _ => false,
     }
 }
 
