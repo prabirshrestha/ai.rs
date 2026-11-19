@@ -2,6 +2,13 @@
 
 pub mod ai_gateway_auth;
 pub mod authentication_environment;
+pub mod bridge_asset;
+pub mod bridge_auth;
+pub mod bridge_auth_protocol;
+pub mod bridge_diagnostics;
+pub mod bridge_endpoint;
+pub mod bridge_ready;
+pub mod classify_disk_log;
 pub mod credential_forwarding;
 pub mod extract_harness_prompt_content;
 pub mod is_sandbox_write_protected_path;
@@ -19,6 +26,18 @@ pub mod write_skills;
 pub use crate::harness::spec::paths::encode_harness_path_segment;
 pub use ai_gateway_auth::*;
 pub use authentication_environment::*;
+pub use bridge_asset::*;
+pub use bridge_auth::{BridgeAuthKeyPair, create_bridge_auth_key_pair};
+pub use bridge_auth_protocol::BRIDGE_AUTH_PUBLIC_KEY_ENV;
+pub use bridge_diagnostics::{
+    BridgeErrorInput, BridgeProcessStreamName, BridgeStreamDone, ForwardBridgeProcessStreamOptions,
+    LogBridgeErrorOptions, create_bridge_error_handler, create_bridge_startup_error,
+    drain_bridge_process_stream, format_bridge_error, forward_bridge_process_stream,
+    log_bridge_error,
+};
+pub use bridge_endpoint::*;
+pub use bridge_ready::*;
+pub use classify_disk_log::*;
 pub use credential_forwarding::*;
 pub use extract_harness_prompt_content::{
     HarnessPromptContent, HarnessPromptContentPart, extract_harness_prompt_content,
