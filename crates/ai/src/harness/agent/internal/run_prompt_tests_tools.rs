@@ -10,7 +10,7 @@ use crate::harness::sdk::tool::ToModelOutputOptions;
 // ─── helpers ───────────────────────────────────────────────────────────
 
 /// A submitted result as TS `toEqual` sees it (undefined keys dropped).
-pub(super) fn submitted_json(submission: &HarnessV1SubmitToolResult) -> JsonValue {
+pub(crate) fn submitted_json(submission: &HarnessV1SubmitToolResult) -> JsonValue {
     let mut value = json!({ "toolCallId": submission.tool_call_id, "output": submission.output });
     if let Some(is_error) = submission.is_error {
         value["isError"] = json!(is_error);
@@ -25,15 +25,15 @@ pub(super) fn submitted_json(submission: &HarnessV1SubmitToolResult) -> JsonValu
     value
 }
 
-pub(super) fn submitted_list(log: &Mutex<Vec<HarnessV1SubmitToolResult>>) -> Vec<JsonValue> {
+pub(crate) fn submitted_list(log: &Mutex<Vec<HarnessV1SubmitToolResult>>) -> Vec<JsonValue> {
     log.lock().iter().map(submitted_json).collect()
 }
 
 /// Inputs a tool's `execute` received.
-pub(super) type Calls = Arc<Mutex<Vec<JsonValue>>>;
+pub(crate) type Calls = Arc<Mutex<Vec<JsonValue>>>;
 
 /// A tool whose `execute` records its input and returns `output(input)`.
-pub(super) fn recording_tool(
+pub(crate) fn recording_tool(
     schema: Schema,
     output: impl Fn(&JsonValue) -> HarnessResult<JsonValue> + Send + Sync + 'static,
 ) -> (Tool, Calls) {
@@ -50,14 +50,14 @@ pub(super) fn recording_tool(
 
 /// A schema with a custom validator (zod refinements, transforms and
 /// defaults).
-pub(super) fn custom_schema(
+pub(crate) fn custom_schema(
     validate: impl Fn(&JsonValue) -> Result<JsonValue, String> + Send + Sync + 'static,
 ) -> Schema {
     json_schema(json!({ "type": "object" }))
         .with_validate(move |value| validate(value).map_err(Into::into))
 }
 
-pub(super) fn pending_result(
+pub(crate) fn pending_result(
     tool_call_id: &str,
     tool_name: &str,
     input: &str,
@@ -71,7 +71,7 @@ pub(super) fn pending_result(
     }
 }
 
-pub(super) fn custom_approval(
+pub(crate) fn custom_approval(
     approval_id: &str,
     tool_call_id: &str,
     tool_name: &str,
@@ -88,11 +88,11 @@ pub(super) fn custom_approval(
     .unwrap()
 }
 
-pub(super) fn approval_config(value: JsonValue) -> HarnessAgentToolApprovalConfiguration {
+pub(crate) fn approval_config(value: JsonValue) -> HarnessAgentToolApprovalConfiguration {
     serde_json::from_value(value).unwrap()
 }
 
-pub(super) fn approval_response(approval_id: &str, approved: bool) -> ToolApprovalResponse {
+pub(crate) fn approval_response(approval_id: &str, approved: bool) -> ToolApprovalResponse {
     ToolApprovalResponse {
         approval_id: approval_id.into(),
         approved,
@@ -103,7 +103,7 @@ pub(super) fn approval_response(approval_id: &str, approved: bool) -> ToolApprov
 
 /// `runHostToolScript`: run a scripted turn and record what the control
 /// was asked to submit.
-pub(super) async fn run_host_tool_script(
+pub(crate) async fn run_host_tool_script(
     events: Vec<HarnessV1StreamPart>,
     tools: ToolSet,
     configure: impl FnOnce(&mut RunPromptInput),

@@ -2503,4 +2503,4 @@ fn prompt_to_text(prompt: &HarnessV1Prompt) -> String {
 
 #[cfg(test)]
 #[path = "run_prompt_tests.rs"]
-mod tests;
+pub(crate) mod tests;

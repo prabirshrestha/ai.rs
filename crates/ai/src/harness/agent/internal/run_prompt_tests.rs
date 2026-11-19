@@ -21,7 +21,7 @@ use crate::harness::spec::literal::HarnessV1SpecificationVersion;
 use crate::harness::spec::tools::HarnessV1BuiltinTool;
 use crate::harness::test_support::MockSandbox;
 
-pub(super) const WORK_DIR: &str = "/vercel/sandbox/claude-code-abc123";
+pub(crate) const WORK_DIR: &str = "/vercel/sandbox/claude-code-abc123";
 
 // ─── zod stand-ins ─────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ pub(super) const WORK_DIR: &str = "/vercel/sandbox/claude-code-abc123";
 /// `string`, `number`, `boolean`, `array`, `object`, `any`, or
 /// `enum:a|b`; a trailing `?` makes it optional. Unknown keys are stripped,
 /// as zod does.
-pub(super) fn z_object(fields: &[(&str, &str)]) -> Schema {
+pub(crate) fn z_object(fields: &[(&str, &str)]) -> Schema {
     let fields: Vec<(String, String)> = fields
         .iter()
         .map(|(n, t)| (n.to_string(), t.to_string()))
@@ -92,11 +92,11 @@ pub(super) fn z_object(fields: &[(&str, &str)]) -> Schema {
     })
 }
 
-pub(super) fn tool(fields: &[(&str, &str)]) -> Tool {
+pub(crate) fn tool(fields: &[(&str, &str)]) -> Tool {
     Tool::new(z_object(fields))
 }
 
-pub(super) fn tools(entries: Vec<(&str, Tool)>) -> ToolSet {
+pub(crate) fn tools(entries: Vec<(&str, Tool)>) -> ToolSet {
     entries
         .into_iter()
         .map(|(n, t)| (n.to_string(), t))
@@ -105,7 +105,7 @@ pub(super) fn tools(entries: Vec<(&str, Tool)>) -> ToolSet {
 
 // ─── fakes ─────────────────────────────────────────────────────────────
 
-pub(super) struct FakeHarness {
+pub(crate) struct FakeHarness {
     pub id: String,
     pub builtin_tools: IndexMap<String, HarnessV1BuiltinTool>,
     pub supports_builtin_tool_approvals: bool,
@@ -158,20 +158,20 @@ impl HarnessV1 for FakeHarness {
     }
 }
 
-pub(super) type SubmitFn = Arc<
+pub(crate) type SubmitFn = Arc<
     dyn Fn(HarnessV1SubmitToolResult, HarnessV1Emit) -> BoxFuture<'static, HarnessResult<()>>
         + Send
         + Sync,
 >;
-pub(super) type ApprovalFn = Arc<
+pub(crate) type ApprovalFn = Arc<
     dyn Fn(HarnessV1SubmitToolApproval, HarnessV1Emit) -> BoxFuture<'static, HarnessResult<()>>
         + Send
         + Sync,
 >;
-pub(super) type TurnFn = Arc<dyn Fn(HarnessV1Emit) + Send + Sync>;
+pub(crate) type TurnFn = Arc<dyn Fn(HarnessV1Emit) + Send + Sync>;
 
 /// A scripted `HarnessV1PromptControl`.
-pub(super) struct FakeControl {
+pub(crate) struct FakeControl {
     emit: HarnessV1Emit,
     on_submit: Option<SubmitFn>,
     on_approval: Option<ApprovalFn>,
@@ -203,7 +203,7 @@ impl HarnessV1PromptControl for FakeControl {
 
 /// `fakeSession(script, onSubmitToolResult)` and the ad-hoc sessions.
 #[derive(Clone)]
-pub(super) struct FakeSession {
+pub(crate) struct FakeSession {
     pub id: String,
     /// Emitted right after the turn starts.
     pub script: Vec<HarnessV1StreamPart>,
@@ -300,7 +300,7 @@ impl FakeSession {
     }
 }
 
-pub(super) fn continue_state() -> HarnessV1ContinueTurnState {
+pub(crate) fn continue_state() -> HarnessV1ContinueTurnState {
     HarnessV1ContinueTurnState {
         r#type: ContinueTurnType,
         harness_id: "fake".into(),
@@ -312,7 +312,7 @@ pub(super) fn continue_state() -> HarnessV1ContinueTurnState {
     }
 }
 
-pub(super) fn resume_state() -> HarnessV1ResumeSessionState {
+pub(crate) fn resume_state() -> HarnessV1ResumeSessionState {
     HarnessV1ResumeSessionState {
         r#type: ResumeSessionType,
         harness_id: "fake".into(),
@@ -365,51 +365,51 @@ impl HarnessV1Session for FakeSession {
 
 // ─── helpers ───────────────────────────────────────────────────────────
 
-pub(super) fn p(value: JsonValue) -> HarnessV1StreamPart {
+pub(crate) fn p(value: JsonValue) -> HarnessV1StreamPart {
     HarnessV1StreamPart::parse(value).expect("valid stream part")
 }
 
-pub(super) fn parts(values: Vec<JsonValue>) -> Vec<HarnessV1StreamPart> {
+pub(crate) fn parts(values: Vec<JsonValue>) -> Vec<HarnessV1StreamPart> {
     values.into_iter().map(p).collect()
 }
 
-pub(super) fn empty_usage() -> JsonValue {
+pub(crate) fn empty_usage() -> JsonValue {
     json!({ "inputTokens": {}, "outputTokens": {} })
 }
 
 /// `finishEvents`.
-pub(super) fn finish_events() -> Vec<HarnessV1StreamPart> {
+pub(crate) fn finish_events() -> Vec<HarnessV1StreamPart> {
     parts(vec![
         json!({ "type": "finish-step", "finishReason": { "unified": "stop", "raw": "end_turn" }, "usage": empty_usage() }),
         json!({ "type": "finish", "finishReason": { "unified": "stop", "raw": "end_turn" }, "totalUsage": empty_usage() }),
     ])
 }
 
-pub(super) fn finish_step() -> HarnessV1StreamPart {
+pub(crate) fn finish_step() -> HarnessV1StreamPart {
     finish_events().remove(0)
 }
 
-pub(super) fn finish() -> HarnessV1StreamPart {
+pub(crate) fn finish() -> HarnessV1StreamPart {
     finish_events().remove(1)
 }
 
 /// `resumableFinishStep`.
-pub(super) fn resumable_finish_step() -> HarnessV1StreamPart {
+pub(crate) fn resumable_finish_step() -> HarnessV1StreamPart {
     p(
         json!({ "type": "finish-step", "finishReason": { "unified": "tool-calls", "raw": "tool_use" }, "usage": empty_usage() }),
     )
 }
 
-pub(super) fn with_finish(mut script: Vec<HarnessV1StreamPart>) -> Vec<HarnessV1StreamPart> {
+pub(crate) fn with_finish(mut script: Vec<HarnessV1StreamPart>) -> Vec<HarnessV1StreamPart> {
     script.extend(finish_events());
     script
 }
 
-pub(super) fn sandbox() -> Arc<dyn SandboxSession> {
+pub(crate) fn sandbox() -> Arc<dyn SandboxSession> {
     Arc::new(MockSandbox::new(|_, _| Err("sandbox not used".into())))
 }
 
-pub(super) fn base_input(
+pub(crate) fn base_input(
     harness: Arc<dyn HarnessV1>,
     session: FakeSession,
     tools: ToolSet,
@@ -420,12 +420,12 @@ pub(super) fn base_input(
     input
 }
 
-pub(super) fn fake_harness() -> Arc<dyn HarnessV1> {
+pub(crate) fn fake_harness() -> Arc<dyn HarnessV1> {
     FakeHarness::new("fake")
 }
 
 /// Drain `fullStream` as JSON, then await `done`.
-pub(super) async fn collect(output: &RunPromptOutput) -> Vec<JsonValue> {
+pub(crate) async fn collect(output: &RunPromptOutput) -> Vec<JsonValue> {
     let parts: Vec<JsonValue> = output
         .result
         .full_stream()
@@ -436,7 +436,7 @@ pub(super) async fn collect(output: &RunPromptOutput) -> Vec<JsonValue> {
     parts
 }
 
-pub(super) async fn run_collect(input: RunPromptInput) -> (Vec<JsonValue>, RunPromptOutput) {
+pub(crate) async fn run_collect(input: RunPromptInput) -> (Vec<JsonValue>, RunPromptOutput) {
     let output = run_prompt(input);
     let parts = tokio::time::timeout(Duration::from_secs(10), collect(&output))
         .await
@@ -446,7 +446,7 @@ pub(super) async fn run_collect(input: RunPromptInput) -> (Vec<JsonValue>, RunPr
 
 /// `expect.objectContaining` / `toMatchObject`: every key of `expected`
 /// matches, recursively for objects; arrays match element-wise.
-pub(super) fn matches(actual: &JsonValue, expected: &JsonValue) -> bool {
+pub(crate) fn matches(actual: &JsonValue, expected: &JsonValue) -> bool {
     match (actual, expected) {
         (JsonValue::Object(a), JsonValue::Object(e)) => e
             .iter()
@@ -458,26 +458,26 @@ pub(super) fn matches(actual: &JsonValue, expected: &JsonValue) -> bool {
     }
 }
 
-pub(super) fn contains_matching(parts: &[JsonValue], expected: JsonValue) -> bool {
+pub(crate) fn contains_matching(parts: &[JsonValue], expected: JsonValue) -> bool {
     parts.iter().any(|p| matches(p, &expected))
 }
 
-pub(super) fn of_type<'a>(parts: &'a [JsonValue], ty: &str) -> Vec<&'a JsonValue> {
+pub(crate) fn of_type<'a>(parts: &'a [JsonValue], ty: &str) -> Vec<&'a JsonValue> {
     parts.iter().filter(|p| p["type"] == ty).collect()
 }
 
-pub(super) fn types(parts: &[JsonValue]) -> Vec<String> {
+pub(crate) fn types(parts: &[JsonValue]) -> Vec<String> {
     parts
         .iter()
         .map(|p| p["type"].as_str().unwrap_or_default().to_string())
         .collect()
 }
 
-pub(super) fn to_json<T: serde::Serialize>(value: &T) -> JsonValue {
+pub(crate) fn to_json<T: serde::Serialize>(value: &T) -> JsonValue {
     serde_json::to_value(value).unwrap()
 }
 
-pub(super) async fn wait_for(mut check: impl FnMut() -> bool) {
+pub(crate) async fn wait_for(mut check: impl FnMut() -> bool) {
     for _ in 0..500 {
         if check() {
             return;
@@ -489,7 +489,7 @@ pub(super) async fn wait_for(mut check: impl FnMut() -> bool) {
 
 /// A gate a test opens later.
 #[derive(Clone, Default)]
-pub(super) struct Gate {
+pub(crate) struct Gate {
     open: Arc<std::sync::atomic::AtomicBool>,
     notify: Arc<Notify>,
 }
@@ -510,9 +510,9 @@ impl Gate {
     }
 }
 
-pub(super) type Log = Arc<Mutex<Vec<String>>>;
+pub(crate) type Log = Arc<Mutex<Vec<String>>>;
 
-pub(super) fn index_of(events: &[String], event: &str) -> usize {
+pub(crate) fn index_of(events: &[String], event: &str) -> usize {
     events
         .iter()
         .position(|e| e == event)
@@ -1106,7 +1106,7 @@ async fn forwards_a_raw_part_that_arrives_right_after_the_step_a_stop_condition_
 mod steps;
 
 #[path = "run_prompt_tests_tools.rs"]
-mod tool_outputs;
+pub(crate) mod tool_outputs;
 
 #[path = "run_prompt_tests_generators.rs"]
 mod generators;

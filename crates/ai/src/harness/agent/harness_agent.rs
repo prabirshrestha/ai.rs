@@ -1093,3 +1093,7 @@ impl HarnessGenerateTextResult {
         self.final_step().provider_metadata.clone()
     }
 }
+
+#[cfg(test)]
+#[path = "harness_agent_tests.rs"]
+mod tests;
