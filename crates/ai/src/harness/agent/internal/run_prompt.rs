@@ -2504,3 +2504,11 @@ fn prompt_to_text(prompt: &HarnessV1Prompt) -> String {
 #[cfg(test)]
 #[path = "run_prompt_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "denied_tool_output_tests.rs"]
+mod denied_tool_output_tests;
+
+#[cfg(test)]
+#[path = "validate_tool_call_tests.rs"]
+mod validate_tool_call_tests;
