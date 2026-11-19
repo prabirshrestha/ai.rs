@@ -3,6 +3,8 @@
 pub mod builtin_catalog;
 #[cfg(feature = "harness-claude-code")]
 pub mod claude_code;
+#[cfg(feature = "harness-codex")]
+pub mod codex;
 pub mod host_tools;
 #[cfg(any(feature = "harness-native", feature = "harness-pi"))]
 pub mod loop_session;
