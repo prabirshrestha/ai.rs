@@ -76,6 +76,7 @@ impl Provider for Anthropic {
             language_models: true,
             image_models: false,
             embedding_models: false,
+            classifier_models: false,
         }
     }
 

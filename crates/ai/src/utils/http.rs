@@ -21,13 +21,24 @@ where
         options.cancellation_token.as_ref(),
         options.max_retries,
         options.max_retry_delay_ms,
+        &[],
         &mut build,
     )
     .await
 }
 
-pub async fn send_request_with_retries<F>(
+pub async fn send_request_with_retries<F>(options: &RequestOptions, build: F) -> Result<Response>
+where
+    F: FnMut() -> RequestBuilder,
+{
+    send_request_with_retries_except(options, &[], build).await
+}
+
+/// Like [`send_request_with_retries`], but a response with one of
+/// `no_retry_statuses` is returned at once, although it would be retried.
+pub async fn send_request_with_retries_except<F>(
     options: &RequestOptions,
+    no_retry_statuses: &[u16],
     mut build: F,
 ) -> Result<Response>
 where
@@ -37,6 +48,7 @@ where
         options.cancellation_token.as_ref(),
         options.max_retries,
         options.max_retry_delay_ms,
+        no_retry_statuses,
         &mut build,
     )
     .await
@@ -46,6 +58,7 @@ async fn send_with_retry_config<F>(
     cancellation_token: Option<&tokio_util::sync::CancellationToken>,
     max_retries: Option<u32>,
     max_retry_delay_ms: Option<u64>,
+    no_retry_statuses: &[u16],
     build: &mut F,
 ) -> Result<Response>
 where
@@ -70,7 +83,11 @@ where
         };
 
         match result {
-            Ok(response) if attempt < max_retries && is_retryable_response(&response) => {
+            Ok(response)
+                if attempt < max_retries
+                    && is_retryable_response(&response)
+                    && !no_retry_statuses.contains(&response.status().as_u16()) =>
+            {
                 let delay_ms = match retry_delay_ms(response.headers(), attempt, max_retry_delay_ms)
                 {
                     Ok(delay_ms) => delay_ms,

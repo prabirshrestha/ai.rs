@@ -16,6 +16,7 @@ bytes.workspace = true
 dyn-clone.workspace = true
 futures.workspace = true
 httpdate.workspace = true
+indexmap.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
 regex.workspace = true

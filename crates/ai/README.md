@@ -19,6 +19,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
   - [Basic Image Generation](#basic-image-generation)
   - [Notes and Limitations](#notes-and-limitations)
 - [Embeddings](#embeddings)
+- [Classification](#classification)
 - [Thinking/Reasoning](#thinkingreasoning)
   - [Unified Interface](#unified-interface-streamsimplecompletesimple)
   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
@@ -96,6 +97,10 @@ The active built-in image generation APIs are:
 
 The active built-in embedding API is `openai-embeddings`, available through
 OpenAI-compatible and GitHub Copilot provider handles.
+
+The active built-in classifier APIs are `openai-decisions` and
+`typesafe-system-one`, available through OpenAI-compatible and GitHub Copilot
+provider handles.
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
 `github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
@@ -638,6 +643,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Classification
+
+`classify` answers typed questions about a JSON state, and optionally images,
+with a classifier model. It is a port of Pi's `classify()`: the same context,
+questions, answers and result.
+
+- A question is `choice` (pick one key of `criteria`), `score` (a level of
+  `criteria`, from 0) or `bool` (the probability of true).
+- Answers come back keyed by the question IDs, in the same order.
+- `classify` never returns `Err`. A failure is a result with `stop_reason`
+  `error` (or `aborted`) and an `error_message`. `usage` stays on a failed
+  result when the service billed the request.
+- Only a model whose `input` has `ModelInput::Image` takes images.
+
+```rust
+use ai::{
+    ClassifierContext, ClassifierQuestion, ImageContent, classify,
+    providers::github_copilot::GitHubCopilot,
+};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> ai::Result<()> {
+    let copilot = GitHubCopilot::builder().api_key("<token>").build()?;
+    let model = copilot
+        .decisions_classifier_model("gpt-6-luna-decisions")
+        .build_classifier()?;
+
+    let context = ClassifierContext::from_state(json!({
+        "ticket": "I was charged twice. Fix it now!"
+    }))?
+    .question(
+        "route",
+        ClassifierQuestion::choice(
+            "Which team should take this ticket?",
+            [("billing", "Payments and refunds"), ("shipping", "Deliveries")],
+        ),
+    )
+    .question(
+        "angry",
+        ClassifierQuestion::bool("Is the customer angry?", "angry or upset", "calm"),
+    )
+    .question(
+        "urgency",
+        ClassifierQuestion::score("How urgent is it?", ["can wait", "today", "right now"]),
+    );
+
+    let result = classify(model.clone(), context, None).await;
+    if let Some(error) = &result.error_message {
+        eprintln!("{error}");
+    }
+    println!(
+        "route={:?} angry={:?} urgency={:?}",
+        result.choice("route"),
+        result.probability("angry"),
+        result.score("urgency")
+    );
+
+    let image = ClassifierContext::default()
+        .image(ImageContent {
+            data: "<base64 PNG>".to_string(),
+            mime_type: "image/png".to_string(),
+        })
+        .question(
+            "color",
+            ClassifierQuestion::choice("What color is it?", [("red", ""), ("blue", "")]),
+        );
+    println!("{:?}", classify(model, image, None).await.choice("color"));
+    Ok(())
+}
+```
+
+### Classifier APIs
+
+| API | Handle | Endpoint |
+| --- | --- | --- |
+| `openai-decisions` | `openai.classifier_model(id)` | `{base_url}/decisions` |
+| `openai-decisions` | `github_copilot.decisions_classifier_model(id)` | `/v1/decisions` |
+| `typesafe-system-one` | `openai.system_one_classifier_model(id)` | `{base_url}/systemone` |
+| `typesafe-system-one` | `github_copilot.classifier_model(id)` | `/v1/systemone` |
+
+- `openai-decisions` sends the state as JSON text, or with images as one user
+  message: `input_text` then `input_image` data URLs (at most 128). `bool` goes
+  as `predicate`, with `True means:` and `False means:` added to the
+  instructions. A refusal fails the whole result. A 504 is not retried.
+- `typesafe-system-one` sends `{ model, state, questions }` with `bool` as
+  `noul`. `compat.system_one.image_input` picks the image form: `assets`
+  (TypeSafe, the default, with the `TypeSafe-Danger-Zone-Images: true`
+  header), `images` (Clef data URLs) or `state-image-urls` (OpenRouter, picked
+  for the `openrouter` provider or an `openrouter.ai` base URL).
+  `compat.system_one.send_image_opt_in_header` sets the header. An empty
+  meaning is left out (a choice's becomes `null`): Copilot's System One
+  rejects empty strings.
+- On GitHub Copilot, `/models` lists the endpoint each classifier serves in
+  `supported_endpoints`: `microsoft-decision-1` is on `/v1/systemone` and takes
+  text only, as in Pi. `decisions_classifier_model("gpt-6-luna-decisions")` is
+  an addition beyond Pi: Copilot serves it on `/v1/decisions` (the base URL
+  plus `/v1`). Checked live on 2026-11-18, it reads text and images, and
+  answers 400 to `box` questions.
+- `llama-server` serves System One at `/v1/systemone`: use
+  `openai::builder().base_url("http://127.0.0.1:8080/v1")` and
+  `system_one_classifier_model`. A custom base URL needs no API key.
+- Requests retry twice by default. `temperature` in `ClassifierOptions` is
+  ignored by both APIs.
 
 ## Thinking/Reasoning
 

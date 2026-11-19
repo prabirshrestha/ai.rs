@@ -272,7 +272,7 @@ fn insert_common_options(payload: &mut Map<String, Value>, options: &EmbeddingOp
     }
 }
 
-fn build_headers(
+pub(crate) fn build_headers(
     api_key: Option<&str>,
     model_headers: &std::collections::HashMap<String, String>,
     option_headers: &crate::types::ProviderHeaders,

@@ -84,6 +84,8 @@ pub enum KnownApi {
     OpenaiImages,
     AnthropicMessages,
     OpenrouterImages,
+    OpenaiDecisions,
+    TypesafeSystemOne,
 }
 
 impl KnownApi {
@@ -95,6 +97,8 @@ impl KnownApi {
             Self::OpenaiImages => "openai-images",
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenrouterImages => "openrouter-images",
+            Self::OpenaiDecisions => "openai-decisions",
+            Self::TypesafeSystemOne => "typesafe-system-one",
         }
     }
 }
@@ -1499,6 +1503,8 @@ pub struct Model {
     pub(crate) image_api: Option<Arc<dyn crate::provider::ImageModelApi>>,
     #[serde(skip)]
     pub(crate) embedding_api: Option<Arc<dyn EmbeddingModelApi>>,
+    #[serde(skip)]
+    pub(crate) classifier_api: Option<Arc<dyn crate::provider::ClassifierModelApi>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1580,6 +1586,10 @@ impl Model {
     pub fn embedding_api(&self) -> Option<Arc<dyn EmbeddingModelApi>> {
         self.embedding_api.clone()
     }
+
+    pub fn classifier_api(&self) -> Option<Arc<dyn crate::provider::ClassifierModelApi>> {
+        self.classifier_api.clone()
+    }
 }
 
 impl From<&Model> for ModelRef {
@@ -1602,6 +1612,37 @@ pub struct ModelCompat {
     pub anthropic_messages: AnthropicMessagesCompat,
     #[serde(flatten)]
     pub openai_embeddings: OpenAIEmbeddingsCompat,
+    #[serde(flatten)]
+    pub system_one: SystemOneCompat,
+}
+
+/// Compatibility settings for System One classifier APIs. Unset fields are
+/// detected from the provider, base URL, and model ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOneCompat {
+    /// How the service takes classifier images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<SystemOneImageInput>,
+    /// Whether requests with images send the `TypeSafe-Danger-Zone-Images:
+    /// true` header, which TypeSafe's own API requires for its experimental
+    /// image input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_image_opt_in_header: Option<bool>,
+}
+
+/// How a System One service takes classifier images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SystemOneImageInput {
+    /// TypeSafe's `assets` map (PNG and JPEG), referenced from the state.
+    #[serde(rename = "assets")]
+    Assets,
+    /// Clef's `images` list of data URLs (PNG, JPEG, and WebP, at most four).
+    #[serde(rename = "images")]
+    Images,
+    /// `image_url` parts placed before the state, as OpenRouter expects.
+    #[serde(rename = "state-image-urls")]
+    StateImageUrls,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2396,8 +2437,14 @@ mod tests {
                 ..Default::default()
             },
             openai_embeddings: OpenAIEmbeddingsCompat::default(),
+            system_one: SystemOneCompat {
+                image_input: Some(SystemOneImageInput::StateImageUrls),
+                send_image_opt_in_header: Some(false),
+            },
         };
         let value = serde_json::to_value(&compat).unwrap();
+        assert_eq!(value["imageInput"], json!("state-image-urls"));
+        assert_eq!(value["sendImageOptInHeader"], json!(false));
         assert_eq!(value["deferredToolsMode"], json!("kimi"));
         assert_eq!(value["supportsToolSearch"], json!(true));
         assert_eq!(value["supportsToolReferences"], json!(true));
