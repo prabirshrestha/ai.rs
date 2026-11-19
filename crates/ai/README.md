@@ -98,9 +98,9 @@ The active built-in image generation APIs are:
 The active built-in embedding API is `openai-embeddings`, available through
 OpenAI-compatible and GitHub Copilot provider handles.
 
-The active built-in classifier APIs are `openai-decisions` and
-`typesafe-system-one`, available through OpenAI-compatible and GitHub Copilot
-provider handles.
+The active built-in classifier APIs are `openai-decisions`,
+`typesafe-system-one` and `llama-cpp-classify`, available through
+OpenAI-compatible and GitHub Copilot provider handles.
 
 The active built-in provider handles are focused on `openai`, `anthropic`, and
 `github_copilot` for chat, plus `openai` and `openrouter` for image generation. Azure
@@ -724,6 +724,7 @@ async fn main() -> ai::Result<()> {
 | `openai-decisions` | `github_copilot.decisions_classifier_model(id)` | `/v1/decisions` |
 | `typesafe-system-one` | `openai.system_one_classifier_model(id)` | `{base_url}/systemone` |
 | `typesafe-system-one` | `github_copilot.classifier_model(id)` | `/v1/systemone` |
+| `llama-cpp-classify` | `openai.llama_cpp_classifier_model(id)` | `/tokenize`, `/apply-template`, `/completion` |
 
 - `openai-decisions` sends the state as JSON text, or with images as one user
   message: `input_text` then `input_image` data URLs (at most 128). `bool` goes
@@ -746,8 +747,17 @@ async fn main() -> ai::Result<()> {
 - `llama-server` serves System One at `/v1/systemone`: use
   `openai::builder().base_url("http://127.0.0.1:8080/v1")` and
   `system_one_classifier_model`. A custom base URL needs no API key.
+- `llama-cpp-classify` makes a classifier from a chat model on `llama-server`.
+  Each question is one prompt that lists its answers under single-token
+  labels (letters for a choice, `Yes`/`No` for a bool, digits for a score);
+  the answer is the softmax over the labels' next-token log-probabilities.
+  The prompt up to the last question is the same for every question, so the
+  server's prompt cache reads the state once. A choice takes 2 to 62 options
+  and a score 2 to 10 levels. It takes text only. A trailing `/v1` on the base
+  URL is dropped, and in router mode the model ID picks the model. Raw label
+  probabilities are often overconfident: a `temperature` above 1 softens them.
 - Requests retry twice by default. `temperature` in `ClassifierOptions` is
-  ignored by both APIs.
+  used only by `llama-cpp-classify`.
 
 ## Thinking/Reasoning
 

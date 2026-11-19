@@ -86,6 +86,7 @@ pub enum KnownApi {
     OpenrouterImages,
     OpenaiDecisions,
     TypesafeSystemOne,
+    LlamaCppClassify,
 }
 
 impl KnownApi {
@@ -99,6 +100,7 @@ impl KnownApi {
             Self::OpenrouterImages => "openrouter-images",
             Self::OpenaiDecisions => "openai-decisions",
             Self::TypesafeSystemOne => "typesafe-system-one",
+            Self::LlamaCppClassify => "llama-cpp-classify",
         }
     }
 }

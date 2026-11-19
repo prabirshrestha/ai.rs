@@ -5,6 +5,7 @@ pub(crate) mod deferred_tools;
 pub mod faux;
 pub mod github_copilot;
 pub(crate) mod github_copilot_headers;
+pub(crate) mod llama_cpp_classify;
 pub mod openai;
 pub mod openai_completions;
 pub(crate) mod openai_decisions;
@@ -24,3 +25,7 @@ mod deferred_tools_tests;
 #[cfg(test)]
 #[path = "classifier_tests.rs"]
 mod classifier_tests;
+
+#[cfg(test)]
+#[path = "llama_cpp_classify_tests.rs"]
+mod llama_cpp_classify_tests;
