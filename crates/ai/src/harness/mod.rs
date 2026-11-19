@@ -22,6 +22,10 @@ pub mod provider;
 pub mod sandbox;
 pub mod sdk;
 pub mod spec;
+pub mod utils;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use errors::*;
 pub use spec::*;
