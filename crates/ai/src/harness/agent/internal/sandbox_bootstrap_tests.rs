@@ -23,6 +23,7 @@ fn recipe() -> HarnessV1Bootstrap {
 }
 
 type RunRecord = (String, Option<Vec<(String, String)>>);
+type HookCalls = Arc<Mutex<Vec<(String, usize)>>>;
 
 fn make_session() -> (MockSandbox, Arc<Mutex<Vec<RunRecord>>>) {
     let runs: Arc<Mutex<Vec<RunRecord>>> = Arc::default();
@@ -53,8 +54,8 @@ fn make_session() -> (MockSandbox, Arc<Mutex<Vec<RunRecord>>>) {
 /// runs before it.
 fn recording_hook(
     runs: Arc<Mutex<Vec<RunRecord>>>,
-) -> (OnBootstrapFn, Arc<Mutex<Vec<(String, usize)>>>) {
-    let calls: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
+) -> (OnBootstrapFn, HookCalls) {
+    let calls: HookCalls = Arc::default();
     let recorded = calls.clone();
     let hook: OnBootstrapFn = Arc::new(move |o| {
         recorded

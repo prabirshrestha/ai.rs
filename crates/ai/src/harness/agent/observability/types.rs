@@ -84,7 +84,7 @@ pub struct HarnessDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Milliseconds since the epoch.
-    pub timestamp: u64,
+    pub timestamp: i64,
 }
 
 /// `HarnessDiagnosticConsumer`.

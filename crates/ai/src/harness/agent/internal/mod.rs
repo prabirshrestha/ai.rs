@@ -9,11 +9,14 @@ pub mod lifecycle_state_validation;
 pub mod on_bootstrap_marker;
 pub mod permission_mode;
 pub mod prepared_sandbox_identity;
+pub mod resolve_observability;
 pub mod sandbox_bootstrap;
 pub mod sandbox_operations;
 pub mod strip_work_dir;
+pub mod to_harness_stream;
 pub mod tool_filtering;
 pub mod translate_stream_part;
+pub mod turn_telemetry;
 
 /// SHA-256 of `\0`-terminated strings (the `pushString` pattern), as hex
 /// of the first `bytes` digest bytes.

@@ -195,7 +195,7 @@ pub fn translate_stream_part(
             )
         }
         H::Error { error } => vec![TextStreamPart::Error {
-            error: ErrorValue::Value(error.clone()),
+            error: error.clone(),
         }],
         H::Raw { raw_value } => vec![TextStreamPart::Raw {
             raw_value: raw_value.clone(),

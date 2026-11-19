@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::harness::sdk::error_value::ErrorValue;
+
 use crate::harness::provider::{
     JsonObject, JsonValue, LanguageModelV4FinishReason, LanguageModelV4Usage,
     SharedV4ProviderMetadata, TypeValidationError, parse_json,
@@ -195,15 +197,22 @@ pub enum HarnessV1StreamPart {
         harness_metadata: Option<HarnessV1Metadata>,
     },
     /// Errors. Multiple may be emitted in a single turn. `error: unknown`.
+    ///
+    /// [rust] An [`ErrorValue`]: adapters can emit an `Error` instance, and
+    /// parsed JSON becomes [`ErrorValue::Value`].
     Error {
-        #[serde(default)]
-        error: JsonValue,
+        #[serde(default = "null_error")]
+        error: ErrorValue,
     },
     /// Adapter-specific passthrough. `rawValue: unknown`.
     Raw {
         #[serde(default)]
         raw_value: JsonValue,
     },
+}
+
+fn null_error() -> ErrorValue {
+    ErrorValue::Value(JsonValue::Null)
 }
 
 impl HarnessV1StreamPart {
