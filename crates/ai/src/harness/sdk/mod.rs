@@ -13,6 +13,7 @@ pub mod stop_condition;
 pub mod telemetry;
 pub mod text_stream_part;
 pub mod tool;
+pub mod tool_approval;
 pub mod usage;
 
 pub use content::*;
@@ -24,6 +25,7 @@ pub use response_messages::*;
 pub use stop_condition::*;
 pub use text_stream_part::*;
 pub use tool::*;
+pub use tool_approval::*;
 pub use usage::*;
 
 /// `error.name` of the AI SDK error classes defined in this module.

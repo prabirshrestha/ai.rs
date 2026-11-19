@@ -3,3 +3,4 @@
 
 pub mod internal;
 pub mod observability;
+pub mod settings;

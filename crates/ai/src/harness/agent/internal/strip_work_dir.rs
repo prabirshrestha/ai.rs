@@ -102,10 +102,18 @@ pub fn strip_work_dir(part: &HarnessV1StreamPart, session_work_dir: &str) -> Har
     }
     let mut part = part.clone();
     match &mut part {
-        HarnessV1StreamPart::ToolInputDelta { delta, .. } => *delta = strip_string(delta, session_work_dir),
-        HarnessV1StreamPart::ToolCall { input, .. } => *input = strip_string(input, session_work_dir),
-        HarnessV1StreamPart::ToolResult { result, .. } => *result = strip_deep(result, session_work_dir),
-        HarnessV1StreamPart::FileChange { path, .. } => *path = strip_string(path, session_work_dir),
+        HarnessV1StreamPart::ToolInputDelta { delta, .. } => {
+            *delta = strip_string(delta, session_work_dir)
+        }
+        HarnessV1StreamPart::ToolCall { input, .. } => {
+            *input = strip_string(input, session_work_dir)
+        }
+        HarnessV1StreamPart::ToolResult { result, .. } => {
+            *result = strip_deep(result, session_work_dir)
+        }
+        HarnessV1StreamPart::FileChange { path, .. } => {
+            *path = strip_string(path, session_work_dir)
+        }
         _ => {}
     }
     part
@@ -125,7 +133,11 @@ pub fn strip_parsed_tool_input_work_dir(value: &JsonValue, session_work_dir: &st
 fn strip_value_iteratively(value: &JsonValue, work_dir: &str) -> JsonValue {
     enum Frame<'a> {
         Array(std::slice::Iter<'a, JsonValue>, Vec<JsonValue>),
-        Object(serde_json::map::Iter<'a>, serde_json::Map<String, JsonValue>, Option<String>),
+        Object(
+            serde_json::map::Iter<'a>,
+            serde_json::Map<String, JsonValue>,
+            Option<String>,
+        ),
     }
     let leaf = |v: &JsonValue| -> Option<JsonValue> {
         match v {
@@ -201,7 +213,12 @@ fn index_of(haystack: &[char], needle: &[char]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn strip_streaming(value: &[char], work_dir: &[char], final_: bool, preceding: Option<char>) -> Stripped {
+fn strip_streaming(
+    value: &[char],
+    work_dir: &[char],
+    final_: bool,
+    preceding: Option<char>,
+) -> Stripped {
     let mut remaining: &[char] = value;
     let mut output: Vec<char> = Vec::new();
     let mut before = preceding;
@@ -217,7 +234,8 @@ fn strip_streaming(value: &[char], work_dir: &[char], final_: bool, preceding: O
                 };
             }
             let next = remaining.get(following).copied();
-            let is_path = boundary && (following == remaining.len() || next == Some('/') || is_path_terminator(next));
+            let is_path = boundary
+                && (following == remaining.len() || next == Some('/') || is_path_terminator(next));
             if !is_path {
                 output.extend_from_slice(&remaining[..following]);
                 before = Some(remaining[following - 1]);
@@ -261,7 +279,11 @@ fn strip_streaming(value: &[char], work_dir: &[char], final_: bool, preceding: O
 }
 
 fn is_path_boundary(value: &[char], index: usize, preceding: Option<char>) -> bool {
-    let c = if index == 0 { preceding } else { Some(value[index - 1]) };
+    let c = if index == 0 {
+        preceding
+    } else {
+        Some(value[index - 1])
+    };
     match c {
         None => true,
         Some(c) => c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '='),
@@ -271,14 +293,22 @@ fn is_path_boundary(value: &[char], index: usize, preceding: Option<char>) -> bo
 fn is_path_terminator(c: Option<char>) -> bool {
     match c {
         None => true,
-        Some(c) => c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ';' | '|' | '&' | '<' | '>' | '(' | ')'),
+        Some(c) => {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\'' | '`' | ';' | '|' | '&' | '<' | '>' | '(' | ')'
+                )
+        }
     }
 }
 
 fn strip_deep(value: &JsonValue, work_dir: &str) -> JsonValue {
     match value {
         JsonValue::String(s) => JsonValue::String(strip_string(s, work_dir)),
-        JsonValue::Array(items) => JsonValue::Array(items.iter().map(|v| strip_deep(v, work_dir)).collect()),
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.iter().map(|v| strip_deep(v, work_dir)).collect())
+        }
         JsonValue::Object(map) => JsonValue::Object(
             map.iter()
                 .map(|(k, v)| (k.clone(), strip_deep(v, work_dir)))

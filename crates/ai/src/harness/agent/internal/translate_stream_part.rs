@@ -16,11 +16,14 @@ pub struct TranslatedToolCallInfo {
     pub provider_executed: Option<bool>,
 }
 
+/// `getToolCall`.
+pub type GetToolCallFn<'a> = dyn Fn(&str) -> Option<TranslatedToolCallInfo> + 'a;
+
 /// `translateStreamPart` options.
 #[derive(Default)]
 pub struct TranslateOptions<'a> {
     /// Returns the parsed tool call that produced a result.
-    pub get_tool_call: Option<&'a (dyn Fn(&str) -> Option<TranslatedToolCallInfo> + 'a)>,
+    pub get_tool_call: Option<&'a GetToolCallFn<'a>>,
     /// Whether the tool call that produced this event ran inside the
     /// harness runtime. Omit to treat every failure as provider-executed.
     pub is_provider_executed: Option<&'a (dyn Fn(&str) -> bool + 'a)>,

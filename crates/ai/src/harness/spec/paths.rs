@@ -85,6 +85,40 @@ pub(crate) fn normalize_posix(path: &str) -> String {
     out
 }
 
+/// `posix.isAbsolute`.
+pub(crate) fn is_absolute_posix(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// `posix.resolve(base, path)` for an absolute `base`.
+pub(crate) fn resolve_posix(base: &str, path: &str) -> String {
+    let joined = if is_absolute_posix(path) {
+        path.to_string()
+    } else {
+        format!("{base}/{path}")
+    };
+    let normalized = normalize_posix(&joined);
+    if normalized.len() > 1 {
+        normalized.trim_end_matches('/').to_string()
+    } else {
+        normalized
+    }
+}
+
+/// `posix.dirname`.
+pub(crate) fn dirname_posix(path: &str) -> String {
+    let trimmed = if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    };
+    match trimmed.rfind('/') {
+        None => ".".into(),
+        Some(0) => "/".into(),
+        Some(i) => trimmed[..i].to_string(),
+    }
+}
+
 /// `harnessSessionDataDirectoryPath({ stateDirectory, sessionId })`:
 /// `<stateDirectory>/.agent-runs/<encoded sessionId>`.
 pub fn harness_session_data_directory_path(state_directory: &str, session_id: &str) -> String {

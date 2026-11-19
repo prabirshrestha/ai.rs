@@ -7,7 +7,10 @@ fn ev(value: JsonValue) -> HarnessV1StreamPart {
 }
 
 fn tr(value: JsonValue) -> Vec<JsonValue> {
-    to_json(translate_stream_part(&ev(value), &TranslateOptions::default()))
+    to_json(translate_stream_part(
+        &ev(value),
+        &TranslateOptions::default(),
+    ))
 }
 
 fn to_json(parts: Vec<TextStreamPart>) -> Vec<JsonValue> {
@@ -65,7 +68,9 @@ fn restores_tool_result_input_and_execution_origin_from_its_tool_call() {
         })
     };
     let out = to_json(translate_stream_part(
-        &ev(json!({"type": "tool-result", "toolCallId": "c1", "toolName": "weather", "result": {"temperature": 72}})),
+        &ev(
+            json!({"type": "tool-result", "toolCallId": "c1", "toolName": "weather", "result": {"temperature": 72}}),
+        ),
         &TranslateOptions {
             get_tool_call: Some(&get),
             ..Default::default()

@@ -115,7 +115,10 @@ fn strips_the_prefix_from_a_tool_input_delta() {
 
 #[test]
 fn strips_every_occurrence_in_free_form_tool_result_string_output() {
-    let out = strip_work_dir(&tool_result(json!(format!("{WORK_DIR}/a.ts\n{WORK_DIR}/b.ts\n"))), WORK_DIR);
+    let out = strip_work_dir(
+        &tool_result(json!(format!("{WORK_DIR}/a.ts\n{WORK_DIR}/b.ts\n"))),
+        WORK_DIR,
+    );
     assert_eq!(result_of(&out), json!("a.ts\nb.ts\n"));
 }
 
@@ -142,7 +145,10 @@ fn strips_paths_nested_in_objects_and_arrays_of_a_tool_result() {
 
 #[test]
 fn maps_a_bare_reference_to_the_work_dir_to_dot() {
-    assert_eq!(path_of(&strip_work_dir(&file_change(WORK_DIR), WORK_DIR)), ".");
+    assert_eq!(
+        path_of(&strip_work_dir(&file_change(WORK_DIR), WORK_DIR)),
+        "."
+    );
 }
 
 #[test]
@@ -152,14 +158,20 @@ fn maps_a_bare_work_dir_followed_by_a_delimiter_to_dot_in_a_complete_value() {
         ("{\"cwd\":\"/work\"}", "{\"cwd\":\".\"}"),
         ("cd /work;pwd", "cd .;pwd"),
     ] {
-        assert_eq!(input_of(&strip_work_dir(&tool_call(input), "/work")), expected);
+        assert_eq!(
+            input_of(&strip_work_dir(&tool_call(input), "/work")),
+            expected
+        );
     }
 }
 
 #[test]
 fn strips_the_prefix_from_a_file_change_path() {
     assert_eq!(
-        path_of(&strip_work_dir(&file_change(&format!("{WORK_DIR}/notes.md")), WORK_DIR)),
+        path_of(&strip_work_dir(
+            &file_change(&format!("{WORK_DIR}/notes.md")),
+            WORK_DIR
+        )),
         "notes.md"
     );
 }
@@ -188,9 +200,18 @@ fn preserves_the_work_dir_text_inside_longer_path_segments() {
 fn preserves_repeated_work_dir_text_after_an_embedded_occurrence() {
     let value = "origin/work/work/foo";
     let streamed = streamed("/work", &[value]);
-    assert_eq!(input_of(&strip_work_dir(&tool_call(value), "/work")), streamed);
-    assert_eq!(result_of(&strip_work_dir(&tool_result(json!(value)), "/work")), json!(streamed));
-    assert_eq!(path_of(&strip_work_dir(&file_change(value), "/work")), streamed);
+    assert_eq!(
+        input_of(&strip_work_dir(&tool_call(value), "/work")),
+        streamed
+    );
+    assert_eq!(
+        result_of(&strip_work_dir(&tool_result(json!(value)), "/work")),
+        json!(streamed)
+    );
+    assert_eq!(
+        path_of(&strip_work_dir(&file_change(value), "/work")),
+        streamed
+    );
     assert_eq!(streamed, value);
 }
 
@@ -210,7 +231,11 @@ fn preserves_embedded_work_dir_text_split_across_tool_input_deltas() {
     assert_eq!(
         streamed(
             "/work",
-            &["{\"command\":\"ls .github/wor", "kflows && cat /wo", "rk/a.ts\"}"]
+            &[
+                "{\"command\":\"ls .github/wor",
+                "kflows && cat /wo",
+                "rk/a.ts\"}"
+            ]
         ),
         "{\"command\":\"ls .github/workflows && cat a.ts\"}"
     );
@@ -241,7 +266,10 @@ fn strips_a_copy_without_modifying_the_validated_input() {
     let display = strip_parsed_tool_input_work_dir(&source, WORK_DIR);
     assert_eq!(display["first"], json!({ "path": "shared.ts" }));
     assert_eq!(display["values"][1][0], json!({ "path": "shared.ts" }));
-    assert_eq!(source["first"]["path"], json!(format!("{WORK_DIR}/shared.ts")));
+    assert_eq!(
+        source["first"]["path"],
+        json!(format!("{WORK_DIR}/shared.ts"))
+    );
 }
 
 #[test]
