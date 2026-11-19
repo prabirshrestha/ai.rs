@@ -714,3 +714,7 @@ impl StreamingUIMessageState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "process_ui_message_stream_tests.rs"]
+mod tests;
