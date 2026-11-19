@@ -10,10 +10,11 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness::adapters::builtin_catalog::load_builtin_tool_catalog;
-use crate::harness::paths::{is_absolute_posix, normalize_posix};
-use crate::harness::sandbox::{SandboxProcessOptions, SandboxRunOptions, SandboxSession};
+use crate::harness::adapters::sandbox_paths::are_paths_inside_roots;
+use crate::harness::paths::is_absolute_posix;
+use crate::harness::sandbox::SandboxSession;
 use crate::harness::tools::{BuiltinTool, BuiltinToolFilter, BuiltinToolKind, PermissionMode};
-use crate::harness::utils::{is_sandbox_write_protected_path, shell_quote};
+use crate::harness::utils::is_sandbox_write_protected_path;
 
 /// The MCP server that serves the caller's tools.
 pub const HOST_TOOL_SERVER: &str = "harness-tools";
@@ -373,65 +374,6 @@ async fn is_write_protected(context: &ApprovalContext<'_>, paths: &[String]) -> 
     .unwrap_or(true)
 }
 
-fn relative_inside(root: &str, candidate: &str) -> bool {
-    let root = root.trim_end_matches('/');
-    let root = if root.is_empty() { "/" } else { root };
-    candidate == root
-        || root == "/"
-        || candidate
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
-/// Resolves paths in the sandbox the way `resolvePermissionPath` does: the
-/// real path of the deepest existing ancestor plus the missing segments.
-/// Prints one line per path, or `!` when it cannot be resolved.
-const RESOLVE_PATHS_SCRIPT: &str = r#"
-resolve() {
-  p=$1; missing=""
-  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
-    seg=${p##*/}; parent=${p%/*}
-    [ -z "$parent" ] && parent=/
-    if [ "$parent" = "$p" ] || [ "$seg" = "." ] || [ "$seg" = ".." ]; then echo '!'; return; fi
-    missing="/$seg$missing"; p=$parent
-  done
-  real=$(realpath "$p" 2>/dev/null || readlink -f "$p" 2>/dev/null) || { echo '!'; return; }
-  [ -z "$real" ] && { echo '!'; return; }
-  [ "$real" = "/" ] && [ -n "$missing" ] && real=""
-  printf '%s%s\n' "$real" "$missing"
-}
-for p in "$@"; do resolve "$p"; done
-"#;
-
-async fn resolve_sandbox_paths(
-    context: &ApprovalContext<'_>,
-    paths: &[String],
-) -> Option<Vec<String>> {
-    let args: Vec<String> = paths.iter().map(|path| shell_quote(path)).collect();
-    let command = format!(
-        "sh -c {} resolve {}",
-        shell_quote(RESOLVE_PATHS_SCRIPT),
-        args.join(" ")
-    );
-    let result = context
-        .sandbox
-        .run(SandboxRunOptions {
-            process: SandboxProcessOptions {
-                command,
-                abort_signal: context.abort.clone(),
-                ..Default::default()
-            },
-            max_output_length: None,
-        })
-        .await
-        .ok()?;
-    if result.exit_code != 0 {
-        return None;
-    }
-    let lines: Vec<String> = result.stdout.lines().map(str::to_string).collect();
-    (lines.len() == paths.len()).then_some(lines)
-}
-
 /// `areFileToolPathsTrusted`: every path stays inside the work dir, an
 /// additional directory or (for reads) a skill root, after symlinks.
 pub(crate) async fn are_file_tool_paths_trusted(
@@ -439,51 +381,24 @@ pub(crate) async fn are_file_tool_paths_trusted(
     paths: &[String],
     access: Access,
 ) -> bool {
-    if paths.is_empty() {
-        return false;
-    }
-    let mut root_inputs = vec![context.work_dir.to_string()];
-    root_inputs.extend(
-        context
-            .additional_directories
-            .iter()
-            .filter(|root| is_absolute_posix(root))
-            .cloned(),
-    );
+    let mut optional_roots: Vec<String> = context
+        .additional_directories
+        .iter()
+        .filter(|root| is_absolute_posix(root))
+        .cloned()
+        .collect();
     if access == Access::Read {
-        root_inputs.extend(context.readable_skill_roots.iter().cloned());
+        optional_roots.extend(context.readable_skill_roots.iter().cloned());
     }
-    let mut candidates = Vec::new();
-    for path in paths {
-        if path.is_empty() || path != path.trim() || path == "~" || path.starts_with("~/") {
-            return false;
-        }
-        if !is_absolute_posix(path) && !is_absolute_posix(context.cwd) {
-            return false;
-        }
-        let absolute = if is_absolute_posix(path) {
-            path.clone()
-        } else {
-            format!("{}/{path}", context.cwd)
-        };
-        let normalized = normalize_posix(&absolute);
-        candidates.push(absolute);
-        candidates.push(normalized);
-    }
-    let mut all = root_inputs.clone();
-    all.extend(candidates.iter().cloned());
-    let Some(resolved) = resolve_sandbox_paths(context, &all).await else {
-        return false;
-    };
-    let (roots, resolved_candidates) = resolved.split_at(root_inputs.len());
-    // The work dir must resolve; other roots are skipped when missing.
-    if roots[0] == "!" {
-        return false;
-    }
-    let roots: Vec<&String> = roots.iter().filter(|root| *root != "!").collect();
-    resolved_candidates.iter().all(|candidate| {
-        candidate != "!" && roots.iter().any(|root| relative_inside(root, candidate))
-    })
+    are_paths_inside_roots(
+        context.sandbox,
+        context.cwd,
+        context.work_dir,
+        &optional_roots,
+        paths,
+        context.abort.clone(),
+    )
+    .await
 }
 
 #[cfg(test)]

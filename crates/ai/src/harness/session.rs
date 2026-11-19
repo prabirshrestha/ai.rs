@@ -252,6 +252,13 @@ impl HarnessTurnSender {
     }
 }
 
+/// [rust] A sender whose events go nowhere, for adapter unit tests.
+#[cfg(test)]
+pub(crate) fn test_turn_sender() -> (HarnessTurnSender, mpsc::UnboundedReceiver<HarnessEvent>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    (HarnessTurnSender { sender }, receiver)
+}
+
 impl HarnessTurn {
     /// Run `run` as a turn. It emits through the sender and returns the
     /// turn's new messages.

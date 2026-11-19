@@ -1,5 +1,7 @@
 //! Harness adapters, each behind its own feature.
 
+#[cfg(feature = "harness-acp")]
+pub mod acp;
 pub mod builtin_catalog;
 #[cfg(feature = "harness-claude-code")]
 pub mod claude_code;
@@ -13,6 +15,7 @@ pub mod mcp_host;
 pub mod native;
 #[cfg(any(feature = "harness-native", feature = "harness-pi"))]
 pub mod pi;
+pub(crate) mod sandbox_paths;
 pub mod stdio_process;
 pub mod turn_builder;
 
