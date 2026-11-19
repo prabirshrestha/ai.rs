@@ -1045,6 +1045,36 @@ impl HarnessStreamTextResult {
         while stream.next().await.is_some() {}
     }
 
+    /// `toUIMessageStream(options)`: the turn as UI message chunks.
+    pub fn to_ui_message_stream(
+        &self,
+        options: crate::harness::sdk::ui_message_stream::UIMessageStreamOptions,
+    ) -> crate::harness::sdk::ui_message_stream::UIMessageStream {
+        crate::harness::sdk::ui_message_stream::to_ui_message_stream(
+            self.stream(),
+            Some(self.inner.tools.clone()),
+            options,
+        )
+    }
+
+    /// `toUIMessageStreamResponse(options)`: the UI message stream as an
+    /// SSE response.
+    ///
+    /// [rust] Fails only on an invalid `keep_alive_ms` (TS throws).
+    pub fn to_ui_message_stream_response(
+        &self,
+        options: crate::harness::sdk::ui_message_stream::UIMessageStreamOptions,
+        init: crate::harness::sdk::ui_message_stream::UIMessageStreamResponseInit,
+    ) -> Result<
+        crate::harness::sdk::ui_message_stream::UIMessageStreamResponse,
+        crate::harness::sdk::ui_message_stream::InvalidKeepAliveError,
+    > {
+        crate::harness::sdk::ui_message_stream::create_ui_message_stream_response(
+            self.to_ui_message_stream(options),
+            init,
+        )
+    }
+
     /// `pipeUIMessageStreamToResponse()`: not implemented yet.
     pub fn pipe_ui_message_stream_to_response(&self) -> HarnessResult<()> {
         Err(not_supported_yet("pipeUIMessageStreamToResponse"))

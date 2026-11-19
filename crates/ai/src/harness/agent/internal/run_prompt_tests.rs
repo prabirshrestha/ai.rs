@@ -444,6 +444,29 @@ pub(crate) async fn run_collect(input: RunPromptInput) -> (Vec<JsonValue>, RunPr
     (parts, output)
 }
 
+/// `for await (const chunk of result.toUIMessageStream(options))`, as JSON.
+pub(crate) async fn ui_chunks(
+    output: &RunPromptOutput,
+    options: crate::harness::sdk::ui_message_stream::UIMessageStreamOptions,
+) -> Vec<JsonValue> {
+    output
+        .result
+        .to_ui_message_stream(options)
+        .map(|chunk| chunk.expect("ui message chunk").to_json())
+        .collect()
+        .await
+}
+
+/// `{ onError: () => text }`.
+pub(crate) fn ui_on_error(
+    text: &'static str,
+) -> crate::harness::sdk::ui_message_stream::UIMessageStreamOptions {
+    crate::harness::sdk::ui_message_stream::UIMessageStreamOptions {
+        on_error: Some(Arc::new(move |_| text.to_string())),
+        ..Default::default()
+    }
+}
+
 /// `expect.objectContaining` / `toMatchObject`: every key of `expected`
 /// matches, recursively for objects; arrays match element-wise.
 pub(crate) fn matches(actual: &JsonValue, expected: &JsonValue) -> bool {

@@ -568,8 +568,14 @@ async fn keeps_host_tool_context_out_of_the_stream_when_context_validation_fails
         errors[0],
         &json!({ "toolCallId": "c1", "error": { "message": "Tool context validation failed." } })
     ));
-    // [rust] The `toUIMessageStream` assertions come with the UI message
-    // stream port.
+    let ui = ui_chunks(&output, Default::default()).await;
+    let output_errors = of_type(&ui, "tool-output-error");
+    assert_eq!(output_errors.len(), 1, "{ui:?}");
+    assert!(matches(
+        output_errors[0],
+        &json!({ "toolCallId": "c1", "errorText": "Error: Tool context validation failed." })
+    ));
+    assert!(!serde_json::to_string(&ui).unwrap().contains("host-secret"));
     assert!(
         !serde_json::to_string(&parts)
             .unwrap()
@@ -632,7 +638,8 @@ async fn sends_the_text_that_the_runtime_received_when_a_host_tool_throws_an_obj
         tools(vec![("failing", failing), ("askUser", tool(&[]))]),
     );
     let host_errors = error_recorder(&mut run);
-    let (parts, _) = run_collect(run).await;
+    let (parts, output) = run_collect(run).await;
+    let ui = ui_chunks(&output, Default::default()).await;
 
     assert_eq!(
         submitted_list(&submitted),
@@ -644,20 +651,68 @@ async fn sends_the_text_that_the_runtime_received_when_a_host_tool_throws_an_obj
         to_json(&host_errors.lock()[0]),
         json!({ "status": 500, "body": "host-secret" })
     );
-    // [rust] The `toUIMessageStream` assertions come with the UI message
-    // stream port.
+    let output_errors = of_type(&ui, "tool-output-error");
+    assert_eq!(output_errors.len(), 1, "{ui:?}");
+    assert!(matches(
+        output_errors[0],
+        &json!({ "toolCallId": "c1", "errorText": "[object Object]" })
+    ));
     assert!(
         !serde_json::to_string(&parts)
             .unwrap()
             .contains("host-secret")
     );
+    assert!(!serde_json::to_string(&ui).unwrap().contains("host-secret"));
 }
 
-// [rust] `redacts a host tool error in toUIMessageStream(Response) when
-// redactToolErrors is true` comes with the UI message stream port.
+#[tokio::test]
+async fn redacts_a_host_tool_error_in_to_ui_message_stream_and_its_response_when_redact_tool_errors_is_true()
+ {
+    for method in ["toUIMessageStream", "toUIMessageStreamResponse"] {
+        let failing = tool(&[])
+            .with_execute(|_, _| async { Err::<JsonValue, _>(plain_error("host tool failed")) });
+        // The turn pauses for the client-side tool, so the harness reports
+        // the host tool outcome itself.
+        let run = base_input(
+            fake_harness(),
+            FakeSession::new(with_finish(vec![
+                call("c1", "failing", "{}"),
+                call("c2", "askUser", "{}"),
+            ])),
+            tools(vec![("failing", failing), ("askUser", tool(&[]))]),
+        );
+        let (parts, output) = run_collect(run).await;
+        let options = crate::harness::sdk::ui_message_stream::UIMessageStreamOptions {
+            redact_tool_errors: Some(true),
+            ..Default::default()
+        };
+        let body = if method == "toUIMessageStreamResponse" {
+            let response = output
+                .result
+                .to_ui_message_stream_response(options, Default::default())
+                .unwrap();
+            let bytes: Vec<_> = response.body.map(|b| b.unwrap()).collect().await;
+            String::from_utf8(bytes.concat()).unwrap()
+        } else {
+            serde_json::to_string(&ui_chunks(&output, options).await).unwrap()
+        };
+
+        let errors = of_type(&parts, "tool-error");
+        assert_eq!(errors.len(), 1, "{method}");
+        assert!(matches(
+            errors[0],
+            &json!({ "toolCallId": "c1", "error": { "message": "host tool failed" } })
+        ));
+        assert!(
+            body.contains(r#""errorText":"An error occurred.""#),
+            "{method}: {body}"
+        );
+        assert!(!body.contains("host tool failed"), "{method}");
+    }
+}
 
 #[tokio::test]
-async fn reports_a_rejected_host_call_without_an_adapter_echo_in_the_step() {
+async fn reports_a_rejected_host_call_without_an_adapter_echo_in_the_step_and_ui_stream() {
     let (restricted, calls) = recording_tool(z_object(&[("city", "string")]), |_| {
         Ok(json!("not reached"))
     });
@@ -683,8 +738,20 @@ async fn reports_a_rejected_host_call_without_an_adapter_echo_in_the_step() {
         json!({ "type": "tool-error", "toolCallId": "c1" })
     ));
     assert!(output.result.tool_results().await.unwrap().is_empty());
-    // [rust] The `toUIMessageStream` assertions come with the UI message
-    // stream port.
+    assert_rejected_call_ui(&ui_chunks(&output, ui_on_error("Tool failed")).await);
+}
+
+/// The UI chunks of a rejected host call: one `tool-input-error`, no
+/// `tool-output-*`.
+fn assert_rejected_call_ui(ui: &[JsonValue]) {
+    let input_errors = of_type(ui, "tool-input-error");
+    assert_eq!(input_errors.len(), 1, "{ui:?}");
+    assert!(matches(
+        input_errors[0],
+        &json!({ "type": "tool-input-error", "toolCallId": "c1", "errorText": "Tool failed" })
+    ));
+    assert!(of_type(ui, "tool-output-error").is_empty());
+    assert!(of_type(ui, "tool-output-available").is_empty());
 }
 
 #[tokio::test]
@@ -754,8 +821,7 @@ async fn surfaces_an_echoed_rejected_host_result_as_a_tool_error() {
             1
         );
         assert!(of_type(&parts, "tool-result").is_empty());
-        // [rust] The `toUIMessageStream` assertions come with the UI message
-        // stream port.
+        assert_rejected_call_ui(&ui_chunks(&output, ui_on_error("Tool failed")).await);
     }
 }
 

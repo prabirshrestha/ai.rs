@@ -14,6 +14,7 @@ pub mod telemetry;
 pub mod text_stream_part;
 pub mod tool;
 pub mod tool_approval;
+pub mod ui_message_stream;
 pub mod usage;
 
 pub use content::*;

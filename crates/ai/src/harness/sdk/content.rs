@@ -50,6 +50,22 @@ pub struct TypedToolCall {
     pub error: Option<ErrorValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The parsed JSON the input schema received, before its transforms
+    /// (`setToolCallInputSchemaInput`). TS keeps it under a non-enumerable
+    /// symbol, so it is neither serialized nor compared.
+    #[serde(skip)]
+    pub input_schema_input: InputSchemaInput,
+}
+
+/// The hidden `inputSchemaInput` of a [`TypedToolCall`]. Equality ignores
+/// it, as `toEqual` ignores symbol keys.
+#[derive(Debug, Clone, Default)]
+pub struct InputSchemaInput(pub Option<JsonValue>);
+
+impl PartialEq for InputSchemaInput {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 impl TypedToolCall {
@@ -69,7 +85,13 @@ impl TypedToolCall {
             invalid: None,
             error: None,
             title: None,
+            input_schema_input: InputSchemaInput::default(),
         }
+    }
+
+    /// `getToolCallInputSchemaInput(toolCall)`.
+    pub fn input_schema_input(&self) -> Option<&JsonValue> {
+        self.input_schema_input.0.as_ref()
     }
 
     /// `toolCall.dynamic === true`.

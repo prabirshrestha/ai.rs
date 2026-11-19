@@ -419,6 +419,9 @@ fn has_tool<V>(tools: &IndexMap<String, V>, tool_name: &str) -> bool {
 /// `displayHostToolCall({ toolCall, sessionWorkDir })`.
 fn display_host_tool_call(tool_call: &TypedToolCall, session_work_dir: &str) -> TypedToolCall {
     let mut display = tool_call.clone();
+    // [rust] TS builds the display call with a spread, which drops the
+    // symbol-keyed `inputSchemaInput`.
+    display.input_schema_input = Default::default();
     display.input = strip_parsed_tool_input_work_dir(&tool_call.input, session_work_dir);
     if tool_call.is_invalid() {
         display.error = Some(ErrorValue::message(INVALID_TOOL_INPUT_MESSAGE));

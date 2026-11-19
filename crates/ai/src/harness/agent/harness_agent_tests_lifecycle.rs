@@ -391,10 +391,87 @@ async fn session_detach_after_a_tool_approval_pause_returns_resume_state_with_ne
     assert_eq!(Mock::count(&mock.record.suspend_calls), 1);
 }
 
-// [rust] 'session.detach() from UI stream onFinish uses between-turn resume
-// state after normal completion' and 'toUIMessageStream emits a start chunk
-// carrying the persistence-mode message id' come with the UI message stream
-// port.
+fn done_turn(text: &str) -> Vec<HarnessV1StreamPart> {
+    let finish_reason = json!({ "unified": "stop" });
+    parts(vec![
+        json!({ "type": "text-start", "id": "t1" }),
+        json!({ "type": "text-delta", "id": "t1", "delta": text }),
+        json!({ "type": "text-end", "id": "t1" }),
+        json!({ "type": "finish-step", "finishReason": finish_reason, "usage": zero_usage() }),
+        json!({ "type": "finish", "finishReason": finish_reason, "totalUsage": zero_usage() }),
+    ])
+}
+
+#[tokio::test]
+async fn session_detach_from_ui_stream_on_finish_uses_between_turn_resume_state_after_normal_completion()
+ {
+    use crate::harness::sdk::ui_message_stream::{
+        UIMessageStreamOnEndEvent, UIMessageStreamOptions,
+    };
+
+    let mock = MockHarnessOptions::script(|| done_turn("done")).build();
+    let agent = agent(settings(&mock));
+    let session = new_session(&agent).await;
+    let result = agent.stream(call(&session, "go")).await.unwrap();
+    let detach_state: Arc<Mutex<Option<HarnessV1ResumeSessionState>>> = Arc::default();
+
+    let (state, detaching) = (detach_state.clone(), session.clone());
+    let ui_stream = result.to_ui_message_stream(UIMessageStreamOptions {
+        on_finish: Some(Arc::new(move |_: UIMessageStreamOnEndEvent| {
+            let (state, session) = (state.clone(), detaching.clone());
+            Box::pin(async move {
+                *state.lock() = Some(session.detach().await.unwrap());
+            })
+        })),
+        ..Default::default()
+    });
+    let chunks: Vec<_> = ui_stream.collect().await;
+    assert!(chunks.iter().all(Result::is_ok));
+
+    assert_eq!(
+        to_json(&*detach_state.lock()),
+        json!({
+            "type": "resume-session",
+            "harnessId": "mock",
+            "specificationVersion": "harness-v1",
+            "data": {},
+        })
+    );
+    assert_eq!(Mock::count(&mock.record.detach_calls), 1);
+    assert_eq!(Mock::count(&mock.record.suspend_calls), 0);
+}
+
+#[tokio::test]
+async fn to_ui_message_stream_emits_a_start_chunk_carrying_the_persistence_mode_message_id() {
+    use crate::harness::sdk::ui_message_stream::{UIMessage, UIMessageStreamOptions};
+
+    let mock = MockHarnessOptions::script(|| done_turn("pong")).build();
+    let agent = agent(settings(&mock));
+    let session = new_session(&agent).await;
+    let result = agent.stream(call(&session, "ping")).await.unwrap();
+
+    // Persistence mode injects the server-generated message id into the
+    // stream's `start` chunk; it never synthesizes the chunk itself.
+    let original: UIMessage = serde_json::from_value(
+        json!({ "id": "user-1", "role": "user", "parts": [{ "type": "text", "text": "ping" }] }),
+    )
+    .unwrap();
+    let chunks: Vec<JsonValue> = result
+        .to_ui_message_stream(UIMessageStreamOptions {
+            original_messages: Some(vec![original]),
+            generate_message_id: Some(Arc::new(|| "msg-server-id".to_string())),
+            ..Default::default()
+        })
+        .map(|chunk| chunk.unwrap().to_json())
+        .collect()
+        .await;
+
+    assert_eq!(
+        chunks[0],
+        json!({ "type": "start", "messageId": "msg-server-id" })
+    );
+    session.destroy().await.unwrap();
+}
 
 fn finish_only() -> Vec<HarnessV1StreamPart> {
     parts(vec![

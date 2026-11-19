@@ -124,7 +124,14 @@ fn do_parse_tool_call(
         safe_parse_json(&call.input, Some(schema))
     }
     .map_err(|e| invalid_input(call, &e))?;
+    // `setToolCallInputSchemaInput`: the JSON the schema received.
+    let schema_input = if call.input.trim().is_empty() {
+        Some(JsonValue::Object(Default::default()))
+    } else {
+        safe_parse_json(&call.input, None).ok()
+    };
     let mut out = TypedToolCall::new(&call.tool_call_id, &call.tool_name, parsed);
+    out.input_schema_input = crate::harness::sdk::content::InputSchemaInput(schema_input);
     out.provider_executed = call.provider_executed;
     out.provider_metadata = call.provider_metadata.clone();
     out.tool_metadata = tool.metadata.clone();

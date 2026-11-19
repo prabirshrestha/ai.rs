@@ -235,9 +235,41 @@ async fn dispatches_abort_telemetry_instead_of_error_telemetry() {
     assert!(telemetry.errors.lock().is_empty());
 }
 
-// [rust] `toUIMessageStream emits an abort chunk, skips onError, and
-// reports isAborted to onEnd for an aborted turn` comes with the UI message
-// stream port.
+#[tokio::test]
+async fn to_ui_message_stream_emits_an_abort_chunk_skips_on_error_and_reports_is_aborted_to_on_end()
+{
+    let (_, output) = run_collect(aborted_run(abort_error_script())).await;
+
+    let on_error_calls: Arc<Mutex<Vec<ErrorValue>>> = Arc::default();
+    let on_end_calls: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let (errors, ends) = (on_error_calls.clone(), on_end_calls.clone());
+    let options = crate::harness::sdk::ui_message_stream::UIMessageStreamOptions {
+        on_error: Some(Arc::new(move |error| {
+            errors.lock().push(error.clone());
+            "error".to_string()
+        })),
+        on_end: Some(crate::harness::sdk::telemetry::callback(
+            move |event: crate::harness::sdk::ui_message_stream::UIMessageStreamOnEndEvent| {
+                ends.lock().push(event.is_aborted);
+                async {}
+            },
+        )),
+        ..Default::default()
+    };
+    let chunk_types: Vec<String> = ui_chunks(&output, options)
+        .await
+        .iter()
+        .map(|chunk| chunk["type"].as_str().unwrap().to_string())
+        .collect();
+
+    assert!(on_error_calls.lock().is_empty());
+    assert!(
+        chunk_types.contains(&"abort".to_string()),
+        "{chunk_types:?}"
+    );
+    assert!(!chunk_types.contains(&"error".to_string()));
+    assert_eq!(*on_end_calls.lock(), vec![true]);
+}
 
 // ─── runPrompt host input pauses ───────────────────────────────────────
 

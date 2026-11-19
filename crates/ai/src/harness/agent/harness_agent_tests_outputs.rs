@@ -178,8 +178,135 @@ async fn stream_returns_a_result_whose_full_stream_emits_translated_parts() {
     session.destroy().await.unwrap();
 }
 
-// [rust] The six `toUIMessageStream` / `toUIMessageStreamResponse`
-// `onStepEnd` / `onStepFinish` cases come with the UI message stream port.
+/// `twoStepEvents()`.
+fn two_step_events() -> Vec<HarnessV1StreamPart> {
+    parts(vec![
+        json!({ "type": "text-start", "id": "first" }),
+        json!({ "type": "text-delta", "id": "first", "delta": "First" }),
+        json!({ "type": "text-end", "id": "first" }),
+        json!({ "type": "finish-step", "finishReason": { "unified": "tool-calls", "raw": "tool_use" }, "usage": zero_usage() }),
+        json!({ "type": "text-start", "id": "second" }),
+        json!({ "type": "text-delta", "id": "second", "delta": "Second" }),
+        json!({ "type": "text-end", "id": "second" }),
+        json!({ "type": "finish-step", "finishReason": { "unified": "stop", "raw": "end_turn" }, "usage": zero_usage() }),
+        json!({ "type": "finish", "finishReason": { "unified": "stop", "raw": "end_turn" }, "totalUsage": zero_usage() }),
+    ])
+}
+
+#[tokio::test]
+async fn ui_streams_forward_on_step_end_and_the_deprecated_on_step_finish() {
+    use crate::harness::sdk::telemetry::callback;
+    use crate::harness::sdk::ui_message_stream::{
+        UIMessageStreamOnStepEndEvent, UIMessageStreamOptions,
+    };
+
+    for (name, response, use_on_step_end, use_on_step_finish, expected_end, expected_finish) in [
+        (
+            "direct UI stream forwards onStepEnd",
+            false,
+            true,
+            false,
+            2,
+            0,
+        ),
+        (
+            "response UI stream forwards onStepEnd",
+            true,
+            true,
+            false,
+            2,
+            0,
+        ),
+        (
+            "direct UI stream forwards deprecated onStepFinish",
+            false,
+            false,
+            true,
+            0,
+            2,
+        ),
+        (
+            "response UI stream forwards deprecated onStepFinish",
+            true,
+            false,
+            true,
+            0,
+            2,
+        ),
+        (
+            "direct UI stream prefers onStepEnd over onStepFinish",
+            false,
+            true,
+            true,
+            2,
+            0,
+        ),
+        (
+            "response UI stream prefers onStepEnd over onStepFinish",
+            true,
+            true,
+            true,
+            2,
+            0,
+        ),
+    ] {
+        let mock = MockHarnessOptions::script(two_step_events).build();
+        let agent = agent(settings(&mock));
+        let session = new_session(&agent).await;
+        let result = agent.stream(call(&session, "two steps")).await.unwrap();
+        let on_step_end_calls = Arc::new(AtomicUsize::new(0));
+        let on_step_finish_calls = Arc::new(AtomicUsize::new(0));
+        let counter = |count: &Arc<AtomicUsize>| {
+            let count = count.clone();
+            callback(move |_: UIMessageStreamOnStepEndEvent| {
+                count.fetch_add(1, Ordering::SeqCst);
+                async {}
+            })
+        };
+        let options = UIMessageStreamOptions {
+            on_step_end: use_on_step_end.then(|| counter(&on_step_end_calls)),
+            on_step_finish: use_on_step_finish.then(|| counter(&on_step_finish_calls)),
+            ..Default::default()
+        };
+
+        let finished_steps = if response {
+            let response = result
+                .to_ui_message_stream_response(options, Default::default())
+                .unwrap();
+            let bytes: Vec<_> = response.body.map(|b| b.unwrap()).collect().await;
+            String::from_utf8(bytes.concat())
+                .unwrap()
+                .split('\n')
+                .filter(|line| line.contains(r#""type":"finish-step""#))
+                .count()
+        } else {
+            result
+                .to_ui_message_stream(options)
+                .filter(|chunk| {
+                    let is_finish_step = matches!(
+                        chunk,
+                        Ok(crate::harness::sdk::ui_message_stream::UIMessageChunk::FinishStep)
+                    );
+                    async move { is_finish_step }
+                })
+                .count()
+                .await
+        };
+
+        assert_eq!(finished_steps, 2, "{name}");
+        assert_eq!(
+            on_step_end_calls.load(Ordering::SeqCst),
+            expected_end,
+            "{name}"
+        );
+        assert_eq!(
+            on_step_finish_calls.load(Ordering::SeqCst),
+            expected_finish,
+            "{name}"
+        );
+        session.destroy().await.unwrap();
+    }
+}
 
 #[tokio::test]
 async fn stream_exposes_reasoning_from_the_final_step() {
