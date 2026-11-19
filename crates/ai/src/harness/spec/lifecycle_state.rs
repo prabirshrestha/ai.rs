@@ -80,8 +80,12 @@ pub struct HarnessV1TurnSettings {
 }
 
 /// `HarnessV1ResumeSessionState` (`type: 'resume-session'`).
+///
+/// [rust] Deserializing rejects top-level `pendingToolApprovals` /
+/// `pendingToolResults`, as TS's `validateLifecycleStateData` does: the
+/// struct has no such fields to carry them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "RawResumeSessionState")]
 pub struct HarnessV1ResumeSessionState {
     pub r#type: ResumeSessionType,
     pub harness_id: String,
@@ -90,6 +94,43 @@ pub struct HarnessV1ResumeSessionState {
     pub data: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continue_from: Option<HarnessV1ContinueTurnState>,
+}
+
+/// [`HarnessV1ResumeSessionState`] as deserialized, before the check for
+/// top-level pending state.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawResumeSessionState {
+    r#type: ResumeSessionType,
+    harness_id: String,
+    specification_version: HarnessV1SpecificationVersion,
+    data: JsonValue,
+    #[serde(default)]
+    continue_from: Option<HarnessV1ContinueTurnState>,
+    #[serde(default)]
+    pending_tool_approvals: Option<JsonValue>,
+    #[serde(default)]
+    pending_tool_results: Option<JsonValue>,
+}
+
+impl TryFrom<RawResumeSessionState> for HarnessV1ResumeSessionState {
+    type Error = String;
+
+    fn try_from(raw: RawResumeSessionState) -> Result<Self, Self::Error> {
+        if raw.pending_tool_approvals.is_some() {
+            return Err("Resume session state cannot contain pending tool approvals; unfinished turns must be stored as `continueFrom`.".into());
+        }
+        if raw.pending_tool_results.is_some() {
+            return Err("Resume session state cannot contain pending tool results; unfinished turns must be stored as `continueFrom`.".into());
+        }
+        Ok(Self {
+            r#type: raw.r#type,
+            harness_id: raw.harness_id,
+            specification_version: raw.specification_version,
+            data: raw.data,
+            continue_from: raw.continue_from,
+        })
+    }
 }
 
 /// `HarnessV1ContinueTurnState` (`type: 'continue-turn'`).

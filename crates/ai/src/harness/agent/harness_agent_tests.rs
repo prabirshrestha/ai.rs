@@ -31,7 +31,7 @@ pub(crate) use crate::harness::spec::literal::HarnessV1SpecificationVersion;
 pub(crate) use crate::harness::spec::stream_part::HarnessV1StreamPart;
 pub(crate) use crate::harness::spec::tools::HarnessV1BuiltinTool;
 pub(crate) use crate::harness::spec::{HarnessV1NetworkSandboxSession, HarnessV1PortEndpoint, HarnessV1PortProtocol};
-pub(crate) use crate::harness::test_support::MockSandbox;
+
 pub(crate) use crate::harness::utils::plain_error;
 
 #[path = "harness_agent_tests_basics.rs"]
@@ -40,6 +40,10 @@ mod basics;
 mod turns;
 #[path = "harness_agent_tests_outputs.rs"]
 mod outputs;
+#[path = "harness_agent_tests_continue.rs"]
+mod continuation;
+#[path = "harness_agent_tests_sandbox.rs"]
+mod sandbox;
 
 // ─── mockHarness ───────────────────────────────────────────────────────
 
@@ -389,17 +393,45 @@ impl HarnessV1Session for MockSession {
 
 // ─── makeSandboxSession ────────────────────────────────────────────────
 
-/// `makeSandboxSession()`: a network sandbox whose `run` answers the HOME
-/// and `pwd` probes, over an in-memory file map.
-#[derive(Clone)]
-pub(crate) struct TestSandbox {
-    pub inner: MockSandbox,
-    pub id: String,
-    pub default_working_directory: String,
-    pub stop_calls: Arc<AtomicUsize>,
-    pub destroy_calls: Arc<AtomicUsize>,
+pub(crate) type RunFn = Arc<dyn Fn(&SandboxRunOptions) -> HarnessResult<SandboxRunResult> + Send + Sync>;
+pub(crate) type ReadTextFn = Arc<dyn Fn(&str) -> HarnessResult<Option<String>> + Send + Sync>;
+
+/// A recorded `run` call: `{ command, env }`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunCall {
+    pub command: String,
+    pub env: Option<IndexMap<String, String>>,
 }
 
+impl RunCall {
+    pub fn new(command: &str, env: &[(&str, &str)]) -> Self {
+        Self {
+            command: command.into(),
+            env: (!env.is_empty()).then(|| {
+                env.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            }),
+        }
+    }
+}
+
+/// The file and process surface of a sandbox double: a programmable `run`
+/// and `readTextFile` over an in-memory file map. Every operation is
+/// appended to a shared event log (`invocationCallOrder`).
+#[derive(Clone)]
+pub(crate) struct ScriptedSandbox {
+    pub label: String,
+    pub run: RunFn,
+    pub read_text: Option<ReadTextFn>,
+    pub files: Arc<Mutex<IndexMap<String, String>>>,
+    pub runs: Arc<Mutex<Vec<RunCall>>>,
+    pub reads: Arc<Mutex<Vec<String>>>,
+    pub writes: Arc<Mutex<Vec<String>>>,
+    pub log: Arc<Mutex<Vec<String>>>,
+}
+
+/// `run` answering the HOME and `pwd` probes.
 pub(crate) fn probe_run(o: &SandboxRunOptions) -> SandboxRunResult {
     let stdout = match o.process.command.as_str() {
         "printf \"%s\" \"$HOME\"" => "/home/agent",
@@ -414,19 +446,134 @@ pub(crate) fn probe_run(o: &SandboxRunOptions) -> SandboxRunResult {
     }
 }
 
-impl TestSandbox {
-    pub fn new() -> Self {
-        Self::with_inner(MockSandbox::new(|o, _| Ok(probe_run(o))))
+/// `run` returning an empty success.
+pub(crate) fn empty_run() -> RunFn {
+    Arc::new(|_| Ok(SandboxRunResult::default()))
+}
+
+impl ScriptedSandbox {
+    pub fn new(label: &str, log: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            label: label.into(),
+            run: Arc::new(|o| Ok(probe_run(o))),
+            read_text: None,
+            files: Arc::default(),
+            runs: Arc::default(),
+            reads: Arc::default(),
+            writes: Arc::default(),
+            log,
+        }
     }
 
-    pub fn with_inner(inner: MockSandbox) -> Self {
+    pub fn with_run(mut self, run: RunFn) -> Self {
+        self.run = run;
+        self
+    }
+
+    pub fn with_read_text(mut self, read_text: impl Fn(&str) -> HarnessResult<Option<String>> + Send + Sync + 'static) -> Self {
+        self.read_text = Some(Arc::new(read_text));
+        self
+    }
+
+    /// The same operations under another label (TS's separate
+    /// `restricted()` object sharing `run` / `readTextFile`).
+    pub fn relabeled(&self, label: &str) -> Self {
+        let mut view = self.clone();
+        view.label = label.into();
+        view
+    }
+}
+
+#[async_trait]
+impl SandboxSession for ScriptedSandbox {
+    fn description(&self) -> String {
+        self.label.clone()
+    }
+    async fn read_file(&self, _o: SandboxReadFileOptions) -> HarnessResult<Option<ByteStream>> {
+        unimplemented!("read_file")
+    }
+    async fn read_binary_file(&self, o: SandboxReadBinaryFileOptions) -> HarnessResult<Option<bytes::Bytes>> {
+        Ok(self.files.lock().get(&o.path).map(|s| bytes::Bytes::from(s.clone().into_bytes())))
+    }
+    async fn read_text_file(&self, o: SandboxReadTextFileOptions) -> HarnessResult<Option<String>> {
+        self.log.lock().push(format!("read:{}", o.path));
+        self.reads.lock().push(o.path.clone());
+        if let Some(read_text) = &self.read_text {
+            return read_text(&o.path);
+        }
+        Ok(self.files.lock().get(&o.path).cloned())
+    }
+    async fn write_file(&self, _o: SandboxWriteFileOptions) -> HarnessResult<()> {
+        unimplemented!("write_file")
+    }
+    async fn write_binary_file(&self, o: SandboxWriteBinaryFileOptions) -> HarnessResult<()> {
+        self.log.lock().push(format!("write:{}", o.path));
+        self.writes.lock().push(o.path.clone());
+        self.files.lock().insert(o.path, String::from_utf8_lossy(&o.content).into_owned());
+        Ok(())
+    }
+    async fn write_text_file(&self, o: SandboxWriteTextFileOptions) -> HarnessResult<()> {
+        self.log.lock().push(format!("write:{}", o.path));
+        self.writes.lock().push(o.path.clone());
+        self.files.lock().insert(o.path, o.content);
+        Ok(())
+    }
+    async fn stat(&self, _o: SandboxStatOptions) -> HarnessResult<Option<SandboxFileStat>> {
+        unimplemented!("stat")
+    }
+    async fn list_directory(
+        &self,
+        _o: SandboxListDirectoryOptions,
+    ) -> HarnessResult<Option<Vec<SandboxDirectoryEntry>>> {
+        unimplemented!("list_directory")
+    }
+    async fn delete_file(&self, o: SandboxDeleteFileOptions) -> HarnessResult<bool> {
+        Ok(self.files.lock().shift_remove(&o.path).is_some())
+    }
+    async fn spawn(&self, _o: SandboxSpawnOptions) -> HarnessResult<SandboxProcess> {
+        unimplemented!("spawn")
+    }
+    async fn run(&self, o: SandboxRunOptions) -> HarnessResult<SandboxRunResult> {
+        self.log.lock().push(format!("run:{}", o.process.command));
+        self.runs.lock().push(RunCall {
+            command: o.process.command.clone(),
+            env: o.process.env.clone(),
+        });
+        (self.run)(&o)
+    }
+}
+
+/// `makeSandboxSession()`: a network sandbox over a [`ScriptedSandbox`].
+#[derive(Clone)]
+pub(crate) struct TestSandbox {
+    pub inner: ScriptedSandbox,
+    /// What `restricted()` returns.
+    pub restricted_view: ScriptedSandbox,
+    pub id: String,
+    pub default_working_directory: String,
+    pub stop_calls: Arc<AtomicUsize>,
+    pub destroy_calls: Arc<AtomicUsize>,
+}
+
+impl TestSandbox {
+    pub fn new() -> Self {
+        Self::with_inner(ScriptedSandbox::new("mock sandbox", Arc::default()))
+    }
+
+    pub fn with_inner(inner: ScriptedSandbox) -> Self {
         Self {
+            restricted_view: inner.clone(),
             inner,
             id: "sandbox".into(),
             default_working_directory: "/work".into(),
             stop_calls: Arc::default(),
             destroy_calls: Arc::default(),
         }
+    }
+
+    pub fn with_restricted(mut self, view: ScriptedSandbox) -> Self {
+        self.restricted_view = view;
+        self
     }
 
     pub fn sref(&self) -> HarnessV1SandboxSessionRef {
@@ -437,8 +584,8 @@ impl TestSandbox {
         Some(self.sref().into())
     }
 
-    pub fn runs(&self) -> Vec<String> {
-        self.inner.state.lock().runs.clone()
+    pub fn runs(&self) -> Vec<RunCall> {
+        self.inner.runs.lock().clone()
     }
 
     pub fn stops(&self) -> usize {
@@ -528,7 +675,7 @@ impl HarnessV1NetworkSandboxSession for TestSandbox {
         Ok(())
     }
     fn restricted(&self) -> Arc<dyn SandboxSession> {
-        Arc::new(self.inner.clone())
+        Arc::new(self.restricted_view.clone())
     }
 }
 
@@ -547,10 +694,18 @@ pub(crate) fn get_started_sandbox(mock: &Mock) -> HarnessV1SandboxSessionRef {
     mock.start_call(0).sandbox_session
 }
 
+/// The started sandbox's own surface: the network session itself, or the
+/// basic session.
+pub(crate) fn started_session(mock: &Mock) -> Arc<dyn SandboxSession> {
+    match get_started_sandbox(mock) {
+        HarnessV1SandboxSessionRef::Network(session) => session,
+        HarnessV1SandboxSessionRef::Basic(session) => session,
+    }
+}
+
 /// `touchStartedSandbox(doStart)`.
 pub(crate) async fn touch_started_sandbox(mock: &Mock) -> HarnessResult<()> {
-    get_started_sandbox(mock)
-        .session()
+    started_session(mock)
         .read_text_file(SandboxReadTextFileOptions {
             path: "/work/touch.txt".into(),
             ..Default::default()
