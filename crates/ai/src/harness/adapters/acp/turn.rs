@@ -912,6 +912,7 @@ async fn drive(
         .current_model
         .clone()
         .or_else(|| config.model.clone())
+        .or_else(|| settings.fallback_model.clone())
         .unwrap_or_else(|| settings.harness_id.clone());
     translator.turn.set_model(model.clone());
     let conn = agent.conn.clone();

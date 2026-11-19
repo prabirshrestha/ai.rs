@@ -7,7 +7,13 @@ pub mod builtin_catalog;
 pub mod claude_code;
 #[cfg(feature = "harness-codex")]
 pub mod codex;
+#[cfg(feature = "harness-cursor")]
+pub mod cursor;
+#[cfg(feature = "harness-github-copilot")]
+pub mod github_copilot;
 pub mod host_tools;
+#[cfg(feature = "harness-github-copilot")]
+pub(crate) mod jsonc;
 #[cfg(any(feature = "harness-native", feature = "harness-pi"))]
 pub mod loop_session;
 pub mod mcp_host;

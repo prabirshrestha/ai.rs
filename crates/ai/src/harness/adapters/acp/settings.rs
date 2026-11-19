@@ -312,6 +312,9 @@ pub struct AcpHarnessSettings {
     pub process_env: Option<IndexMap<String, String>>,
     /// [rust] The HTTP host tool endpoint.
     pub http_relay: AcpHttpRelayOptions,
+    /// The model reported when the agent reports none and the turn names
+    /// none; the harness id otherwise.
+    pub fallback_model: Option<String>,
 }
 
 impl fmt::Debug for AcpHarnessSettings {
@@ -368,6 +371,7 @@ impl AcpHarnessSettings {
             session_meta: None,
             executable_override: None,
             process_env: None,
+            fallback_model: None,
             http_relay: AcpHttpRelayOptions::default(),
         }
     }

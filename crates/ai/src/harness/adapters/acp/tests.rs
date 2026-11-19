@@ -69,6 +69,14 @@ while IFS= read -r step <&3; do
       id=$(request_id "$line")
       echo "$id" >> "$FAKE_DIR/replied"
       printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result" ;;
+    "http "*)
+      url=$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$FAKE_DIR/seen" | head -n 1)
+      auth=$(sed -n 's/.*"value":"\(Bearer [^"]*\)".*/\1/p' "$FAKE_DIR/seen" | head -n 1)
+      curl -s -X POST -H "Authorization: $auth" -H 'Content-Type: application/json' \
+        -d "${step#http }" "$url" >> "$FAKE_DIR/mcp"
+      echo >> "$FAKE_DIR/mcp"
+      curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Authorization: Bearer wrong' \
+        -d "${step#http }" "$url" >> "$FAKE_DIR/http_status" ;;
     "mcp "*)
       printf '%s\n' "${step#mcp }" > "$MCP_DIR/req"
       IFS= read -r answer < "$MCP_DIR/res"
@@ -84,6 +92,7 @@ enum Step {
     Await(&'static str),
     Reply(&'static str, Value),
     Mcp(Value),
+    Http(Value),
     Exit(i32),
 }
 
@@ -116,6 +125,7 @@ fn steps_text(steps: Vec<Step>) -> String {
             Step::Await(pattern) => format!("await {pattern}"),
             Step::Reply(method, result) => format!("reply {method} {result}"),
             Step::Mcp(value) => format!("mcp {value}"),
+            Step::Http(value) => format!("http {value}"),
             Step::Exit(code) => format!("exit {code}"),
         })
         .collect::<Vec<_>>()
@@ -579,7 +589,7 @@ async fn runs_host_tools_through_the_mcp_relay() {
         .start(fixture.start_options(PermissionMode::AllowAll))
         .await
         .unwrap();
-    let (events, messages) = run(
+    let (_, messages) = run(
         session.as_ref(),
         HarnessTurnOptions {
             settings: HarnessTurnSettings {
@@ -619,6 +629,101 @@ async fn runs_host_tools_through_the_mcp_relay() {
     assert_eq!(
         answers[2]["result"],
         json!({ "content": [{ "type": "text", "text": "found: rust" }], "isError": false })
+    );
+    session.destroy().await.unwrap();
+}
+
+#[tokio::test]
+async fn runs_host_tools_through_the_http_mcp_server() {
+    let fixture = fixture();
+    fixture.script(vec![
+        initialize(json!({ "mcpCapabilities": { "http": true } })),
+        new_session("s1"),
+        Step::Await("session/prompt"),
+        Step::Http(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })),
+        update(
+            "s1",
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "call_echo",
+                "title": "ai-sdk-harness-tools-echo", "kind": "other", "status": "in_progress",
+                "rawInput": { "text": "hi" } }),
+        ),
+        Step::Http(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "echo", "arguments": { "text": "hi" } } })),
+        end_turn(),
+    ]);
+    let echo = AgentToolBuilder::new("echo")
+        .description("Echo")
+        .parameters(json!({ "type": "object", "properties": { "text": { "type": "string" } } }))
+        .execute(|args| async move {
+            Ok(AgentToolResult::text(
+                args["text"].as_str().unwrap_or_default().to_string(),
+            ))
+        })
+        .build()
+        .unwrap();
+    let harness = fixture.harness(|settings| {
+        settings.host_tool_mcp_transport = AcpHostToolMcpTransport::Http;
+    });
+    let session = harness
+        .start(fixture.start_options(PermissionMode::AllowAll))
+        .await
+        .unwrap();
+    let (_, messages) = run(
+        session.as_ref(),
+        HarnessTurnOptions {
+            settings: HarnessTurnSettings {
+                tools: vec![echo],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let server = &fixture.requests("session/new")[0]["mcpServers"][0];
+    assert_eq!(server["type"], "http");
+    assert!(
+        server["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:")
+    );
+    let answers = fixture.mcp_answers();
+    assert_eq!(answers[0]["result"]["tools"][0]["name"], "echo");
+    assert_eq!(
+        answers[1]["result"]["content"],
+        json!([{ "type": "text", "text": "hi" }])
+    );
+    assert_eq!(
+        tool_results(&messages),
+        [(
+            "call_echo".to_string(),
+            "echo".to_string(),
+            false,
+            "hi".to_string()
+        )]
+    );
+    let statuses = std::fs::read_to_string(format!("{}/http_status", fixture.fake_dir)).unwrap();
+    assert_eq!(statuses.lines().collect::<Vec<_>>(), ["401", "401"]);
+    session.destroy().await.unwrap();
+
+    // Without HTTP MCP support the session cannot start.
+    let fixture = self::fixture();
+    fixture.script(start("s1"));
+    let harness = fixture.harness(|settings| {
+        settings.host_tool_mcp_transport = AcpHostToolMcpTransport::Http;
+    });
+    let session = harness
+        .start(fixture.start_options(PermissionMode::AllowAll))
+        .await
+        .unwrap();
+    let mut turn = session
+        .prompt(Message::user_text("hi"), HarnessTurnOptions::default())
+        .await
+        .unwrap();
+    let error = turn.result().await.unwrap_err().to_string();
+    assert!(
+        error.contains("does not advertise support for HTTP MCP servers"),
+        "{error}"
     );
     session.destroy().await.unwrap();
 }
@@ -867,7 +972,7 @@ async fn configures_models_and_permission_modes() {
         .start(fixture.start_options(PermissionMode::AllowReads))
         .await
         .unwrap();
-    let (events, messages) = run(
+    let (_, messages) = run(
         session.as_ref(),
         HarnessTurnOptions {
             settings: HarnessTurnSettings {

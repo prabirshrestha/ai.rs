@@ -11,7 +11,7 @@ use crate::harness::utils::{get_ai_gateway_auth_from_env, plain_error};
 
 use super::settings::{AcpAuthentication, AcpProviderAuthentication};
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
     digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
