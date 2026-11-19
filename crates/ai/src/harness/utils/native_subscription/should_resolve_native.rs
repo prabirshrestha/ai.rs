@@ -3,7 +3,7 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use crate::harness::spec::HarnessV1Authentication;
+use crate::harness::HarnessAuthentication;
 use crate::harness::utils::ai_gateway_auth::get_ai_gateway_auth_from_env;
 
 /// `shouldResolveNativeSubscription({ auth, env, hasDirectCredential })`:
@@ -12,16 +12,16 @@ use crate::harness::utils::ai_gateway_auth::get_ai_gateway_auth_from_env;
 /// [rust] TS narrows `auth` to its string modes; an `Environment` auth is
 /// treated like any non-`direct` mode.
 pub fn should_resolve_native_subscription<C: Serialize>(
-    auth: Option<&HarnessV1Authentication<C>>,
+    auth: Option<&HarnessAuthentication<C>>,
     env: &IndexMap<String, String>,
     has_direct_credential: bool,
 ) -> bool {
     let is_direct = matches!(
         auth,
-        Some(HarnessV1Authentication::Choice(choice))
+        Some(HarnessAuthentication::Choice(choice))
             if serde_json::to_value(choice).ok().as_ref().and_then(|v| v.as_str()) == Some("direct")
     );
-    !matches!(auth, Some(HarnessV1Authentication::AiGateway))
+    !matches!(auth, Some(HarnessAuthentication::AiGateway))
         && !has_direct_credential
         && (is_direct || get_ai_gateway_auth_from_env(env).api_key.is_none())
 }
@@ -29,13 +29,13 @@ pub fn should_resolve_native_subscription<C: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::spec::HarnessV1DirectAuthentication;
+    use crate::harness::HarnessDirectAuthentication;
     use crate::harness::utils::ai_gateway_auth::env;
 
     #[test]
     fn returns_the_expected_result_per_case() {
-        type A = HarnessV1Authentication;
-        let direct = A::Choice(HarnessV1DirectAuthentication::Direct);
+        type A = HarnessAuthentication;
+        let direct = A::Choice(HarnessDirectAuthentication::Direct);
         type Case<'a> = (Option<A>, &'a [(&'a str, &'a str)], bool, bool);
         let cases: [Case; 7] = [
             (None, &[], false, true),

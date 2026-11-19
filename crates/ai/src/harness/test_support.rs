@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::Mutex;
 
-use crate::harness::errors::HarnessResult;
+use crate::harness::error::HarnessResult;
 use crate::harness::sandbox::*;
 
 /// State a [`MockSandbox`] records.
@@ -196,7 +196,7 @@ pub fn mock_process(chunks: Option<Vec<&str>>) -> (SandboxProcess, Arc<MockProce
 pub struct MockNetworkSandbox {
     pub inner: MockSandbox,
     pub ports: Vec<u16>,
-    pub endpoint_calls: Mutex<Vec<(u16, Option<crate::harness::spec::HarnessV1PortProtocol>)>>,
+    pub endpoint_calls: Mutex<Vec<(u16, Option<crate::harness::HarnessPortProtocol>)>>,
 }
 
 impl MockNetworkSandbox {
@@ -266,7 +266,7 @@ impl SandboxSession for MockNetworkSandbox {
 }
 
 #[async_trait]
-impl crate::harness::spec::HarnessV1NetworkSandboxSession for MockNetworkSandbox {
+impl crate::harness::HarnessNetworkSandboxSession for MockNetworkSandbox {
     fn id(&self) -> String {
         "sandbox-1".into()
     }
@@ -282,10 +282,10 @@ impl crate::harness::spec::HarnessV1NetworkSandboxSession for MockNetworkSandbox
     async fn get_port_endpoint(
         &self,
         port: u16,
-        protocol: Option<crate::harness::spec::HarnessV1PortProtocol>,
-    ) -> HarnessResult<crate::harness::spec::HarnessV1PortEndpoint> {
+        protocol: Option<crate::harness::HarnessPortProtocol>,
+    ) -> HarnessResult<crate::harness::HarnessPortEndpoint> {
         self.endpoint_calls.lock().push((port, protocol));
-        Ok(crate::harness::spec::HarnessV1PortEndpoint {
+        Ok(crate::harness::HarnessPortEndpoint {
             url: format!("wss://sandbox.example/{port}"),
             headers: Some(indexmap::IndexMap::from([(
                 "x-access-token".to_string(),

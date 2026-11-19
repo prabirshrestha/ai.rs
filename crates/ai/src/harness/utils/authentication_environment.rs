@@ -10,7 +10,7 @@ pub struct InvalidAuthenticationEnvironmentError;
 /// `isHarnessAuthenticationEnvironment(value)`: whether `value` is a flat
 /// record of strings. `None` stands for `undefined`.
 ///
-/// [rust] A typed `HarnessV1Authentication` already rejects bad records when
+/// [rust] A typed `HarnessAuthentication` already rejects bad records when
 /// it deserializes, so adapters match on `Environment(_)` instead; this
 /// function serves untyped JSON input.
 pub fn is_harness_authentication_environment(

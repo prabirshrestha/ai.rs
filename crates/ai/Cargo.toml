@@ -27,18 +27,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-tokio-tungstenite = { workspace = true, optional = true }
 
 [features]
 default = ["harness"]
-# Port of the Vercel AI SDK harness (`@ai-sdk/harness`).
-harness = ["tokio/process", "tokio/net", "dep:tokio-tungstenite"]
-# Harness adapters (`@ai-sdk/harness-*`), each opt-in.
-harness-acp = ["harness"]
-harness-cursor = ["harness-acp"]
-harness-github-copilot = ["harness-acp"]
-harness-claude-code = ["harness"]
-harness-codex = ["harness"]
+# Agent harnesses: agents that run their own loop inside a sandbox.
+harness = ["tokio/process"]
+# Harness adapters, each opt-in.
+harness-native = ["harness"]
 harness-pi = ["harness"]
 
 [dev-dependencies]

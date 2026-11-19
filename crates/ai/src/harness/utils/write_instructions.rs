@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::{plain_error, shell_quote};
-use crate::harness::errors::HarnessResult;
+use crate::harness::error::HarnessResult;
+use crate::harness::paths::{normalize_posix, posix_join};
 use crate::harness::sandbox::{
     SandboxProcessOptions, SandboxReadTextFileOptions, SandboxRunOptions, SandboxSession,
     SandboxWriteTextFileOptions,
 };
-use crate::harness::spec::paths::{normalize_posix, posix_join};
 
 const INSTRUCTIONS_METADATA_VERSION: u32 = 1;
 

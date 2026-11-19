@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::plain_error;
-use crate::harness::errors::HarnessResult;
+use crate::harness::HarnessSandbox;
+use crate::harness::error::HarnessResult;
 use crate::harness::sandbox::{SandboxProcessOptions, SandboxRunOptions, SandboxSession};
-use crate::harness::spec::harness::HarnessV1SandboxSessionRef;
 
 fn run_options(command: &str, abort_signal: Option<CancellationToken>) -> SandboxRunOptions {
     SandboxRunOptions {
@@ -46,12 +46,12 @@ pub async fn resolve_sandbox_home_dir(
 
 /// `resolveSandboxDefaultWorkingDirectory`.
 pub async fn resolve_sandbox_default_working_directory(
-    sandbox_session: &HarnessV1SandboxSessionRef,
+    sandbox_session: &HarnessSandbox,
     abort_signal: Option<CancellationToken>,
 ) -> HarnessResult<String> {
     let session = match sandbox_session {
-        HarnessV1SandboxSessionRef::Network(s) => return Ok(s.default_working_directory()),
-        HarnessV1SandboxSessionRef::Basic(s) => s,
+        HarnessSandbox::Network(s) => return Ok(s.default_working_directory()),
+        HarnessSandbox::Basic(s) => s,
     };
     let result = session.run(run_options("pwd", abort_signal)).await?;
     if result.exit_code != 0 {
@@ -80,9 +80,7 @@ pub async fn resolve_sandbox_default_working_directory(
 }
 
 /// `getRestrictedSandboxSession`.
-pub fn get_restricted_sandbox_session(
-    sandbox_session: &HarnessV1SandboxSessionRef,
-) -> Arc<dyn SandboxSession> {
+pub fn get_restricted_sandbox_session(sandbox_session: &HarnessSandbox) -> Arc<dyn SandboxSession> {
     sandbox_session.session()
 }
 
@@ -122,13 +120,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_and_trims_a_basic_sandbox_working_directory() {
-        let sandbox = HarnessV1SandboxSessionRef::Basic(Arc::new(MockSandbox::with_result(
-            SandboxRunResult {
-                exit_code: 0,
-                stdout: "/work//\n".into(),
-                ..Default::default()
-            },
-        )));
+        let sandbox = HarnessSandbox::Basic(Arc::new(MockSandbox::with_result(SandboxRunResult {
+            exit_code: 0,
+            stdout: "/work//\n".into(),
+            ..Default::default()
+        })));
         assert_eq!(
             resolve_sandbox_default_working_directory(&sandbox, None)
                 .await

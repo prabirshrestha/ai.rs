@@ -16,7 +16,7 @@ pub use windows_credential_manager::*;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 
-use crate::harness::errors::BoxError;
+use crate::harness::error::BoxError;
 use crate::harness::utils::plain_error;
 
 /// The options the readers pass to `execFile`.

@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::{locale_compare, plain_error, shell_quote};
-use crate::harness::errors::HarnessResult;
+use crate::harness::error::HarnessResult;
+use crate::harness::paths::{normalize_posix, posix_join};
 use crate::harness::sandbox::{
     SandboxProcessOptions, SandboxReadTextFileOptions, SandboxRunOptions, SandboxSession,
     SandboxWriteTextFileOptions,
 };
-use crate::harness::spec::paths::{normalize_posix, posix_join};
-use crate::harness::spec::tools::HarnessV1Skill;
+use crate::harness::tools::HarnessSkill;
 
 const SKILLS_MANIFEST_FILENAME: &str = ".ai-sdk-harness-skills.json";
 const SKILLS_MANIFEST_VERSION: u32 = 1;
@@ -40,7 +40,7 @@ pub struct WriteSkillsOptions<'a> {
     pub sandbox: &'a dyn SandboxSession,
     pub home_path: String,
     pub skills_dir: String,
-    pub skills: Vec<HarnessV1Skill>,
+    pub skills: Vec<HarnessSkill>,
     pub abort_signal: Option<CancellationToken>,
     /// Defaults to `^[A-Za-z0-9._-]+$`.
     pub skill_name_pattern: Option<Regex>,
@@ -55,7 +55,7 @@ impl<'a> WriteSkillsOptions<'a> {
         sandbox: &'a dyn SandboxSession,
         home_path: impl Into<String>,
         skills_dir: impl Into<String>,
-        skills: Vec<HarnessV1Skill>,
+        skills: Vec<HarnessSkill>,
     ) -> Self {
         Self {
             sandbox,
@@ -367,7 +367,7 @@ async fn ensure_skills_directory(
 }
 
 fn project_skill(
-    skill: &HarnessV1Skill,
+    skill: &HarnessSkill,
     pattern: &Regex,
     name_message: &(dyn Fn(&str) -> String + Send + Sync),
     mode: SkillFilePathMode,
@@ -616,7 +616,7 @@ fn normalize_skill_file_path(
     Ok(normalized)
 }
 
-fn render_skill_file(skill: &HarnessV1Skill, trailing_newline: bool) -> String {
+fn render_skill_file(skill: &HarnessSkill, trailing_newline: bool) -> String {
     let content = format!(
         "---\nname: {}\ndescription: {}\n---\n\n{}",
         skill.name, skill.description, skill.content
@@ -692,8 +692,8 @@ fn resolve_skills_root_dir(home_path: &str, skills_dir: &str) -> HarnessResult<S
 mod tests {
     use super::*;
     use crate::harness::sandbox::SandboxRunResult;
-    use crate::harness::spec::tools::HarnessV1SkillFile;
     use crate::harness::test_support::{MockSandbox, MockState, quoted_values};
+    use crate::harness::tools::HarnessSkillFile;
 
     fn handle(o: &SandboxRunOptions, s: &mut MockState) -> HarnessResult<SandboxRunResult> {
         let command = &o.process.command;
@@ -726,20 +726,20 @@ mod tests {
         MockSandbox::new(handle)
     }
 
-    fn demo_skill() -> HarnessV1Skill {
-        HarnessV1Skill {
+    fn demo_skill() -> HarnessSkill {
+        HarnessSkill {
             name: "demo".into(),
             description: "Demo skill.".into(),
             content: "Use reference.md.".into(),
-            files: Some(vec![HarnessV1SkillFile {
+            files: Some(vec![HarnessSkillFile {
                 path: "reference.md".into(),
                 content: "# Reference".into(),
             }]),
         }
     }
 
-    fn skill(name: &str, d: &str, c: &str) -> HarnessV1Skill {
-        HarnessV1Skill {
+    fn skill(name: &str, d: &str, c: &str) -> HarnessSkill {
+        HarnessSkill {
             name: name.into(),
             description: d.into(),
             content: c.into(),
@@ -749,7 +749,7 @@ mod tests {
 
     async fn write(
         sandbox: &MockSandbox,
-        skills: Vec<HarnessV1Skill>,
+        skills: Vec<HarnessSkill>,
     ) -> HarnessResult<WriteSkillsResult> {
         write_skills(WriteSkillsOptions::new(
             sandbox,
@@ -932,7 +932,7 @@ mod tests {
     async fn validates_all_skill_paths_before_writing() {
         let sb = make_sandbox();
         let mut bad = demo_skill();
-        bad.files = Some(vec![HarnessV1SkillFile {
+        bad.files = Some(vec![HarnessSkillFile {
             path: "../reference.md".into(),
             content: "# Reference".into(),
         }]);
@@ -969,7 +969,7 @@ mod tests {
     async fn can_strip_leading_slashes_from_attached_file_paths() {
         let sb = make_sandbox();
         let mut s = skill("demo", "Demo.", "Demo.");
-        s.files = Some(vec![HarnessV1SkillFile {
+        s.files = Some(vec![HarnessSkillFile {
             path: "/reference.md".into(),
             content: "# Reference".into(),
         }]);

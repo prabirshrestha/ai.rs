@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::harness::errors::{BoxError, HarnessResult};
+use crate::harness::error::{BoxError, HarnessResult};
 
 /// `ReadableStream<Uint8Array>`.
 pub type ByteStream = BoxStream<'static, Result<Bytes, BoxError>>;

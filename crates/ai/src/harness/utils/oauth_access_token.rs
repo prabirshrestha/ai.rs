@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::harness::errors::HarnessResult;
+use crate::harness::error::HarnessResult;
 use crate::harness::utils::native_subscription::get_jwt_expires_at;
 use crate::harness::utils::plain_error;
 

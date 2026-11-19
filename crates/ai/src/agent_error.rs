@@ -23,6 +23,10 @@ pub enum AgentError {
 
     #[error("{0}")]
     Other(String),
+
+    #[cfg(feature = "harness")]
+    #[error(transparent)]
+    Harness(#[from] crate::harness::error::HarnessError),
 }
 
 pub type AgentResult<T> = std::result::Result<T, AgentError>;

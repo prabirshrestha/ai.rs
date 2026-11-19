@@ -1,55 +1,25 @@
-//! Port of `@ai-sdk/harness/utils`: helpers harness adapters share.
+//! Helpers shared by the harness adapters.
 
 pub mod ai_gateway_auth;
 pub mod authentication_environment;
-pub mod bridge_asset;
-pub mod bridge_auth;
-pub mod bridge_auth_protocol;
-pub mod bridge_diagnostics;
-pub mod bridge_endpoint;
-pub mod bridge_ready;
-pub mod bridge_user_message_submitter;
-pub mod bridge_web_socket;
 pub mod classify_disk_log;
 pub mod credential_forwarding;
-pub mod extract_harness_prompt_content;
-pub mod harness_bridge_capability_unsupported_error;
 pub mod is_sandbox_write_protected_path;
 pub mod native_subscription;
 pub mod oauth_access_token;
 pub mod os;
-pub mod sandbox_channel;
 pub mod sandbox_credential_brokering;
 pub mod sandbox_home_dir;
 pub mod shell_quote;
 pub mod sleep;
-pub mod tool_model_output;
-pub mod tungstenite_web_socket;
 pub mod write_instructions;
 pub mod write_skills;
 
-pub use crate::harness::spec::paths::encode_harness_path_segment;
+pub use crate::harness::paths::encode_harness_path_segment;
 pub use ai_gateway_auth::*;
 pub use authentication_environment::*;
-pub use bridge_asset::*;
-pub use bridge_auth::{BridgeAuthKeyPair, create_bridge_auth_key_pair};
-pub use bridge_auth_protocol::BRIDGE_AUTH_PUBLIC_KEY_ENV;
-pub use bridge_diagnostics::{
-    BridgeErrorInput, BridgeProcessStreamName, BridgeStreamDone, ForwardBridgeProcessStreamOptions,
-    LogBridgeErrorOptions, create_bridge_error_handler, create_bridge_startup_error,
-    drain_bridge_process_stream, format_bridge_error, forward_bridge_process_stream,
-    log_bridge_error,
-};
-pub use bridge_endpoint::*;
-pub use bridge_ready::*;
-pub use bridge_user_message_submitter::*;
-pub use bridge_web_socket::*;
 pub use classify_disk_log::*;
 pub use credential_forwarding::*;
-pub use extract_harness_prompt_content::{
-    HarnessPromptContent, HarnessPromptContentPart, extract_harness_prompt_content,
-};
-pub use harness_bridge_capability_unsupported_error::*;
 pub use is_sandbox_write_protected_path::*;
 pub use native_subscription::{
     get_jwt_expires_at, parse_jwt_payload, read_linux_secret_service_password,
@@ -58,20 +28,16 @@ pub use native_subscription::{
 };
 pub use oauth_access_token::*;
 pub use os::*;
-pub use sandbox_channel::*;
 pub use sandbox_credential_brokering::*;
 pub use sandbox_home_dir::*;
 pub use shell_quote::*;
 pub use sleep::*;
-pub use tool_model_output::*;
-pub use tungstenite_web_socket::*;
 pub use write_instructions::*;
 pub use write_skills::*;
 
-use crate::harness::errors::BoxError;
+use crate::harness::error::BoxError;
 
-/// `new Error(message)`: a plain error that `get_harness_error_message`
-/// masks.
+/// A plain error from a message.
 pub(crate) fn plain_error(message: impl Into<String>) -> BoxError {
     message.into().into()
 }

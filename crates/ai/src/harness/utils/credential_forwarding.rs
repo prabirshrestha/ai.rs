@@ -2,9 +2,9 @@
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::harness::errors::HarnessResult;
-use crate::harness::spec::{HarnessV1CredentialForwarding, HarnessV1CredentialForwardingOptions};
+use crate::harness::error::HarnessResult;
 use crate::harness::utils::sandbox_credential_brokering::generate_sandbox_credential_placeholder;
+use crate::harness::{HarnessCredentialForwarding, HarnessCredentialForwardingOptions};
 
 /// `applyCredentialForwarding({ environment, credentialEnvironmentVariables,
 /// credentialForwarding })`: passes each present credential through the
@@ -12,7 +12,7 @@ use crate::harness::utils::sandbox_credential_brokering::generate_sandbox_creden
 pub async fn apply_credential_forwarding(
     environment: &IndexMap<String, String>,
     credential_environment_variables: &[String],
-    credential_forwarding: Option<&HarnessV1CredentialForwarding>,
+    credential_forwarding: Option<&HarnessCredentialForwarding>,
 ) -> HarnessResult<IndexMap<String, String>> {
     let mut forwarded_environment = environment.clone();
     let Some(credential_forwarding) = credential_forwarding else {
@@ -27,7 +27,7 @@ pub async fn apply_credential_forwarding(
         else {
             continue;
         };
-        let forwarded = credential_forwarding(HarnessV1CredentialForwardingOptions {
+        let forwarded = credential_forwarding(HarnessCredentialForwardingOptions {
             credential,
             environment_variable_name: environment_variable_name.clone(),
         })
@@ -44,7 +44,7 @@ pub async fn apply_credential_forwarding(
 pub async fn resolve_sandbox_credential_environment(
     environment: &IndexMap<String, String>,
     credential_environment_variables: &[String],
-    credential_forwarding: Option<&HarnessV1CredentialForwarding>,
+    credential_forwarding: Option<&HarnessCredentialForwarding>,
     previous_sandbox_credential_environment: Option<&IndexMap<String, String>>,
 ) -> HarnessResult<IndexMap<String, String>> {
     let mut sandbox_credential_environment = IndexMap::new();
@@ -67,7 +67,7 @@ pub async fn resolve_sandbox_credential_environment(
         let value = match credential_forwarding {
             None => placeholder,
             Some(credential_forwarding) => {
-                credential_forwarding(HarnessV1CredentialForwardingOptions {
+                credential_forwarding(HarnessCredentialForwardingOptions {
                     credential: placeholder,
                     environment_variable_name: environment_variable_name.clone(),
                 })
@@ -96,17 +96,17 @@ mod tests {
 
     /// `vi.fn(callback)`: a forwarding callback that records its calls.
     fn recording(
-        callback: impl Fn(&HarnessV1CredentialForwardingOptions) -> HarnessResult<String>
+        callback: impl Fn(&HarnessCredentialForwardingOptions) -> HarnessResult<String>
         + Send
         + Sync
         + 'static,
     ) -> (
-        HarnessV1CredentialForwarding,
-        Arc<Mutex<Vec<HarnessV1CredentialForwardingOptions>>>,
+        HarnessCredentialForwarding,
+        Arc<Mutex<Vec<HarnessCredentialForwardingOptions>>>,
     ) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
-        let forwarding: HarnessV1CredentialForwarding = Arc::new(move |options| {
+        let forwarding: HarnessCredentialForwarding = Arc::new(move |options| {
             let result = callback(&options);
             recorded.lock().push(options);
             async move { result }.boxed()
@@ -114,8 +114,8 @@ mod tests {
         (forwarding, calls)
     }
 
-    fn options(credential: &str, name: &str) -> HarnessV1CredentialForwardingOptions {
-        HarnessV1CredentialForwardingOptions {
+    fn options(credential: &str, name: &str) -> HarnessCredentialForwardingOptions {
+        HarnessCredentialForwardingOptions {
             credential: credential.into(),
             environment_variable_name: name.into(),
         }

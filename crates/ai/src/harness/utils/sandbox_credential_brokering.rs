@@ -7,11 +7,11 @@ use indexmap::{IndexMap, IndexSet};
 use regex::Regex;
 use ring::rand::SecureRandom as _;
 
-use crate::harness::errors::HarnessResult;
-use crate::harness::spec::{
-    HarnessV1RequestTransformation, HarnessV1RequestTransformationKeyValueMatcher,
-    HarnessV1RequestTransformationMatch, HarnessV1RequestTransformationMatcher,
-    HarnessV1RequestTransformationTransform,
+use crate::harness::error::HarnessResult;
+use crate::harness::{
+    HarnessRequestTransformation, HarnessRequestTransformationKeyValueMatcher,
+    HarnessRequestTransformationMatch, HarnessRequestTransformationMatcher,
+    HarnessRequestTransformationTransform,
 };
 
 const SANDBOX_CREDENTIAL_PLACEHOLDER_PREFIX: &str = "aisdkhc_";
@@ -103,31 +103,27 @@ pub fn create_credential_request_transformation(
     match_url: &str,
     match_headers: &IndexMap<String, String>,
     transform_headers: &IndexMap<String, String>,
-) -> HarnessResult<HarnessV1RequestTransformation> {
+) -> HarnessResult<HarnessRequestTransformation> {
     let url = reqwest::Url::parse(match_url)?;
     let pathname = url.path().trim_end_matches('/');
-    Ok(HarnessV1RequestTransformation {
-        r#match: HarnessV1RequestTransformationMatch {
+    Ok(HarnessRequestTransformation {
+        r#match: HarnessRequestTransformationMatch {
             host: url.host_str().unwrap_or_default().to_string(),
             path: (!pathname.is_empty())
-                .then(|| HarnessV1RequestTransformationMatcher::StartsWith(pathname.to_string())),
+                .then(|| HarnessRequestTransformationMatcher::StartsWith(pathname.to_string())),
             method: None,
             query_string: None,
             headers: Some(
                 match_headers
                     .iter()
-                    .map(
-                        |(key, value)| HarnessV1RequestTransformationKeyValueMatcher {
-                            key: Some(HarnessV1RequestTransformationMatcher::Exact(key.clone())),
-                            value: Some(HarnessV1RequestTransformationMatcher::Exact(
-                                value.clone(),
-                            )),
-                        },
-                    )
+                    .map(|(key, value)| HarnessRequestTransformationKeyValueMatcher {
+                        key: Some(HarnessRequestTransformationMatcher::Exact(key.clone())),
+                        value: Some(HarnessRequestTransformationMatcher::Exact(value.clone())),
+                    })
                     .collect(),
             ),
         },
-        transform: HarnessV1RequestTransformationTransform {
+        transform: HarnessRequestTransformationTransform {
             headers: transform_headers.clone(),
         },
     })

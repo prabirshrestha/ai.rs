@@ -7,9 +7,9 @@ use base64::Engine as _;
 use tokio_util::sync::CancellationToken;
 
 use super::shell_quote;
-use crate::harness::errors::{BoxError, HarnessResult};
+use crate::harness::error::{BoxError, HarnessResult};
+use crate::harness::paths::{normalize_posix, posix_join};
 use crate::harness::sandbox::{SandboxProcessOptions, SandboxRunOptions, SandboxSession};
-use crate::harness::spec::paths::{normalize_posix, posix_join};
 
 /// Upper bound on entries scanned inside write-protected directories per
 /// check. Exceeding it reports the write as protected.
