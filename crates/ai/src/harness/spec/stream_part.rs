@@ -170,6 +170,11 @@ pub enum HarnessV1StreamPart {
         usage: LanguageModelV4Usage,
         #[serde(skip_serializing_if = "Option::is_none")]
         harness_metadata: Option<HarnessV1Metadata>,
+        /// [rust] The non-enumerable event checkpoint a sandbox channel
+        /// attaches to a dispatched event (`pinSandboxChannelEventCheckpoint`).
+        /// Never serialized, and equal to every other checkpoint.
+        #[serde(skip)]
+        checkpoint: Option<crate::harness::utils::sandbox_channel::SandboxChannelEventCheckpoint>,
     },
     /// Turn end.
     Finish {

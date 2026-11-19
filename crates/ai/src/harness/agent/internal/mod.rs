@@ -5,11 +5,13 @@
 
 pub mod bootstrap_recipe;
 pub mod deferred_sandbox_setup;
+pub mod harness_stream_text_result;
 pub mod lifecycle_state_validation;
 pub mod on_bootstrap_marker;
 pub mod permission_mode;
 pub mod prepared_sandbox_identity;
 pub mod resolve_observability;
+pub mod run_prompt;
 pub mod sandbox_bootstrap;
 pub mod sandbox_operations;
 pub mod strip_work_dir;
