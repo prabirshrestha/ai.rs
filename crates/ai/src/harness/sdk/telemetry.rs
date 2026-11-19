@@ -237,15 +237,22 @@ pub struct GenerateTextEndEvent {
     pub runtime_context: Context,
     pub content: Vec<ContentPart>,
     pub text: String,
+    #[serde(serialize_with = "serialize_reasoning")]
     pub reasoning: Vec<crate::harness::sdk::messages::ReasoningPart>,
     pub reasoning_text: Option<String>,
     pub files: Vec<JsonValue>,
     pub sources: Vec<JsonValue>,
+    #[serde(serialize_with = "serialize_tool_calls")]
     pub tool_calls: Vec<TypedToolCall>,
+    #[serde(serialize_with = "serialize_tool_calls")]
     pub static_tool_calls: Vec<TypedToolCall>,
+    #[serde(serialize_with = "serialize_tool_calls")]
     pub dynamic_tool_calls: Vec<TypedToolCall>,
+    #[serde(serialize_with = "serialize_tool_results")]
     pub tool_results: Vec<crate::harness::sdk::content::TypedToolResult>,
+    #[serde(serialize_with = "serialize_tool_results")]
     pub static_tool_results: Vec<crate::harness::sdk::content::TypedToolResult>,
+    #[serde(serialize_with = "serialize_tool_results")]
     pub dynamic_tool_results: Vec<crate::harness::sdk::content::TypedToolResult>,
     pub finish_reason: FinishReason,
     pub raw_finish_reason: Option<String>,
@@ -289,48 +296,78 @@ pub fn step_to_json(step: &StepResult) -> JsonValue {
             map.insert(k.into(), v);
         };
         put(map, "text", step.text().into());
-        put(
-            map,
-            "reasoning",
-            serde_json::to_value(step.reasoning()).unwrap_or_default(),
-        );
+        put(map, "reasoning", tagged(&step.reasoning(), "reasoning"));
         if let Some(r) = step.reasoning_text() {
             put(map, "reasoningText", r.into());
         }
         put(map, "files", json!([]));
         put(map, "sources", json!([]));
-        put(
-            map,
-            "toolCalls",
-            serde_json::to_value(step.tool_calls()).unwrap_or_default(),
-        );
+        put(map, "toolCalls", tagged(&step.tool_calls(), "tool-call"));
         put(
             map,
             "staticToolCalls",
-            serde_json::to_value(step.static_tool_calls()).unwrap_or_default(),
+            tagged(&step.static_tool_calls(), "tool-call"),
         );
         put(
             map,
             "dynamicToolCalls",
-            serde_json::to_value(step.dynamic_tool_calls()).unwrap_or_default(),
+            tagged(&step.dynamic_tool_calls(), "tool-call"),
         );
         put(
             map,
             "toolResults",
-            serde_json::to_value(step.tool_results()).unwrap_or_default(),
+            tagged(&step.tool_results(), "tool-result"),
         );
         put(
             map,
             "staticToolResults",
-            serde_json::to_value(step.static_tool_results()).unwrap_or_default(),
+            tagged(&step.static_tool_results(), "tool-result"),
         );
         put(
             map,
             "dynamicToolResults",
-            serde_json::to_value(step.dynamic_tool_results()).unwrap_or_default(),
+            tagged(&step.dynamic_tool_results(), "tool-result"),
         );
     }
     value
+}
+
+/// Serialize `items` as an array of objects tagged with `type`, as the AI
+/// SDK's content parts are (`{ type: 'tool-call', ... }`).
+fn tagged<T: Serialize>(items: &[T], ty: &str) -> JsonValue {
+    JsonValue::Array(
+        items
+            .iter()
+            .map(|item| {
+                let mut value = serde_json::to_value(item).unwrap_or(JsonValue::Null);
+                if let JsonValue::Object(map) = &mut value {
+                    map.insert("type".into(), ty.into());
+                }
+                value
+            })
+            .collect(),
+    )
+}
+
+fn serialize_reasoning<S: serde::Serializer>(
+    items: &[crate::harness::sdk::messages::ReasoningPart],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    tagged(items, "reasoning").serialize(s)
+}
+
+fn serialize_tool_calls<S: serde::Serializer>(
+    items: &[TypedToolCall],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    tagged(items, "tool-call").serialize(s)
+}
+
+fn serialize_tool_results<S: serde::Serializer>(
+    items: &[crate::harness::sdk::content::TypedToolResult],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    tagged(items, "tool-result").serialize(s)
 }
 
 fn serialize_step<S: serde::Serializer>(step: &StepResult, s: S) -> Result<S::Ok, S::Error> {

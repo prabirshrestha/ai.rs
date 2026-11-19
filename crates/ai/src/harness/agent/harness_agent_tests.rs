@@ -47,6 +47,8 @@ mod lifecycle;
 mod outputs;
 #[path = "harness_agent_tests_sandbox.rs"]
 mod sandbox;
+#[path = "telemetry_integration_tests.rs"]
+mod telemetry_integration;
 #[path = "harness_agent_tests_turns.rs"]
 mod turns;
 
