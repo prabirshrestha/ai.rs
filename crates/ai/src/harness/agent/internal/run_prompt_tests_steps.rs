@@ -356,7 +356,7 @@ fn stop_counter() -> (Arc<AtomicUsize>, OnStopConditionMetFn) {
         count,
         Arc::new(move || {
             c.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {})
+            Box::pin(async { Ok(()) })
         }),
     )
 }

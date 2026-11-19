@@ -284,7 +284,7 @@ async fn pauses_custom_tool_execution_when_approval_is_required() {
     let boundary = stop_boundary_calls.clone();
     run.on_stop_condition_met = Some(Arc::new(move || {
         boundary.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {})
+        Box::pin(async { Ok(()) })
     }));
     let pending: Arc<Mutex<Vec<HarnessV1PendingToolApproval>>> = Arc::default();
     let log = pending.clone();

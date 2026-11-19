@@ -133,7 +133,8 @@ pub enum RunPromptMode {
 pub type Notify<T> = Arc<dyn Fn(T) + Send + Sync>;
 
 /// `onStopConditionMet`.
-pub type OnStopConditionMetFn = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+pub type OnStopConditionMetFn =
+    Arc<dyn Fn() -> BoxFuture<'static, HarnessResult<()>> + Send + Sync>;
 
 /// [`run_prompt`] input.
 #[derive(Clone)]
@@ -1662,7 +1663,7 @@ async fn run_loop(
                 let conditions = input.stop_conditions.clone().unwrap_or_default();
                 if is_stop_condition_met(&conditions, &steps).await {
                     if let Some(f) = &input.on_stop_condition_met {
-                        f().await;
+                        f().await?;
                     }
                     release_pending_stop_boundary(pending_stop_boundary);
                     let usage = steps
