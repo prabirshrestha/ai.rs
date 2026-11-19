@@ -33,6 +33,8 @@ tokio-tungstenite = { workspace = true, optional = true }
 default = ["harness"]
 # Port of the Vercel AI SDK harness (`@ai-sdk/harness`).
 harness = ["tokio/process", "tokio/net", "dep:tokio-tungstenite"]
+# Harness adapters (`@ai-sdk/harness-*`), each opt-in.
+harness-acp = ["harness"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
