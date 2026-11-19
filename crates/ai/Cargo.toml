@@ -27,11 +27,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 
 [features]
 default = ["harness"]
 # Port of the Vercel AI SDK harness (`@ai-sdk/harness`).
-harness = ["tokio/process"]
+harness = ["tokio/process", "tokio/net", "dep:tokio-tungstenite"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

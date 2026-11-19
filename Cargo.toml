@@ -32,3 +32,4 @@ serde_json = { version = "1.0.135", features = ["preserve_order"] }
 thiserror = "2.0.9"
 tokio = { version = "1.43.0", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.13"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }

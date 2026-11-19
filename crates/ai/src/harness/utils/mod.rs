@@ -8,6 +8,8 @@ pub mod bridge_auth_protocol;
 pub mod bridge_diagnostics;
 pub mod bridge_endpoint;
 pub mod bridge_ready;
+pub mod bridge_user_message_submitter;
+pub mod bridge_web_socket;
 pub mod classify_disk_log;
 pub mod credential_forwarding;
 pub mod extract_harness_prompt_content;
@@ -21,6 +23,7 @@ pub mod sandbox_home_dir;
 pub mod shell_quote;
 pub mod sleep;
 pub mod tool_model_output;
+pub mod tungstenite_web_socket;
 pub mod write_instructions;
 pub mod write_skills;
 
@@ -38,6 +41,8 @@ pub use bridge_diagnostics::{
 };
 pub use bridge_endpoint::*;
 pub use bridge_ready::*;
+pub use bridge_user_message_submitter::*;
+pub use bridge_web_socket::*;
 pub use classify_disk_log::*;
 pub use credential_forwarding::*;
 pub use extract_harness_prompt_content::{
@@ -57,6 +62,7 @@ pub use sandbox_home_dir::*;
 pub use shell_quote::*;
 pub use sleep::*;
 pub use tool_model_output::*;
+pub use tungstenite_web_socket::*;
 pub use write_instructions::*;
 pub use write_skills::*;
 
@@ -66,6 +72,26 @@ use crate::harness::errors::BoxError;
 /// masks.
 pub(crate) fn plain_error(message: impl Into<String>) -> BoxError {
     message.into().into()
+}
+
+/// `crypto.randomUUID()`: a random version 4 UUID.
+pub(crate) fn random_uuid() -> String {
+    use ring::rand::SecureRandom as _;
+    let mut bytes = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("the system random number generator failed");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 /// `String.prototype.localeCompare` for the identifiers and paths the
