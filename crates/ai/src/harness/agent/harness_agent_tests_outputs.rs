@@ -30,7 +30,9 @@ fn structured_turn(delta: &str) -> Vec<HarnessV1StreamPart> {
     parts(values)
 }
 
-async fn part_types(result: &crate::harness::agent::internal::harness_stream_text_result::HarnessStreamTextResult) -> Vec<String> {
+async fn part_types(
+    result: &crate::harness::agent::internal::harness_stream_text_result::HarnessStreamTextResult,
+) -> Vec<String> {
     result
         .full_stream()
         .map(|part| part.to_json()["type"].as_str().unwrap().to_string())
@@ -67,7 +69,10 @@ async fn generates_typed_output_and_sends_its_response_format_on_every_turn() {
     let session = new_session(&agent).await;
 
     let first = agent.generate(call(&session, "answer")).await.unwrap();
-    let second = agent.generate(call(&session, "answer again")).await.unwrap();
+    let second = agent
+        .generate(call(&session, "answer again"))
+        .await
+        .unwrap();
 
     assert_eq!(first.output, Some(json!({ "answer": "yes" })));
     assert_eq!(second.output, Some(json!({ "answer": "yes" })));
@@ -137,7 +142,10 @@ async fn streams_array_elements_from_typed_output() {
         .collect()
         .await;
 
-    assert_eq!(elements, vec![json!({ "answer": "yes" }), json!({ "answer": "no" })]);
+    assert_eq!(
+        elements,
+        vec![json!({ "answer": "yes" }), json!({ "answer": "no" })]
+    );
     session.destroy().await.unwrap();
 }
 
@@ -220,12 +228,21 @@ async fn stream_exposes_reasoning_from_the_final_step() {
 
     let steps = result.steps().await.unwrap();
     assert_eq!(
-        steps.iter().map(|step| step.reasoning_text()).collect::<Vec<_>>(),
-        vec![Some("First thought.".to_string()), Some("Final thought.".to_string())]
+        steps
+            .iter()
+            .map(|step| step.reasoning_text())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("First thought.".to_string()),
+            Some("Final thought.".to_string())
+        ]
     );
     let final_step = result.final_step().await.unwrap();
     assert_eq!(result.reasoning().await.unwrap(), final_step.reasoning());
-    assert_eq!(result.reasoning_text().await.unwrap(), final_step.reasoning_text());
+    assert_eq!(
+        result.reasoning_text().await.unwrap(),
+        final_step.reasoning_text()
+    );
 
     session.destroy().await.unwrap();
 }
@@ -261,7 +278,10 @@ async fn releases_the_session_after_a_turn_start_failure() {
 
     let failed = agent.stream(call(&session, "fail")).await.unwrap();
     let error = failed.text().await.unwrap_err();
-    assert!(error.to_string().contains("failed to start turn"), "{error}");
+    assert!(
+        error.to_string().contains("failed to start turn"),
+        "{error}"
+    );
 
     assert!(!session.has_unfinished_turn());
     assert!(agent.generate(call(&session, "recover")).await.is_ok());
@@ -292,7 +312,10 @@ async fn releases_the_session_after_a_continued_turn_stream_error() {
         .await
         .unwrap();
     let error = failed.text().await.unwrap_err();
-    assert!(error.to_string().contains("continued turn failed"), "{error}");
+    assert!(
+        error.to_string().contains("continued turn failed"),
+        "{error}"
+    );
 
     assert!(!session.has_unfinished_turn());
     assert!(agent.generate(call(&session, "recover")).await.is_ok());
@@ -368,9 +391,16 @@ struct SuspensionRace {
 impl SuspensionRace {
     /// `onDoStart`, `onSuspendTurn`, `onSubmitToolResult` (and `promptDone`
     /// when `close_stream`).
-    fn configure(&self, options: &mut MockHarnessOptions, close_stream: bool, message: &'static str) {
+    fn configure(
+        &self,
+        options: &mut MockHarnessOptions,
+        close_stream: bool,
+        message: &'static str,
+    ) {
         let race = self.clone();
-        options.on_do_start = Some(Arc::new(move |_| race.channel_closed.store(false, Ordering::SeqCst)));
+        options.on_do_start = Some(Arc::new(move |_| {
+            race.channel_closed.store(false, Ordering::SeqCst)
+        }));
         let race = self.clone();
         options.on_suspend_turn = Some(Arc::new(move || {
             race.channel_closed.store(true, Ordering::SeqCst);
@@ -431,7 +461,7 @@ async fn preserves_dispatched_host_results_when_the_adapter_suspends() {
                         })
                     })
                     .collect();
-                values.extend(finish_events().iter().map(|p| to_json(p)));
+                values.extend(finish_events().iter().map(to_json));
                 parts(values)
             });
         race.configure(
@@ -479,12 +509,21 @@ async fn preserves_dispatched_host_results_when_the_adapter_suspends() {
 
         assert_eq!(race.completed.lock().len(), count);
         assert_eq!(
-            continue_from.pending_tool_results.as_ref().map_or(0, |r| r.len()),
+            continue_from
+                .pending_tool_results
+                .as_ref()
+                .map_or(0, |r| r.len()),
             count
         );
         assert!(mock.tool_results().is_empty());
-        assert!(!first_parts.contains(&"error".to_string()), "{first_parts:?}");
-        assert_eq!(count_of(&first_parts, "tool-result"), count - usize::from(error));
+        assert!(
+            !first_parts.contains(&"error".to_string()),
+            "{first_parts:?}"
+        );
+        assert_eq!(
+            count_of(&first_parts, "tool-result"),
+            count - usize::from(error)
+        );
         assert_eq!(count_of(&first_parts, "tool-error"), usize::from(error));
 
         let resumed = agent
@@ -513,7 +552,10 @@ async fn preserves_dispatched_host_results_when_the_adapter_suspends() {
             } else {
                 json!({ "toolCallId": format!("call-{index}"), "output": { "answer": index.to_string() } })
             };
-            assert!(submitted.contains(&expected), "{submitted:?} missing {expected}");
+            assert!(
+                submitted.contains(&expected),
+                "{submitted:?} missing {expected}"
+            );
         }
         assert!(!second_parts.contains(&"tool-result".to_string()));
         assert!(!second_parts.contains(&"tool-error".to_string()));
@@ -556,8 +598,12 @@ async fn preserves_a_resumed_approved_host_call_across_another_suspension() {
     let agent = agent(s);
     let sandbox = make_sandbox_session();
     let mut continue_from = mock_continue_state();
-    continue_from.pending_tool_approvals =
-        Some(vec![custom_approval("approval-1", "call-1", "research", "{}")]);
+    continue_from.pending_tool_approvals = Some(vec![custom_approval(
+        "approval-1",
+        "call-1",
+        "research",
+        "{}",
+    )]);
     let session = agent
         .create_session(HarnessAgentCreateSessionOptions {
             continue_from: Some(continue_from),
@@ -583,10 +629,23 @@ async fn preserves_a_resumed_approved_host_call_across_another_suspension() {
     let continue_from = suspension.await.unwrap().unwrap();
     let first_parts = consume.await.unwrap();
 
-    assert!(!first_parts.contains(&"error".to_string()), "{first_parts:?}");
+    assert!(
+        !first_parts.contains(&"error".to_string()),
+        "{first_parts:?}"
+    );
     assert_eq!(count_of(&first_parts, "tool-result"), 1);
-    assert_eq!(continue_from.pending_tool_results.as_ref().map_or(0, |r| r.len()), 1);
-    assert!(to_json(&continue_from).get("pendingToolApprovals").is_none());
+    assert_eq!(
+        continue_from
+            .pending_tool_results
+            .as_ref()
+            .map_or(0, |r| r.len()),
+        1
+    );
+    assert!(
+        to_json(&continue_from)
+            .get("pendingToolApprovals")
+            .is_none()
+    );
 
     let resumed = agent
         .create_session(HarnessAgentCreateSessionOptions {
@@ -604,7 +663,10 @@ async fn preserves_a_resumed_approved_host_call_across_another_suspension() {
 
     assert_eq!(race.executions.load(Ordering::SeqCst), 1);
     assert_eq!(
-        mock.tool_results().iter().map(submitted_json).collect::<Vec<_>>(),
+        mock.tool_results()
+            .iter()
+            .map(submitted_json)
+            .collect::<Vec<_>>(),
         vec![json!({ "toolCallId": "call-1", "output": { "answer": "retained" } })]
     );
     resumed.destroy().await.unwrap();
@@ -660,7 +722,13 @@ async fn session_detach_and_stop_preserve_an_in_flight_host_result_in_their_nest
         first_read.await.unwrap();
 
         assert_eq!(
-            to_json(&resume_from.continue_from.as_ref().unwrap().pending_tool_results),
+            to_json(
+                &resume_from
+                    .continue_from
+                    .as_ref()
+                    .unwrap()
+                    .pending_tool_results
+            ),
             json!([{
                 "toolCallId": "call-1",
                 "toolName": "research",
@@ -687,7 +755,10 @@ async fn session_detach_and_stop_preserve_an_in_flight_host_result_in_their_nest
         assert_eq!(race.executions.load(Ordering::SeqCst), 1);
         assert_eq!(mock.continue_count(), 1);
         assert_eq!(
-            mock.tool_results().iter().map(submitted_json).collect::<Vec<_>>(),
+            mock.tool_results()
+                .iter()
+                .map(submitted_json)
+                .collect::<Vec<_>>(),
             vec![json!({ "toolCallId": "call-1", "output": { "answer": "retained" } })]
         );
         resumed.destroy().await.unwrap();
@@ -743,7 +814,9 @@ fn aborting_mock() -> Mock {
     let count = prompt_turn_count.clone();
     let mut options = MockHarnessOptions::script(move || {
         if prompt_turn_count.load(Ordering::SeqCst) == 1 {
-            parts(vec![json!({ "type": "error", "error": "AbortError: This operation was aborted" })])
+            parts(vec![
+                json!({ "type": "error", "error": "AbortError: This operation was aborted" }),
+            ])
         } else {
             finish_events()
         }
@@ -788,7 +861,9 @@ async fn does_not_log_a_bridge_error_to_stderr_for_a_turn_the_caller_aborted() {
     let abort_controller = tokio_util::sync::CancellationToken::new();
     abort_controller.cancel();
     let mock = MockHarnessOptions::script(|| {
-        parts(vec![json!({ "type": "error", "error": "AbortError: This operation was aborted" })])
+        parts(vec![
+            json!({ "type": "error", "error": "AbortError: This operation was aborted" }),
+        ])
     })
     .build();
     let agent = agent(settings(&mock));

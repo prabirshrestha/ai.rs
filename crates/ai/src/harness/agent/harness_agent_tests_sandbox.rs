@@ -13,9 +13,11 @@ use crate::harness::spec::lifecycle_state::HarnessV1ResumeSessionState;
 const MKDIR: &str = "mkdir -p \"$WORK_DIR\"";
 
 fn bootstrap_marker(path: &str) -> bool {
-    regex::Regex::new(r"^/home/agent/\.ai-sdk-harness/\.harness-bootstrap/mock/\.bootstrap-[0-9a-f]{16}\.ok$")
-        .unwrap()
-        .is_match(path)
+    regex::Regex::new(
+        r"^/home/agent/\.ai-sdk-harness/\.harness-bootstrap/mock/\.bootstrap-[0-9a-f]{16}\.ok$",
+    )
+    .unwrap()
+    .is_match(path)
 }
 
 /// `onSession` calls as `(session description, sessionWorkDir)`, logged
@@ -49,7 +51,9 @@ impl OnSessionRecorder {
     }
 }
 
-fn sandbox_config(f: impl FnOnce(&mut HarnessAgentSandboxConfig)) -> Option<HarnessAgentSandboxConfig> {
+fn sandbox_config(
+    f: impl FnOnce(&mut HarnessAgentSandboxConfig),
+) -> Option<HarnessAgentSandboxConfig> {
     let mut config = HarnessAgentSandboxConfig::default();
     f(&mut config);
     Some(config)
@@ -108,7 +112,8 @@ async fn sandbox_config_on_session_runs_after_the_session_work_dir_exists_and_be
 async fn work_dir_dot_uses_the_sandbox_default_working_directory_for_the_session_and_harness() {
     let mock = MockHarnessOptions::script(Vec::new).build();
     let inner = ScriptedSandbox::new("mock sandbox", Arc::default()).with_run(empty_run());
-    let sandbox = TestSandbox::with_inner(inner.clone()).with_restricted(inner.relabeled("restricted"));
+    let sandbox =
+        TestSandbox::with_inner(inner.clone()).with_restricted(inner.relabeled("restricted"));
     let on_session = OnSessionRecorder::default();
     let mut s = settings(&mock);
     s.sandbox_config = sandbox_config(|c| {
@@ -126,7 +131,11 @@ async fn work_dir_dot_uses_the_sandbox_default_working_directory_for_the_session
         .unwrap();
     touch_started_sandbox(&mock).await.unwrap();
 
-    assert!(sandbox.runs().contains(&RunCall::new(MKDIR, &[("WORK_DIR", "/work")])));
+    assert!(
+        sandbox
+            .runs()
+            .contains(&RunCall::new(MKDIR, &[("WORK_DIR", "/work")]))
+    );
     assert_eq!(
         on_session.calls(),
         vec![("restricted".to_string(), "/work".to_string())]
@@ -183,7 +192,8 @@ async fn requires_a_provided_sandbox_session() {
 async fn uses_a_provided_basic_sandbox_session_resolves_its_working_directory_and_applies_the_harness_bootstrap_recipe()
  {
     let mock = with_recipe(MockHarnessOptions::script(Vec::new)).build();
-    let restricted_session = ScriptedSandbox::new("restricted", Arc::default()).with_read_text(|_| Ok(None));
+    let restricted_session =
+        ScriptedSandbox::new("restricted", Arc::default()).with_read_text(|_| Ok(None));
     let basic: Arc<dyn SandboxSession> = Arc::new(restricted_session.clone());
     let agent = agent(settings(&mock));
 
@@ -198,14 +208,26 @@ async fn uses_a_provided_basic_sandbox_session_resolves_its_working_directory_an
         .unwrap();
 
     assert!(
-        restricted_session.writes.lock().iter().any(|path| bootstrap_marker(path)),
+        restricted_session
+            .writes
+            .lock()
+            .iter()
+            .any(|path| bootstrap_marker(path)),
         "{:?}",
         restricted_session.writes.lock()
     );
-    assert!(restricted_session.runs.lock().contains(&RunCall::new("pwd", &[])));
+    assert!(
+        restricted_session
+            .runs
+            .lock()
+            .contains(&RunCall::new("pwd", &[]))
+    );
     match mock.start_call(0).sandbox_session {
         HarnessV1SandboxSessionRef::Basic(started) => {
-            assert!(std::ptr::addr_eq(Arc::as_ptr(&started), Arc::as_ptr(&basic)));
+            assert!(std::ptr::addr_eq(
+                Arc::as_ptr(&started),
+                Arc::as_ptr(&basic)
+            ));
         }
         other => panic!("expected the provided basic session, got {other:?}"),
     }
@@ -257,7 +279,11 @@ async fn sandbox_config_on_bootstrap_runs_for_a_resumed_session_missing_its_mark
 
     assert_eq!(bootstraps.load(Ordering::SeqCst), 1);
     assert_eq!(
-        on_session.calls().iter().map(|(_, dir)| dir.clone()).collect::<Vec<_>>(),
+        on_session
+            .calls()
+            .iter()
+            .map(|(_, dir)| dir.clone())
+            .collect::<Vec<_>>(),
         vec!["/work/ai-sdk"]
     );
 
@@ -298,7 +324,10 @@ async fn read_history_reads_the_runtime_history_through_the_adapter() {
 
     assert_eq!(session.read_history(None).await.unwrap(), history);
     session.read_history(Some("cursor-1".into())).await.unwrap();
-    assert_eq!(since_calls.lock().last().unwrap().as_deref(), Some("cursor-1"));
+    assert_eq!(
+        since_calls.lock().last().unwrap().as_deref(),
+        Some("cursor-1")
+    );
 
     session.destroy().await.unwrap();
 }
@@ -335,7 +364,10 @@ async fn read_history_rejects_once_the_session_is_no_longer_active() {
     session.destroy().await.unwrap();
 
     let message = err_message(session.read_history(None).await);
-    assert!(message.contains("not active and cannot read history"), "{message}");
+    assert!(
+        message.contains("not active and cannot read history"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -357,7 +389,11 @@ async fn ensures_the_harness_bootstrap_recipe_on_resumed_sessions() {
         .await
         .unwrap();
 
-    assert!(bootstrap_marker(&inner.reads.lock()[0]), "{:?}", inner.reads.lock());
+    assert!(
+        bootstrap_marker(&inner.reads.lock()[0]),
+        "{:?}",
+        inner.reads.lock()
+    );
     assert!(
         bootstrap_marker(inner.writes.lock().last().unwrap()),
         "{:?}",
@@ -386,7 +422,11 @@ async fn sandbox_config_on_session_runs_for_resumed_sessions() {
     touch_started_sandbox(&mock).await.unwrap();
 
     assert_eq!(
-        on_session.calls().iter().map(|(_, dir)| dir.clone()).collect::<Vec<_>>(),
+        on_session
+            .calls()
+            .iter()
+            .map(|(_, dir)| dir.clone())
+            .collect::<Vec<_>>(),
         vec!["/work/mock-s1"]
     );
 
@@ -415,7 +455,8 @@ async fn for_a_harness_without_a_bootstrap_recipe_sandbox_setup_runs_on_the_firs
     let inner = ScriptedSandbox::new("mock sandbox", log.clone())
         .with_run(empty_run())
         .with_read_text(|_| Ok(Some("content".into())));
-    let sandbox = TestSandbox::with_inner(inner.clone()).with_restricted(inner.relabeled("restricted"));
+    let sandbox =
+        TestSandbox::with_inner(inner.clone()).with_restricted(inner.relabeled("restricted"));
     let on_session = OnSessionRecorder::with_log(log.clone());
     let mut s = settings(&mock);
     s.sandbox_config = sandbox_config(|c| c.on_session = Some(on_session.hook()));
@@ -530,7 +571,11 @@ async fn for_a_harness_without_a_bootstrap_recipe_a_failed_sandbox_setup_rejects
     let started_sandbox = started_session(&mock);
 
     assert_eq!(
-        err_message(started_sandbox.read_text_file(read_options("/work/mock-s1/a.txt")).await),
+        err_message(
+            started_sandbox
+                .read_text_file(read_options("/work/mock-s1/a.txt"))
+                .await
+        ),
         "Failed to create sandbox work directory /work/mock-s1 (exit 1): denied"
     );
     assert!(inner.reads.lock().is_empty());
@@ -550,7 +595,8 @@ async fn for_a_harness_without_a_bootstrap_recipe_a_failed_sandbox_setup_rejects
 }
 
 #[tokio::test]
-async fn for_a_harness_without_a_bootstrap_recipe_stopping_and_destroying_the_sandbox_does_not_run_setup() {
+async fn for_a_harness_without_a_bootstrap_recipe_stopping_and_destroying_the_sandbox_does_not_run_setup()
+ {
     let mock = MockHarnessOptions::script(Vec::new).build();
     let sandbox = make_sandbox_session();
     let on_session = OnSessionRecorder::default();
@@ -581,11 +627,16 @@ async fn for_a_harness_without_a_bootstrap_recipe_stopping_and_destroying_the_sa
 }
 
 #[tokio::test]
-async fn create_session_reports_a_missing_sandbox_before_it_asks_the_harness_for_a_bootstrap_recipe() {
+async fn create_session_reports_a_missing_sandbox_before_it_asks_the_harness_for_a_bootstrap_recipe()
+ {
     let mock = with_recipe(MockHarnessOptions::script(Vec::new)).build();
 
     assert_eq!(
-        err_message(agent(settings(&mock)).create_session(Default::default()).await),
+        err_message(
+            agent(settings(&mock))
+                .create_session(Default::default())
+                .await
+        ),
         "HarnessAgent.createSession: pass `sandboxSession` to createSession()."
     );
 
@@ -627,8 +678,7 @@ fn creator(
 async fn for_a_harness_without_a_bootstrap_recipe_create_sandbox_session_runs_on_the_first_sandbox_operation_with_setup_before_it()
  {
     let mock = MockHarnessOptions::script(Vec::new).build();
-    let sandbox =
-        TestSandbox::with_inner(ScriptedSandbox::new("Test sandbox.", Arc::default()));
+    let sandbox = TestSandbox::with_inner(ScriptedSandbox::new("Test sandbox.", Arc::default()));
     let (creator, create_calls) = creator("/work", &sandbox, 0, Arc::default());
     let on_session = OnSessionRecorder::default();
     let mut s = settings(&mock);
@@ -703,10 +753,12 @@ async fn for_a_harness_without_a_bootstrap_recipe_a_failed_create_sandbox_sessio
 }
 
 #[tokio::test]
-async fn for_a_harness_with_a_bootstrap_recipe_create_sandbox_session_runs_in_create_session_and_skips_pwd() {
+async fn for_a_harness_with_a_bootstrap_recipe_create_sandbox_session_runs_in_create_session_and_skips_pwd()
+ {
     let mock = with_recipe(MockHarnessOptions::script(Vec::new)).build();
     let sandbox = make_sandbox_session();
-    let abort_signals: Arc<Mutex<Vec<Option<tokio_util::sync::CancellationToken>>>> = Arc::default();
+    let abort_signals: Arc<Mutex<Vec<Option<tokio_util::sync::CancellationToken>>>> =
+        Arc::default();
     let (creator, _) = creator("/custom", &sandbox, 0, abort_signals.clone());
     let abort_controller = tokio_util::sync::CancellationToken::new();
     let agent = agent(settings(&mock));
@@ -725,7 +777,9 @@ async fn for_a_harness_with_a_bootstrap_recipe_create_sandbox_session_runs_in_cr
     assert!(abort_signals.lock()[0].is_some());
     assert!(!sandbox.runs().iter().any(|r| r.command == "pwd"));
     let started = mock.start_call(0);
-    assert!(matches!(&started.sandbox_session, HarnessV1SandboxSessionRef::Network(s) if s.id() == "sandbox"));
+    assert!(
+        matches!(&started.sandbox_session, HarnessV1SandboxSessionRef::Network(s) if s.id() == "sandbox")
+    );
     assert_eq!(started.session_work_dir, "/custom/mock-s1");
 
     session.destroy().await.unwrap();
@@ -743,7 +797,12 @@ fn create_session_rejects_resume_state_with_top_level_pending_tool_approvals() {
         "pendingToolApprovals": [],
     }))
     .unwrap_err();
-    assert!(error.to_string().contains("cannot contain pending tool approvals"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot contain pending tool approvals"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -756,5 +815,10 @@ fn create_session_rejects_resume_state_with_top_level_pending_tool_results() {
         "pendingToolResults": [],
     }))
     .unwrap_err();
-    assert!(error.to_string().contains("cannot contain pending tool results"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot contain pending tool results"),
+        "{error}"
+    );
 }

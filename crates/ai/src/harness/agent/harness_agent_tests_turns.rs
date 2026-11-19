@@ -7,8 +7,8 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use super::*;
-use crate::harness::agent::internal::run_prompt::tests::{FakeSession, SubmitFn};
 use crate::harness::agent::internal::run_prompt::tests::tool_outputs::approval_config;
+use crate::harness::agent::internal::run_prompt::tests::{FakeSession, SubmitFn};
 use crate::harness::sdk::messages::SystemModelMessage;
 use crate::harness::sdk::stop_condition::{StopCondition, is_step_count, stop_condition};
 use crate::harness::sdk::tool::Tool;
@@ -34,7 +34,10 @@ async fn prepares_model_skills_instructions_tools_and_the_prompt_for_each_fresh_
     let calls = prepare_calls.clone();
     s.prepare_call = Some(Arc::new(move |mut call: HarnessAgentPrepareCallOptions| {
         calls.lock().push(call.options.clone());
-        let tenant = call.options.as_ref().unwrap()["tenant"].as_str().unwrap().to_string();
+        let tenant = call.options.as_ref().unwrap()["tenant"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let prompt = match &call.prompt {
             Some(HarnessAgentCallPrompt::Text(text)) => text.clone(),
             _ => unreachable!(),
@@ -49,7 +52,9 @@ async fn prepares_model_skills_instructions_tools_and_the_prompt_for_each_fresh_
         }]);
         call.instructions = Some(HarnessAgentInstructions::System(SystemModelMessage {
             content: format!("Serve {tenant}"),
-            provider_options: Some(serde_json::from_value(json!({ "test": { "cache": true } })).unwrap()),
+            provider_options: Some(
+                serde_json::from_value(json!({ "test": { "cache": true } })).unwrap(),
+            ),
         }));
         call.tools = (tenant == "alpha").then(|| tools(vec![("echo", echo.clone())]));
         Box::pin(async move { Ok(call) })
@@ -68,13 +73,20 @@ async fn prepares_model_skills_instructions_tools_and_the_prompt_for_each_fresh_
     let prompt_turns = mock.record.prompt_turns.lock().clone();
     assert_eq!(prompt_turns.len(), 2);
     for (turn, tenant, tools) in [
-        (&prompt_turns[0], "alpha", json!([{ "name": "echo", "description": "Echo a value." }])),
+        (
+            &prompt_turns[0],
+            "alpha",
+            json!([{ "name": "echo", "description": "Echo a value." }]),
+        ),
         (&prompt_turns[1], "beta", json!([])),
     ] {
         assert_eq!(prompt_text(&turn.prompt), format!("Hello for {tenant}"));
         assert_eq!(turn.settings.model, Some(format!("model-{tenant}")));
         assert_eq!(turn.settings.instructions, Some(format!("Serve {tenant}")));
-        assert!(matches(&to_json(&turn.settings.skills), &json!([{ "name": tenant }])));
+        assert!(matches(
+            &to_json(&turn.settings.skills),
+            &json!([{ "name": tenant }])
+        ));
         assert!(matches(&to_json(&turn.settings.tools), &tools));
     }
     assert_eq!(prepare_calls.lock().len(), 2);
@@ -115,7 +127,10 @@ async fn experimental_steer_submits_a_message_to_the_running_turn() {
     let session = new_session(&agent).await;
     let result = agent.stream(call(&session, "Start.")).await.unwrap();
 
-    agent.experimental_steer(&session, "Change course.").await.unwrap();
+    agent
+        .experimental_steer(&session, "Change course.")
+        .await
+        .unwrap();
 
     assert_eq!(mock.user_messages(), vec!["Change course."]);
     gates.finish_all();
@@ -171,7 +186,10 @@ async fn experimental_steer_rejects_when_the_session_has_no_running_turn() {
     let session = new_session(&agent).await;
 
     let message = err_message(agent.experimental_steer(&session, "Change course.").await);
-    assert!(message.contains("has no running turn to steer"), "{message}");
+    assert!(
+        message.contains("has no running turn to steer"),
+        "{message}"
+    );
 
     session.destroy().await.unwrap();
 }
@@ -197,7 +215,10 @@ async fn experimental_steer_rejects_while_the_turn_awaits_tool_approval() {
     result.consume_stream().await;
 
     let message = err_message(agent.experimental_steer(&session, "Change course.").await);
-    assert!(message.contains("has no running turn to steer"), "{message}");
+    assert!(
+        message.contains("has no running turn to steer"),
+        "{message}"
+    );
     assert!(mock.user_messages().is_empty());
 
     session.destroy().await.unwrap();
@@ -221,7 +242,10 @@ async fn experimental_steer_rejects_after_the_active_turn_is_suspended() {
 
     session.suspend_turn().await.unwrap();
     let message = err_message(agent.experimental_steer(&session, "Change course.").await);
-    assert!(message.contains("has ended and cannot be reused"), "{message}");
+    assert!(
+        message.contains("has ended and cannot be reused"),
+        "{message}"
+    );
     assert!(mock.user_messages().is_empty());
 
     gates.finish_all();
@@ -236,12 +260,18 @@ async fn experimental_steer_targets_the_current_turn_when_a_session_is_reused() 
     let session = new_session(&agent).await;
 
     let first = agent.stream(call(&session, "First.")).await.unwrap();
-    agent.experimental_steer(&session, "Steer first.").await.unwrap();
+    agent
+        .experimental_steer(&session, "Steer first.")
+        .await
+        .unwrap();
     gates.finish_next();
     first.consume_stream().await;
 
     let second = agent.stream(call(&session, "Second.")).await.unwrap();
-    agent.experimental_steer(&session, "Steer second.").await.unwrap();
+    agent
+        .experimental_steer(&session, "Steer second.")
+        .await
+        .unwrap();
     gates.finish_next();
     second.consume_stream().await;
 
@@ -336,7 +366,10 @@ async fn stream_and_continued_turns_apply_stop_when_independently() {
 
     let sandbox = make_sandbox_session();
     let session = agent.create_session(with_sandbox(&sandbox)).await.unwrap();
-    let first = agent.stream(call(&session, "one step at a time")).await.unwrap();
+    let first = agent
+        .stream(call(&session, "one step at a time"))
+        .await
+        .unwrap();
     first.consume_stream().await;
     assert_eq!(first.steps().await.unwrap().len(), 1);
     let mut continue_from = session.suspend_turn().await.unwrap();

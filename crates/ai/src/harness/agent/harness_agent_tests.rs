@@ -11,12 +11,11 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::json;
 
-pub(crate) use crate::harness::agent::internal::run_prompt::tests::{
-    Gate, contains_matching, matches, of_type, p, parts, to_json, tool, tools, types, wait_for,
-    z_object,
-};
 pub(crate) use crate::harness::agent::harness_agent::*;
 pub(crate) use crate::harness::agent::harness_agent_session::*;
+pub(crate) use crate::harness::agent::internal::run_prompt::tests::{
+    Gate, matches, p, parts, to_json, tool, tools, z_object,
+};
 pub(crate) use crate::harness::agent::settings::*;
 pub(crate) use crate::harness::errors::{HarnessError, HarnessResult};
 pub(crate) use crate::harness::provider::JsonValue;
@@ -30,20 +29,26 @@ pub(crate) use crate::harness::spec::lifecycle_state::{
 pub(crate) use crate::harness::spec::literal::HarnessV1SpecificationVersion;
 pub(crate) use crate::harness::spec::stream_part::HarnessV1StreamPart;
 pub(crate) use crate::harness::spec::tools::HarnessV1BuiltinTool;
-pub(crate) use crate::harness::spec::{HarnessV1NetworkSandboxSession, HarnessV1PortEndpoint, HarnessV1PortProtocol};
+pub(crate) use crate::harness::spec::{
+    HarnessV1NetworkSandboxSession, HarnessV1PortEndpoint, HarnessV1PortProtocol,
+};
 
 pub(crate) use crate::harness::utils::plain_error;
 
 #[path = "harness_agent_tests_basics.rs"]
 mod basics;
-#[path = "harness_agent_tests_turns.rs"]
-mod turns;
-#[path = "harness_agent_tests_outputs.rs"]
-mod outputs;
 #[path = "harness_agent_tests_continue.rs"]
 mod continuation;
+#[path = "harness_agent_tests_tools.rs"]
+mod host_tools;
+#[path = "harness_agent_tests_lifecycle.rs"]
+mod lifecycle;
+#[path = "harness_agent_tests_outputs.rs"]
+mod outputs;
 #[path = "harness_agent_tests_sandbox.rs"]
 mod sandbox;
+#[path = "harness_agent_tests_turns.rs"]
+mod turns;
 
 // ─── mockHarness ───────────────────────────────────────────────────────
 
@@ -51,14 +56,17 @@ pub(crate) type ScriptFn = Arc<dyn Fn() -> Vec<HarnessV1StreamPart> + Send + Syn
 pub(crate) type PromptDoneFn =
     Arc<dyn Fn(&HarnessV1PromptTurnOptions) -> BoxFuture<'static, HarnessResult<()>> + Send + Sync>;
 pub(crate) type AsyncHookFn = Arc<dyn Fn() -> BoxFuture<'static, HarnessResult<()>> + Send + Sync>;
-pub(crate) type SubmitHookFn = Arc<
-    dyn Fn(&HarnessV1SubmitToolResult) -> BoxFuture<'static, HarnessResult<()>> + Send + Sync,
->;
+pub(crate) type SubmitHookFn =
+    Arc<dyn Fn(&HarnessV1SubmitToolResult) -> BoxFuture<'static, HarnessResult<()>> + Send + Sync>;
 pub(crate) type ReadHistoryFn = Arc<
     dyn Fn(Option<String>) -> BoxFuture<'static, HarnessResult<HarnessV1ReadHistoryResult>>
         + Send
         + Sync,
 >;
+
+pub(crate) type OnDoStartFn = Arc<dyn Fn(&HarnessV1StartOptions) + Send + Sync>;
+pub(crate) type OnPromptTurnFn =
+    Arc<dyn Fn(&HarnessV1PromptTurnOptions) -> HarnessResult<()> + Send + Sync>;
 
 /// Options of `mockHarness`.
 #[derive(Clone, Default)]
@@ -67,8 +75,8 @@ pub(crate) struct MockHarnessOptions {
     pub builtin_tools: ToolSet,
     pub supports_builtin_tool_approvals: Option<bool>,
     pub supports_builtin_tool_filtering: Option<bool>,
-    pub on_do_start: Option<Arc<dyn Fn(&HarnessV1StartOptions) + Send + Sync>>,
-    pub on_prompt_turn: Option<Arc<dyn Fn(&HarnessV1PromptTurnOptions) -> HarnessResult<()> + Send + Sync>>,
+    pub on_do_start: Option<OnDoStartFn>,
+    pub on_prompt_turn: Option<OnPromptTurnFn>,
     pub prompt_done: Option<PromptDoneFn>,
     pub supports_steering: bool,
     pub on_suspend_turn: Option<AsyncHookFn>,
@@ -77,6 +85,15 @@ pub(crate) struct MockHarnessOptions {
     pub continue_script: Option<ScriptFn>,
     /// `withBootstrapRecipe(harness)`.
     pub bootstrap: Option<HarnessV1Bootstrap>,
+    /// The ad-hoc harnesses' `lifecycleStateSchema`.
+    pub lifecycle_state_schema: Option<crate::harness::sdk::tool::Schema>,
+    /// The session's `isResume`.
+    pub is_resume: bool,
+    /// What `doDetach` / `doStop` / `doSuspendTurn` resolve to, in place of
+    /// the mock states.
+    pub detach_state: Option<HarnessV1ResumeSessionState>,
+    pub stop_state: Option<HarnessV1ResumeSessionState>,
+    pub suspend_state: Option<HarnessV1ContinueTurnState>,
 }
 
 impl MockHarnessOptions {
@@ -216,10 +233,17 @@ impl HarnessV1 for MockHarnessImpl {
         &self.builtin_tools
     }
     fn supports_builtin_tool_approvals(&self) -> bool {
-        self.options.supports_builtin_tool_approvals.unwrap_or(false)
+        self.options
+            .supports_builtin_tool_approvals
+            .unwrap_or(false)
     }
     fn supports_builtin_tool_filtering(&self) -> bool {
-        self.options.supports_builtin_tool_filtering.unwrap_or(false)
+        self.options
+            .supports_builtin_tool_filtering
+            .unwrap_or(false)
+    }
+    fn lifecycle_state_schema(&self) -> Option<&crate::harness::sdk::tool::Schema> {
+        self.options.lifecycle_state_schema.as_ref()
     }
     fn supports_get_bootstrap(&self) -> bool {
         self.options.bootstrap.is_some()
@@ -228,10 +252,15 @@ impl HarnessV1 for MockHarnessImpl {
         &self,
         _abort_signal: Option<tokio_util::sync::CancellationToken>,
     ) -> HarnessResult<HarnessV1Bootstrap> {
-        self.record.get_bootstrap_calls.fetch_add(1, Ordering::SeqCst);
+        self.record
+            .get_bootstrap_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(self.options.bootstrap.clone().expect("bootstrap recipe"))
     }
-    async fn do_start(&self, options: HarnessV1StartOptions) -> HarnessResult<Box<dyn HarnessV1Session>> {
+    async fn do_start(
+        &self,
+        options: HarnessV1StartOptions,
+    ) -> HarnessResult<Box<dyn HarnessV1Session>> {
         self.record.start_calls.lock().push(options.clone());
         if let Some(f) = &self.options.on_do_start {
             f(&options);
@@ -316,7 +345,7 @@ impl HarnessV1Session for MockSession {
         "mock-session-1".into()
     }
     fn is_resume(&self) -> bool {
-        false
+        self.options.is_resume
     }
     async fn do_prompt_turn(
         &self,
@@ -328,7 +357,12 @@ impl HarnessV1Session for MockSession {
             f(&opts)?;
         }
         let done = shared_done(self.options.prompt_done.as_ref().map(|f| f(&opts)));
-        let events = self.options.script.as_ref().map(|s| s()).unwrap_or_default();
+        let events = self
+            .options
+            .script
+            .as_ref()
+            .map(|s| s())
+            .unwrap_or_default();
         emit_later(opts.emit.clone(), events);
         Ok(Box::new(MockControl {
             options: self.options.clone(),
@@ -343,8 +377,16 @@ impl HarnessV1Session for MockSession {
     fn supports_read_history(&self) -> bool {
         self.options.do_read_history.is_some()
     }
-    async fn do_read_history(&self, since: Option<String>) -> HarnessResult<HarnessV1ReadHistoryResult> {
-        (self.options.do_read_history.as_ref().expect("doReadHistory"))(since).await
+    async fn do_read_history(
+        &self,
+        since: Option<String>,
+    ) -> HarnessResult<HarnessV1ReadHistoryResult> {
+        (self
+            .options
+            .do_read_history
+            .as_ref()
+            .expect("doReadHistory"))(since)
+        .await
     }
     async fn do_continue_turn(
         &self,
@@ -369,21 +411,33 @@ impl HarnessV1Session for MockSession {
         if let Some(f) = &self.options.on_suspend_turn {
             f().await?;
         }
-        Ok(mock_continue_state())
+        Ok(self
+            .options
+            .suspend_state
+            .clone()
+            .unwrap_or_else(mock_continue_state))
     }
     async fn do_detach(&self) -> HarnessResult<HarnessV1ResumeSessionState> {
         self.record.detach_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(message) = pop_error(&self.record.detach_errors) {
             return Err(plain_error(message));
         }
-        Ok(mock_resume_state())
+        Ok(self
+            .options
+            .detach_state
+            .clone()
+            .unwrap_or_else(mock_resume_state))
     }
     async fn do_stop(&self) -> HarnessResult<HarnessV1ResumeSessionState> {
         self.record.stop_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(message) = pop_error(&self.record.stop_errors) {
             return Err(plain_error(message));
         }
-        Ok(mock_resume_state())
+        Ok(self
+            .options
+            .stop_state
+            .clone()
+            .unwrap_or_else(mock_resume_state))
     }
     async fn do_destroy(&self) -> HarnessResult<()> {
         self.record.destroy_calls.fetch_add(1, Ordering::SeqCst);
@@ -393,7 +447,8 @@ impl HarnessV1Session for MockSession {
 
 // ─── makeSandboxSession ────────────────────────────────────────────────
 
-pub(crate) type RunFn = Arc<dyn Fn(&SandboxRunOptions) -> HarnessResult<SandboxRunResult> + Send + Sync>;
+pub(crate) type RunFn =
+    Arc<dyn Fn(&SandboxRunOptions) -> HarnessResult<SandboxRunResult> + Send + Sync>;
 pub(crate) type ReadTextFn = Arc<dyn Fn(&str) -> HarnessResult<Option<String>> + Send + Sync>;
 
 /// A recorded `run` call: `{ command, env }`.
@@ -470,7 +525,10 @@ impl ScriptedSandbox {
         self
     }
 
-    pub fn with_read_text(mut self, read_text: impl Fn(&str) -> HarnessResult<Option<String>> + Send + Sync + 'static) -> Self {
+    pub fn with_read_text(
+        mut self,
+        read_text: impl Fn(&str) -> HarnessResult<Option<String>> + Send + Sync + 'static,
+    ) -> Self {
         self.read_text = Some(Arc::new(read_text));
         self
     }
@@ -492,8 +550,15 @@ impl SandboxSession for ScriptedSandbox {
     async fn read_file(&self, _o: SandboxReadFileOptions) -> HarnessResult<Option<ByteStream>> {
         unimplemented!("read_file")
     }
-    async fn read_binary_file(&self, o: SandboxReadBinaryFileOptions) -> HarnessResult<Option<bytes::Bytes>> {
-        Ok(self.files.lock().get(&o.path).map(|s| bytes::Bytes::from(s.clone().into_bytes())))
+    async fn read_binary_file(
+        &self,
+        o: SandboxReadBinaryFileOptions,
+    ) -> HarnessResult<Option<bytes::Bytes>> {
+        Ok(self
+            .files
+            .lock()
+            .get(&o.path)
+            .map(|s| bytes::Bytes::from(s.clone().into_bytes())))
     }
     async fn read_text_file(&self, o: SandboxReadTextFileOptions) -> HarnessResult<Option<String>> {
         self.log.lock().push(format!("read:{}", o.path));
@@ -509,7 +574,9 @@ impl SandboxSession for ScriptedSandbox {
     async fn write_binary_file(&self, o: SandboxWriteBinaryFileOptions) -> HarnessResult<()> {
         self.log.lock().push(format!("write:{}", o.path));
         self.writes.lock().push(o.path.clone());
-        self.files.lock().insert(o.path, String::from_utf8_lossy(&o.content).into_owned());
+        self.files
+            .lock()
+            .insert(o.path, String::from_utf8_lossy(&o.content).into_owned());
         Ok(())
     }
     async fn write_text_file(&self, o: SandboxWriteTextFileOptions) -> HarnessResult<()> {
@@ -610,7 +677,10 @@ impl SandboxSession for TestSandbox {
     async fn read_file(&self, o: SandboxReadFileOptions) -> HarnessResult<Option<ByteStream>> {
         self.inner.read_file(o).await
     }
-    async fn read_binary_file(&self, o: SandboxReadBinaryFileOptions) -> HarnessResult<Option<bytes::Bytes>> {
+    async fn read_binary_file(
+        &self,
+        o: SandboxReadBinaryFileOptions,
+    ) -> HarnessResult<Option<bytes::Bytes>> {
         self.inner.read_binary_file(o).await
     }
     async fn read_text_file(&self, o: SandboxReadTextFileOptions) -> HarnessResult<Option<String>> {
@@ -748,21 +818,6 @@ pub(crate) fn text_turn(id: &str, text: &str) -> Vec<HarnessV1StreamPart> {
     parts(values)
 }
 
-/// `twoStepEvents()`.
-pub(crate) fn two_step_events() -> Vec<HarnessV1StreamPart> {
-    parts(vec![
-        json!({ "type": "text-start", "id": "first" }),
-        json!({ "type": "text-delta", "id": "first", "delta": "First" }),
-        json!({ "type": "text-end", "id": "first" }),
-        json!({ "type": "finish-step", "finishReason": { "unified": "tool-calls", "raw": "tool_use" }, "usage": zero_usage() }),
-        json!({ "type": "text-start", "id": "second" }),
-        json!({ "type": "text-delta", "id": "second", "delta": "Second" }),
-        json!({ "type": "text-end", "id": "second" }),
-        json!({ "type": "finish-step", "finishReason": { "unified": "stop", "raw": "end_turn" }, "usage": zero_usage() }),
-        json!({ "type": "finish", "finishReason": { "unified": "stop", "raw": "end_turn" }, "totalUsage": zero_usage() }),
-    ])
-}
-
 /// The first step of a turn that keeps going: a `finish-step` then the
 /// next step's first delta (`[finishEvents()[0], { text-delta next }]`).
 pub(crate) fn one_step_then_more() -> Vec<HarnessV1StreamPart> {
@@ -847,9 +902,11 @@ impl Lifecycle {
 }
 
 pub(crate) async fn make_lifecycle_session(options: LifecycleOptions) -> Lifecycle {
-    let mut harness_options = MockHarnessOptions::default();
-    harness_options.do_read_history = options.read_history;
-    let mock = harness_options.build();
+    let mock = MockHarnessOptions {
+        do_read_history: options.read_history,
+        ..Default::default()
+    }
+    .build();
     if let Some(e) = options.detach_error {
         mock.record.detach_errors.lock().push(e);
     }
@@ -892,7 +949,6 @@ pub(crate) async fn make_lifecycle_session(options: LifecycleOptions) -> Lifecyc
     }
 }
 
-
 // ─── ad-hoc harnesses ──────────────────────────────────────────────────
 
 pub(crate) use crate::harness::agent::internal::run_prompt::tests::FakeSession;
@@ -921,16 +977,19 @@ impl HarnessV1 for SessionHarness {
     fn builtin_tools(&self) -> &IndexMap<String, HarnessV1BuiltinTool> {
         &self.builtin_tools
     }
-    async fn do_start(&self, _options: HarnessV1StartOptions) -> HarnessResult<Box<dyn HarnessV1Session>> {
+    async fn do_start(
+        &self,
+        _options: HarnessV1StartOptions,
+    ) -> HarnessResult<Box<dyn HarnessV1Session>> {
         Ok(Box::new(self.session.clone()))
     }
 }
 
+/// The resolver of a [`deferred_done`].
+pub(crate) type DoneSender = Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
+
 /// A `done` promise the test resolves later.
-pub(crate) fn deferred_done() -> (
-    Shared<BoxFuture<'static, Result<(), String>>>,
-    Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-) {
+pub(crate) fn deferred_done() -> (Shared<BoxFuture<'static, Result<(), String>>>, DoneSender) {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let done = async move {
         let _ = rx.await;

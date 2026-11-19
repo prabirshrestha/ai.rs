@@ -23,9 +23,12 @@ struct RuntimeContextRecorder(Arc<Mutex<Vec<JsonValue>>>);
 
 impl Telemetry for RuntimeContextRecorder {
     fn on_end(&self, event: &TelemetryEvent) -> BoxFuture<'static, ()> {
-        self.0
-            .lock()
-            .push(event.get("runtimeContext").cloned().unwrap_or(JsonValue::Null));
+        self.0.lock().push(
+            event
+                .get("runtimeContext")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
+        );
         Box::pin(async {})
     }
 }
@@ -42,8 +45,8 @@ fn prepare_runtime_context(
 #[tokio::test]
 async fn uses_prepared_runtime_context_for_each_prompt_turn_and_filters_telemetry() {
     let configured_context = context(json!({ "requestId": "default", "secret": "configured" }));
-    let prepared_inputs: Arc<Mutex<Vec<Option<serde_json::Map<String, JsonValue>>>>> =
-        Arc::default();
+    type Contexts = Arc<Mutex<Vec<Option<serde_json::Map<String, JsonValue>>>>>;
+    let prepared_inputs: Contexts = Arc::default();
     let lifecycle_contexts: Arc<Mutex<Vec<serde_json::Map<String, JsonValue>>>> = Arc::default();
     let telemetry_contexts: Arc<Mutex<Vec<JsonValue>>> = Arc::default();
     let mock = MockHarnessOptions::script(|| text_turn("text-1", "ok")).build();
@@ -54,14 +57,18 @@ async fn uses_prepared_runtime_context_for_each_prompt_turn_and_filters_telemetr
     s.prepare_call = Some(prepare_runtime_context(move |call| {
         inputs.lock().push(call.runtime_context.clone());
         let request_id = call.options.as_ref().unwrap()["requestId"].clone();
-        call.runtime_context = Some(context(json!({ "requestId": request_id, "secret": "private" })));
+        call.runtime_context = Some(context(
+            json!({ "requestId": request_id, "secret": "private" }),
+        ));
     }));
     let push = |log: &Arc<Mutex<Vec<serde_json::Map<String, JsonValue>>>>| log.clone();
     let log = push(&lifecycle_contexts);
-    s.on_start = Some(callback(move |e: crate::harness::sdk::telemetry::GenerateTextStartEvent| {
-        log.lock().push(e.runtime_context);
-        async {}
-    }));
+    s.on_start = Some(callback(
+        move |e: crate::harness::sdk::telemetry::GenerateTextStartEvent| {
+            log.lock().push(e.runtime_context);
+            async {}
+        },
+    ));
     let log = push(&lifecycle_contexts);
     s.on_step_start = Some(callback(
         move |e: crate::harness::sdk::telemetry::GenerateTextStepStartEvent| {
@@ -75,13 +82,17 @@ async fn uses_prepared_runtime_context_for_each_prompt_turn_and_filters_telemetr
         async {}
     }));
     let log = push(&lifecycle_contexts);
-    s.on_end = Some(callback(move |e: crate::harness::sdk::telemetry::GenerateTextEndEvent| {
-        log.lock().push(e.runtime_context);
-        async {}
-    }));
+    s.on_end = Some(callback(
+        move |e: crate::harness::sdk::telemetry::GenerateTextEndEvent| {
+            log.lock().push(e.runtime_context);
+            async {}
+        },
+    ));
     s.telemetry = Some(TelemetryOptions {
         include_runtime_context: Some(IndexMap::from([("requestId".to_string(), true)])),
-        integrations: Some(vec![Arc::new(RuntimeContextRecorder(telemetry_contexts.clone()))]),
+        integrations: Some(vec![Arc::new(RuntimeContextRecorder(
+            telemetry_contexts.clone(),
+        ))]),
         ..Default::default()
     });
     let agent = agent(s);
@@ -113,7 +124,10 @@ async fn uses_prepared_runtime_context_for_each_prompt_turn_and_filters_telemetr
     assert_eq!(*lifecycle_contexts.lock(), expected);
     assert_eq!(
         *telemetry_contexts.lock(),
-        vec![json!({ "requestId": "req-1" }), json!({ "requestId": "req-2" })]
+        vec![
+            json!({ "requestId": "req-1" }),
+            json!({ "requestId": "req-2" })
+        ]
     );
     session.destroy().await.unwrap();
 }
@@ -238,25 +252,35 @@ async fn forwards_configured_runtime_context_through_every_public_turn_entry_poi
     s.runtime_context = Some(runtime_context.clone());
     s.telemetry = Some(TelemetryOptions {
         include_runtime_context: Some(IndexMap::from([("conversationId".to_string(), true)])),
-        integrations: Some(vec![Arc::new(RuntimeContextRecorder(telemetry_contexts.clone()))]),
+        integrations: Some(vec![Arc::new(RuntimeContextRecorder(
+            telemetry_contexts.clone(),
+        ))]),
         ..Default::default()
     });
     let log = lifecycle_contexts.clone();
-    s.on_end = Some(callback(move |e: crate::harness::sdk::telemetry::GenerateTextEndEvent| {
-        log.lock().push(e.runtime_context);
-        async {}
-    }));
+    s.on_end = Some(callback(
+        move |e: crate::harness::sdk::telemetry::GenerateTextEndEvent| {
+            log.lock().push(e.runtime_context);
+            async {}
+        },
+    ));
     let agent = agent(s);
 
     let generate_session = new_session(&agent).await;
-    let generated = agent.generate(call(&generate_session, "generate")).await.unwrap();
+    let generated = agent
+        .generate(call(&generate_session, "generate"))
+        .await
+        .unwrap();
     assert_eq!(generated.final_step().runtime_context, runtime_context);
     generate_session.destroy().await.unwrap();
 
     let stream_session = new_session(&agent).await;
     let streamed = agent.stream(call(&stream_session, "stream")).await.unwrap();
     streamed.consume_stream().await;
-    assert_eq!(streamed.final_step().await.unwrap().runtime_context, runtime_context);
+    assert_eq!(
+        streamed.final_step().await.unwrap().runtime_context,
+        runtime_context
+    );
     stream_session.destroy().await.unwrap();
 
     let continue_options = || HarnessAgentCreateSessionOptions {
@@ -265,15 +289,22 @@ async fn forwards_configured_runtime_context_through_every_public_turn_entry_poi
     };
     let continue_generate_session = agent.create_session(continue_options()).await.unwrap();
     let continued_generation = agent
-        .continue_generate(HarnessAgentContinueParameters::new(continue_generate_session.clone()))
+        .continue_generate(HarnessAgentContinueParameters::new(
+            continue_generate_session.clone(),
+        ))
         .await
         .unwrap();
-    assert_eq!(continued_generation.final_step().runtime_context, runtime_context);
+    assert_eq!(
+        continued_generation.final_step().runtime_context,
+        runtime_context
+    );
     continue_generate_session.destroy().await.unwrap();
 
     let continue_stream_session = agent.create_session(continue_options()).await.unwrap();
     let continued_stream = agent
-        .continue_stream(HarnessAgentContinueParameters::new(continue_stream_session.clone()))
+        .continue_stream(HarnessAgentContinueParameters::new(
+            continue_stream_session.clone(),
+        ))
         .await
         .unwrap();
     continued_stream.consume_stream().await;
@@ -337,8 +368,12 @@ async fn runs_lifecycle_callbacks_in_order_and_merges_settings_before_call_callb
     }));
     let (ev, ids) = (events.clone(), call_ids.clone());
     s.on_language_model_call_end = Some(callback(move |e: LanguageModelCallEndEvent| {
-        let last = e.content.last().map(|c| to_json(c)["type"].as_str().unwrap().to_string());
-        ev.lock().push(format!("model-end:{}", last.unwrap_or_default()));
+        let last = e
+            .content
+            .last()
+            .map(|c| to_json(c)["type"].as_str().unwrap().to_string());
+        ev.lock()
+            .push(format!("model-end:{}", last.unwrap_or_default()));
         ids.lock().push(e.call_id);
         async {}
     }));
@@ -359,7 +394,11 @@ async fn runs_lifecycle_callbacks_in_order_and_merges_settings_before_call_callb
         *step.lock() = Some(e);
         async {}
     }));
-    let (ev, ids, final_step) = (events.clone(), call_ids.clone(), final_step_from_callback.clone());
+    let (ev, ids, final_step) = (
+        events.clone(),
+        call_ids.clone(),
+        final_step_from_callback.clone(),
+    );
     s.on_end = Some(callback(move |e: GenerateTextEndEvent| {
         ev.lock().push("settings:end".into());
         ids.lock().push(e.call_id.clone());
@@ -400,7 +439,10 @@ async fn runs_lifecycle_callbacks_in_order_and_merges_settings_before_call_callb
     let unique: std::collections::HashSet<String> = call_ids.lock().iter().cloned().collect();
     assert_eq!(unique.len(), 1);
     assert_eq!(Some(&result.steps[0]), step_from_callback.lock().as_ref());
-    assert_eq!(Some(result.final_step()), final_step_from_callback.lock().as_ref());
+    assert_eq!(
+        Some(result.final_step()),
+        final_step_from_callback.lock().as_ref()
+    );
     assert_eq!(
         to_json(&result.final_step().model),
         json!({ "provider": "harness:mock", "modelId": "resolved-model" })
@@ -493,7 +535,10 @@ async fn normalizes_and_snapshots_headers_before_passing_them_to_do_start() {
 
     assert_eq!(
         mock.start_call(0).headers,
-        Some(IndexMap::from([("x-tenant".to_string(), "acme".to_string())]))
+        Some(IndexMap::from([(
+            "x-tenant".to_string(),
+            "acme".to_string()
+        )]))
     );
     session.destroy().await.unwrap();
 }
@@ -544,7 +589,10 @@ async fn passes_stable_headers_when_resuming_a_session() {
     let mock = MockHarnessOptions::script(finish_events).build();
     let sandbox = make_sandbox_session();
     let mut s = settings(&mock);
-    s.headers = Some(IndexMap::from([("x-tenant".to_string(), Some("acme".to_string()))]));
+    s.headers = Some(IndexMap::from([(
+        "x-tenant".to_string(),
+        Some("acme".to_string()),
+    )]));
     let agent = agent(s);
     let session = agent
         .create_session(HarnessAgentCreateSessionOptions {
@@ -567,9 +615,11 @@ async fn passes_stable_headers_when_resuming_a_session() {
     let second = mock.start_call(1);
     assert_eq!(
         second.headers,
-        Some(IndexMap::from([("x-tenant".to_string(), "acme".to_string())]))
+        Some(IndexMap::from([(
+            "x-tenant".to_string(),
+            "acme".to_string()
+        )]))
     );
     assert_eq!(to_json(&second.resume_from), to_json(&Some(resume_from)));
     resumed_session.destroy().await.unwrap();
 }
-

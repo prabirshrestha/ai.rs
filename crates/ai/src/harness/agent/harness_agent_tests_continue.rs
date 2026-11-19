@@ -43,7 +43,9 @@ async fn continue_stream_continues_an_in_flight_turn_and_streams_translated_part
     let mut s = settings(&mock);
     s.instructions = Some(HarnessAgentInstructions::System(SystemModelMessage {
         content: "Be concise.".into(),
-        provider_options: Some(serde_json::from_value(json!({ "test": { "cache": true } })).unwrap()),
+        provider_options: Some(
+            serde_json::from_value(json!({ "test": { "cache": true } })).unwrap(),
+        ),
     }));
     let agent = agent(s);
     let session = agent.create_session(continue_from_options()).await.unwrap();
@@ -65,7 +67,10 @@ async fn continue_stream_continues_an_in_flight_turn_and_streams_translated_part
     assert!(mock.prompts().is_empty());
     assert_eq!(mock.continue_count(), 1);
     assert_eq!(
-        mock.record.continue_turns.lock()[0].settings.instructions.as_deref(),
+        mock.record.continue_turns.lock()[0]
+            .settings
+            .instructions
+            .as_deref(),
         Some("Be concise.")
     );
 
@@ -157,14 +162,19 @@ async fn serializes_and_resumes_a_client_side_tool_result_pause() {
     let count = prepare_call_count.clone();
     s.prepare_call = Some(Arc::new(move |mut call: HarnessAgentPrepareCallOptions| {
         count.fetch_add(1, Ordering::SeqCst);
-        let city = call.options.as_ref().unwrap()["city"].as_str().unwrap().to_string();
+        let city = call.options.as_ref().unwrap()["city"]
+            .as_str()
+            .unwrap()
+            .to_string();
         call.skills = Some(vec![HarnessV1Skill {
             name: format!("{city}-weather"),
             description: "Weather guidance.".into(),
             content: "Use the weather tool.".into(),
             files: None,
         }]);
-        call.instructions = Some(HarnessAgentInstructions::Text(format!("Be concise about {city}.")));
+        call.instructions = Some(HarnessAgentInstructions::Text(format!(
+            "Be concise about {city}."
+        )));
         call.tools = Some(tools(vec![("weather", weather_tool())]));
         Box::pin(async move { Ok(call) })
     }));
@@ -216,7 +226,10 @@ async fn serializes_and_resumes_a_client_side_tool_result_pause() {
         .await;
 
     assert_eq!(
-        mock.tool_results().iter().map(submitted_json).collect::<Vec<_>>(),
+        mock.tool_results()
+            .iter()
+            .map(submitted_json)
+            .collect::<Vec<_>>(),
         vec![lima_submission()]
     );
     assert_eq!(
@@ -235,9 +248,12 @@ async fn serializes_and_resumes_a_client_side_tool_result_pause() {
     );
     assert!(!session.has_unfinished_turn());
     assert_eq!(prepare_call_count.load(Ordering::SeqCst), 1);
-    let continued_settings = &mock.record.continue_turns.lock()[0].settings;
+    let continued_settings = mock.record.continue_turns.lock()[0].settings.clone();
     assert_eq!(continued_settings.skills[0].name, "lima-weather");
-    assert_eq!(continued_settings.instructions.as_deref(), Some("Be concise about lima."));
+    assert_eq!(
+        continued_settings.instructions.as_deref(),
+        Some("Be concise about lima.")
+    );
     assert_eq!(continued_settings.tools[0].name, "weather");
 
     session.destroy().await.unwrap();
@@ -253,7 +269,10 @@ async fn collects_a_client_side_tool_result_from_messages() {
     let agent = agent(s);
     let session = new_session(&agent).await;
 
-    let first = agent.stream(call(&session, "Check Lima weather")).await.unwrap();
+    let first = agent
+        .stream(call(&session, "Check Lima weather"))
+        .await
+        .unwrap();
     first.consume_stream().await;
     let messages: Vec<ModelMessage> = serde_json::from_value(json!([{
         "role": "tool",
@@ -272,7 +291,10 @@ async fn collects_a_client_side_tool_result_from_messages() {
     continued.consume_stream().await;
 
     assert_eq!(
-        mock.tool_results().iter().map(submitted_json).collect::<Vec<_>>(),
+        mock.tool_results()
+            .iter()
+            .map(submitted_json)
+            .collect::<Vec<_>>(),
         vec![lima_submission()]
     );
     assert!(!session.has_unfinished_turn());
@@ -351,7 +373,10 @@ async fn continues_a_restored_parallel_approval_batch_with_mixed_ui_decisions() 
     assert_eq!(decisions, vec![true, false]);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(
-        mock.tool_results().iter().map(submitted_json).collect::<Vec<_>>(),
+        mock.tool_results()
+            .iter()
+            .map(submitted_json)
+            .collect::<Vec<_>>(),
         vec![
             json!({ "output": { "city": "Paris" }, "toolCallId": "call-0" }),
             json!({
@@ -381,13 +406,17 @@ async fn continue_stream_rejects_when_there_is_no_unfinished_turn() {
             .continue_stream(HarnessAgentContinueParameters::new(session.clone()))
             .await,
     );
-    assert!(message.contains("no unfinished turn to continue"), "{message}");
+    assert!(
+        message.contains("no unfinished turn to continue"),
+        "{message}"
+    );
 
     session.destroy().await.unwrap();
 }
 
 #[tokio::test]
-async fn resume_from_continue_from_resumes_a_session_that_must_continue_before_accepting_a_new_prompt() {
+async fn resume_from_continue_from_resumes_a_session_that_must_continue_before_accepting_a_new_prompt()
+ {
     let mock = MockHarnessOptions::script(|| {
         let mut values = vec![json!({ "type": "text-delta", "id": "t2", "delta": "after" })];
         values.extend(undefined_usage_finish());
@@ -420,7 +449,10 @@ async fn resume_from_continue_from_resumes_a_session_that_must_continue_before_a
         .await
         .unwrap();
     assert_eq!(continued.text(), "continued");
-    let after = agent.generate(call(&session, "new prompt now")).await.unwrap();
+    let after = agent
+        .generate(call(&session, "new prompt now"))
+        .await
+        .unwrap();
     assert_eq!(after.text(), "after");
 
     assert_eq!(mock.continue_count(), 1);
