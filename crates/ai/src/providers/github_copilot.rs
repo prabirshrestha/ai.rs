@@ -10,8 +10,8 @@ use crate::provider::{
 };
 use crate::providers::github_copilot_headers::copilot_static_headers;
 use crate::providers::{
-    anthropic, openai_completions, openai_embeddings, openai_images, openai_responses,
-    simple_options,
+    anthropic, openai_completions, openai_decisions, openai_embeddings, openai_images,
+    openai_responses, simple_options, typesafe_system_one,
 };
 use crate::types::{
     AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
@@ -80,6 +80,50 @@ impl GitHubCopilot {
             )
             .headers(copilot_static_headers())
             .input(vec![ModelInput::Text])
+    }
+
+    /// A classifier on the System One protocol at `/v1/systemone`, such as
+    /// `microsoft-decision-1`, as Pi's Copilot provider has it. It takes
+    /// text only: Copilot's System One ignores images.
+    pub fn classifier_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(typesafe_system_one::TypesafeSystemOneClassifierApi::new(
+            self.api_key.clone(),
+            false,
+            self.http_client.clone(),
+            "/v1/systemone",
+        ));
+        ModelBuilder::new_classifier(&self.provider_id, id, runtime)
+            .base_url(
+                self.base_url
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            )
+            .headers(copilot_static_headers())
+            .input(vec![ModelInput::Text])
+    }
+
+    /// A classifier on OpenAI's Decisions API at `/v1/decisions`, such as
+    /// `gpt-6-luna-decisions`. Copilot's `/models` lists the endpoints each
+    /// model serves in `supported_endpoints`. It takes text and images.
+    ///
+    /// This is an addition beyond Pi, whose Copilot provider has only
+    /// `microsoft-decision-1` on System One. Checked live on 2026-11-18:
+    /// `gpt-6-luna-decisions` answers on `/v1/decisions`, reads text and
+    /// images, and answers 400 to `box` questions (Pi has no `box`).
+    pub fn decisions_classifier_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(openai_decisions::OpenAiDecisionsClassifierApi::new(
+            self.api_key.clone(),
+            false,
+            self.http_client.clone(),
+        ));
+        let base_url = self
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        ModelBuilder::new_classifier(&self.provider_id, id, runtime)
+            .base_url(format!("{}/v1", base_url.trim_end_matches('/')))
+            .headers(copilot_static_headers())
+            .input(vec![ModelInput::Text, ModelInput::Image])
     }
 
     pub fn image_model(&self, id: &str) -> ModelBuilder {
@@ -153,6 +197,7 @@ impl Provider for GitHubCopilot {
             language_models: true,
             image_models: true,
             embedding_models: true,
+            classifier_models: true,
         }
     }
 

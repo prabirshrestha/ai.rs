@@ -54,6 +54,7 @@ impl Provider for OpenRouter {
             language_models: false,
             image_models: true,
             embedding_models: false,
+            classifier_models: false,
         }
     }
 

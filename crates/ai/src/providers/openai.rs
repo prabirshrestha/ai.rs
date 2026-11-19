@@ -8,7 +8,8 @@ use crate::provider::{
     ImageModelApi, LanguageModelApi, ModelBuilder, Provider, ProviderCapabilities,
 };
 use crate::providers::{
-    openai_completions, openai_embeddings, openai_images, openai_responses, simple_options,
+    openai_completions, openai_decisions, openai_embeddings, openai_images, openai_responses,
+    simple_options, typesafe_system_one,
 };
 use crate::types::{
     AssistantImages, Context, ImageGenerationOptions, ImagesContext, Model, ModelCompat,
@@ -71,6 +72,39 @@ impl OpenAi {
         self.embedding_model_builder(id)
     }
 
+    /// A classifier on OpenAI's Decisions API at `{base_url}/decisions`,
+    /// such as `gpt-6-luna`, or on any server that serves the same API. It
+    /// takes text and images; set `.input(..)` for a text-only model.
+    pub fn classifier_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(openai_decisions::OpenAiDecisionsClassifierApi::new(
+            self.api_key.clone(),
+            self.allows_missing_api_key(),
+            self.http_client.clone(),
+        ));
+        ModelBuilder::new_classifier(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![ModelInput::Text, ModelInput::Image])
+    }
+
+    /// A classifier on TypeSafe's System One protocol at
+    /// `{base_url}/systemone`, as `llama-server` serves it at `/v1/systemone`.
+    /// It takes text; set `.input(..)` and `compat.system_one` for images.
+    pub fn system_one_classifier_model(&self, id: &str) -> ModelBuilder {
+        let runtime = Arc::new(typesafe_system_one::TypesafeSystemOneClassifierApi::new(
+            self.api_key.clone(),
+            self.allows_missing_api_key(),
+            self.http_client.clone(),
+            "/systemone",
+        ));
+        ModelBuilder::new_classifier(&self.provider_id, id, runtime)
+            .base_url(self.base_url.clone())
+            .input(vec![ModelInput::Text])
+    }
+
+    fn allows_missing_api_key(&self) -> bool {
+        self.api_key.is_none() && self.base_url != DEFAULT_BASE_URL
+    }
+
     fn embedding_model_builder(&self, id: &str) -> ModelBuilder {
         let runtime = Arc::new(openai_embeddings::OpenAiEmbeddingModelApi::new(
             self.api_key.clone(),
@@ -105,6 +139,7 @@ impl Provider for OpenAi {
             language_models: !matches!(self.api, OpenAiApi::Embeddings | OpenAiApi::Images),
             image_models: true,
             embedding_models: true,
+            classifier_models: true,
         }
     }
 
