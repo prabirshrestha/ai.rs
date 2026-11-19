@@ -145,6 +145,15 @@ impl FakeSocket {
         });
     }
 
+    /// Every frame the host sent.
+    pub fn raw_sent(&self) -> Vec<Value> {
+        self.sent
+            .lock()
+            .iter()
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .collect()
+    }
+
     /// Frames the host sent, without the auth proof and resume frames.
     pub fn sent(&self) -> Vec<Value> {
         self.sent
@@ -216,12 +225,15 @@ impl FakeSocket {
     }
 }
 
+/// A `new WebSocket(url, { headers })` call.
+pub type SocketCall = (String, Option<IndexMap<String, String>>);
+
 /// The fake `ws` module plus `harnessUtilsMocks.channels`.
 #[derive(Clone, Default)]
 pub struct FakeBridge {
     sockets: Arc<Mutex<Vec<Arc<FakeSocket>>>>,
     /// `webSocketMocks.calls`.
-    pub calls: Arc<Mutex<Vec<(String, Option<IndexMap<String, String>>)>>>,
+    pub calls: Arc<Mutex<Vec<SocketCall>>>,
     /// `harnessUtilsMocks.openErrors`.
     pub open_errors: Arc<Mutex<VecDeque<String>>>,
 }
@@ -255,23 +267,6 @@ impl FakeBridge {
 
     pub fn socket(&self, index: usize) -> Arc<FakeSocket> {
         self.sockets.lock()[index].clone()
-    }
-
-    pub fn last(&self) -> Arc<FakeSocket> {
-        self.sockets
-            .lock()
-            .last()
-            .cloned()
-            .expect("a bridge socket")
-    }
-
-    /// Every frame sent over every socket.
-    pub fn all_sent(&self) -> Vec<Value> {
-        self.sockets
-            .lock()
-            .iter()
-            .flat_map(|socket| socket.sent())
-            .collect()
     }
 }
 
@@ -323,15 +318,6 @@ impl Default for FakeSandbox {
 }
 
 impl FakeSandbox {
-    pub fn with_files(self, files: &[(&str, &str)]) -> Self {
-        self.record.lock().files.extend(
-            files
-                .iter()
-                .map(|(path, content)| (path.to_string(), content.to_string())),
-        );
-        self
-    }
-
     pub fn runs(&self) -> Vec<String> {
         self.record.lock().runs.clone()
     }
@@ -342,6 +328,14 @@ impl FakeSandbox {
 
     pub fn writes(&self) -> Vec<(String, String)> {
         self.record.lock().writes.clone()
+    }
+
+    /// Writes other than the `markBridgeStarting` marker, which TS mocks.
+    pub fn file_writes(&self) -> Vec<(String, String)> {
+        self.writes()
+            .into_iter()
+            .filter(|(path, _)| !path.ends_with("/bridge-meta.json"))
+            .collect()
     }
 
     /// How often `markBridgeStarting` wrote its metadata marker.
@@ -638,6 +632,20 @@ pub async fn flush() {
 pub async fn wait_for_sent(socket: &FakeSocket, count: usize) -> Vec<Value> {
     wait_for(|| socket.sent().len() >= count).await;
     socket.sent()
+}
+
+/// Waits until `socket` has sent `expected`.
+pub async fn wait_for_frame(socket: &FakeSocket, expected: &Value) {
+    for _ in 0..500 {
+        if socket.sent().contains(expected) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!(
+        "frame {expected:#} was not sent; sent {:#}",
+        Value::Array(socket.sent())
+    );
 }
 
 /// `emitColdRestoration({ channel, method, sessionId })`.

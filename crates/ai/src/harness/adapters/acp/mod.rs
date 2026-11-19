@@ -7,9 +7,17 @@ pub mod acp_tool_call;
 pub mod v1;
 
 #[cfg(test)]
+mod acp_harness_credentials_tests;
+#[cfg(test)]
+mod acp_harness_flow_tests;
+#[cfg(test)]
+mod acp_harness_lifecycle_tests;
+#[cfg(test)]
 mod acp_harness_test_support;
 #[cfg(test)]
 mod acp_harness_tests;
+#[cfg(test)]
+mod acp_harness_turn_tests;
 
 pub use acp_auth::*;
 pub use acp_harness::{ACPHarnessSettings, acp_client_app, create_acp};

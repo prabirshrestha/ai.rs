@@ -254,25 +254,33 @@ pub struct ACPMatchesNativeRequestOptions<'a> {
     pub native_request: &'a JsonValue,
 }
 
+/// `askUserQuestions.isNativeToolCall`.
+pub type ACPIsNativeToolCall = Arc<dyn Fn(&ACPToolCall) -> HarnessResult<bool> + Send + Sync>;
+
+/// `askUserQuestions.fromNativeRequest`: returns a `tool-call` stream part,
+/// or `None`.
+pub type ACPFromNativeRequest = Arc<
+    dyn Fn(ACPFromNativeRequestOptions<'_>) -> HarnessResult<Option<HarnessV1StreamPart>>
+        + Send
+        + Sync,
+>;
+
+/// `askUserQuestions.matchesNativeRequest`.
+pub type ACPMatchesNativeRequest =
+    Arc<dyn Fn(ACPMatchesNativeRequestOptions<'_>) -> bool + Send + Sync>;
+
 /// `ACPAskUserQuestionsSettings`.
 ///
 /// [rust] TS callbacks can throw; these return the error.
 #[derive(Clone)]
 pub struct ACPAskUserQuestionsSettings {
     pub request_method: String,
-    pub is_native_tool_call: Option<
-        Arc<dyn Fn(&ACPToolCall) -> crate::harness::errors::HarnessResult<bool> + Send + Sync>,
-    >,
+    pub is_native_tool_call: Option<ACPIsNativeToolCall>,
     /// Returns a `tool-call` stream part, or `None`.
-    pub from_native_request: Arc<
-        dyn Fn(ACPFromNativeRequestOptions<'_>) -> HarnessResult<Option<HarnessV1StreamPart>>
-            + Send
-            + Sync,
-    >,
+    pub from_native_request: ACPFromNativeRequest,
     pub to_native_response:
         Arc<dyn Fn(ACPToNativeResponseOptions<'_>) -> HarnessResult<JsonValue> + Send + Sync>,
-    pub matches_native_request:
-        Option<Arc<dyn Fn(ACPMatchesNativeRequestOptions<'_>) -> bool + Send + Sync>>,
+    pub matches_native_request: Option<ACPMatchesNativeRequest>,
 }
 
 impl fmt::Debug for ACPAskUserQuestionsSettings {

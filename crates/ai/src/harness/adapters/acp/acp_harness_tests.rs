@@ -125,6 +125,7 @@ async fn supports_synchronous_preparation_and_skips_it_when_reattaching_to_a_liv
 
 #[tokio::test]
 async fn passes_host_disconnect_timeout_ms_to_the_bridge() {
+    let pattern = regex::Regex::new(r"--host-disconnect-timeout-ms '?(\d+)'?").unwrap();
     for (host_disconnect_timeout_ms, expected) in [(Some(60_000), Some("60000")), (None, None)] {
         let bridge = FakeBridge::default();
         let sandbox = FakeSandbox::default();
@@ -137,7 +138,6 @@ async fn passes_host_disconnect_timeout_ms_to_the_bridge() {
         )
         .await;
 
-        let pattern = regex::Regex::new(r"--host-disconnect-timeout-ms '?(\d+)'?").unwrap();
         let spawns = sandbox.spawns();
         let actual = pattern
             .captures(&spawns[0].command)
@@ -202,6 +202,19 @@ async fn does_not_start_a_bridge_when_startup_is_cancelled_before_or_during_prep
     }
 }
 
+/// The TS `toolResult` object, with its `type` tag.
+fn tagged_tool_result(tool_result: &ToolResultPart) -> Value {
+    let mut value = json!({ "type": "tool-result" });
+    value.as_object_mut().unwrap().extend(
+        serde_json::to_value(tool_result)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    value
+}
+
 #[tokio::test]
 async fn translates_acp_question_requests_and_client_results() {
     let bridge = FakeBridge::default();
@@ -241,7 +254,7 @@ async fn translates_acp_question_requests_and_client_results() {
         to_native_response: {
             let to_native_calls = to_native_calls.clone();
             Arc::new(move |options| {
-                let tool_result = serde_json::to_value(options.tool_result).unwrap();
+                let tool_result = tagged_tool_result(options.tool_result);
                 to_native_calls
                     .lock()
                     .push((options.native_request.clone(), tool_result.clone()));
@@ -312,7 +325,7 @@ async fn translates_acp_question_requests_and_client_results() {
         .await
         .unwrap();
 
-    let tool_result_json = serde_json::to_value(&tool_result).unwrap();
+    let tool_result_json = tagged_tool_result(&tool_result);
     assert_eq!(
         *to_native_calls.lock(),
         vec![(native_request, tool_result_json.clone())]

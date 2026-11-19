@@ -91,8 +91,8 @@ use super::prompt::{
 use super::settings::{
     ACPAskUserQuestionsSettings, ACPAuthenticationFile, ACPAuthenticationFilesOptions,
     ACPCredentialBrokeringOptions, ACPFromNativeRequestOptions, ACPInstructionMapping,
-    ACPIsMcpToolCall, ACPMatchesNativeRequestOptions, ACPModelMapping, ACPOutputSchemaMapping,
-    ACPPermissionModeMapping, ACPPrepareSandboxOptions, ACPProfileValue,
+    ACPIsMcpToolCall, ACPMatchesNativeRequest, ACPMatchesNativeRequestOptions, ACPModelMapping,
+    ACPOutputSchemaMapping, ACPPermissionModeMapping, ACPPrepareSandboxOptions, ACPProfileValue,
     ACPResolveAuthenticationEnvironmentOptions, ACPSerializableValue, ACPToNativeResponseOptions,
     ACPV1Settings, resolve_acp_agent_environment, validate_acp_v1_settings,
 };
@@ -253,8 +253,20 @@ fn tool_result_command(
         tool_call_id: tool_call_id.into(),
         output,
         is_error,
-        tool_result: tool_result.and_then(|result| serde_json::to_value(result).ok()),
+        tool_result: tool_result.and_then(tool_result_part_json),
     })
+}
+
+/// A `ToolResultPart` as TS sends it: with its `type: 'tool-result'` tag,
+/// which the Rust struct only carries inside a message's content.
+fn tool_result_part_json(tool_result: &ToolResultPart) -> Option<JsonValue> {
+    let Value::Object(fields) = serde_json::to_value(tool_result).ok()? else {
+        return None;
+    };
+    let mut tagged = Map::new();
+    tagged.insert("type".into(), Value::String("tool-result".into()));
+    tagged.extend(fields);
+    Some(Value::Object(tagged))
 }
 
 #[async_trait]
@@ -565,7 +577,7 @@ impl ACPV1Harness {
             channel_options.initial_last_seen_event_id = initial_last_seen_event_id;
             channel_options.on_diagnostic = on_diagnostic.clone();
             channel_options.on_bridge_error = Some(on_bridge_error.clone());
-            channel_options.reconnect = self.reconnect.clone();
+            channel_options.reconnect = self.reconnect;
             channel_options.keep_alive_ms = self.keep_alive_ms;
             Ok(SandboxChannel::new(channel_options))
         };
@@ -2298,9 +2310,7 @@ fn take_buffered_question_result(
     buffered_question_results: &mut IndexMap<String, BufferedQuestionResult>,
     tool_call_id: &str,
     native_request: &JsonValue,
-    matches_native_request: Option<
-        &Arc<dyn Fn(ACPMatchesNativeRequestOptions<'_>) -> bool + Send + Sync>,
-    >,
+    matches_native_request: Option<&ACPMatchesNativeRequest>,
     harness_id: &str,
 ) -> Option<BufferedQuestionResult> {
     if let Some(exact) = buffered_question_results.shift_remove(tool_call_id) {

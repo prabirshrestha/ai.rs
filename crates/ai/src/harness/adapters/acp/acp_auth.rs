@@ -369,7 +369,7 @@ fn sort_identity_value(value: &JsonValue) -> JsonValue {
         JsonValue::Array(items) => items.iter().map(sort_identity_value).collect(),
         JsonValue::Object(record) => {
             let mut entries: Vec<_> = record.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             JsonValue::Object(
                 entries
                     .into_iter()
