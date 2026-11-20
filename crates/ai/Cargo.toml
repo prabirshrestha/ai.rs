@@ -27,6 +27,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+wasmtime = { version = "50.0.3", optional = true, default-features = false, features = ["async", "cranelift", "runtime", "std", "parallel-compilation"] }
+flate2 = { version = "1.0.35", optional = true }
+tar = { version = "0.4.43", optional = true }
 
 [features]
 default = ["harness"]
@@ -41,6 +44,8 @@ harness-acp = ["harness", "tokio/net"]
 harness-cursor = ["harness-acp"]
 harness-github-copilot = ["harness-acp"]
 harness-opencode = ["harness", "tokio/net"]
+# fx runs its core, a WebAssembly module, on wasmtime.
+harness-fx = ["harness", "dep:wasmtime", "dep:flate2", "dep:tar"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

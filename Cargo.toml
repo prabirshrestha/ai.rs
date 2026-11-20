@@ -32,3 +32,33 @@ serde_json = { version = "1.0.135", features = ["preserve_order"] }
 thiserror = "2.0.9"
 tokio = { version = "1.43.0", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.13"
+
+# fx's core (`harness-fx`) is compiled by Cranelift when it starts. Built
+# unoptimized, Cranelift takes about half a minute for it in debug builds and
+# tests; optimized, a few seconds.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3

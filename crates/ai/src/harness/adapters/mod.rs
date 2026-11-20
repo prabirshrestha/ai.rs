@@ -9,6 +9,8 @@ pub mod claude_code;
 pub mod codex;
 #[cfg(feature = "harness-cursor")]
 pub mod cursor;
+#[cfg(feature = "harness-fx")]
+pub mod fx;
 #[cfg(feature = "harness-github-copilot")]
 pub mod github_copilot;
 #[cfg(any(feature = "harness-acp", feature = "harness-opencode"))]
