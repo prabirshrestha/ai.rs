@@ -32,10 +32,20 @@ flate2 = { version = "1.0.35", optional = true }
 tar = { version = "0.4.43", optional = true }
 
 [features]
-default = ["harness"]
+default = [
+    "harness",
+    "harness-native",
+    "harness-pi",
+    "harness-claude-code",
+    "harness-codex",
+    "harness-acp",
+    "harness-cursor",
+    "harness-github-copilot",
+    "harness-opencode",
+]
 # Agent harnesses: agents that run their own loop inside a sandbox.
 harness = ["tokio/process"]
-# Harness adapters, each opt-in.
+# Harness adapters. All but fx are on by default.
 harness-native = ["harness"]
 harness-pi = ["harness"]
 harness-claude-code = ["harness"]
