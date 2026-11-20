@@ -591,7 +591,7 @@ async fn restarts_the_server_when_the_configuration_changes() {
     assert_eq!(fixture.fake_file("spawns").lines().count(), 2);
     let config = fixture.config();
     assert_eq!(config["mcp"]["harness-tools"]["type"], "local");
-    assert_eq!(config["mcp"]["harness-tools"]["command"][0], "sh");
+    assert_eq!(config["mcp"]["harness-tools"]["command"][0], "/bin/sh");
     session.destroy().await.unwrap();
 }
 

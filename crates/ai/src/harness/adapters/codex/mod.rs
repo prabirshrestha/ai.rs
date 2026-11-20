@@ -598,18 +598,34 @@ impl HarnessSession for CodexSession {
             *inner.thread_id.lock().unwrap() = None;
         }
 
-        let model = turn_settings
-            .model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CODEX_MODEL.to_string());
-        let (codex_config, codex_model) = resolve_codex_runtime(
-            &inner.environment,
-            Some(&model),
-            turn_settings.instructions.as_deref(),
-            settings.codex_config.as_ref(),
-            settings.mcp_servers.as_ref(),
-            inner.headers.as_ref(),
-        )?;
+        let resolve = |model: Option<&str>| {
+            resolve_codex_runtime(
+                &inner.environment,
+                model,
+                turn_settings.instructions.as_deref(),
+                settings.codex_config.as_ref(),
+                settings.mcp_servers.as_ref(),
+                inner.headers.as_ref(),
+            )
+        };
+        // [rust] The default model applies only on the adapter's own
+        // provider; on the CLI's own configuration (its login, provider and
+        // model), a turn that names no model runs Codex's default.
+        let (codex_config, codex_model, model) = match &turn_settings.model {
+            Some(model) => {
+                let (config, codex_model) = resolve(Some(model))?;
+                (config, codex_model, model.clone())
+            }
+            None => {
+                let (config, codex_model) = resolve(None)?;
+                if config.contains_key("model_provider") {
+                    let (config, codex_model) = resolve(Some(DEFAULT_CODEX_MODEL))?;
+                    (config, codex_model, DEFAULT_CODEX_MODEL.to_string())
+                } else {
+                    (config, codex_model, "codex".to_string())
+                }
+            }
+        };
         let effort = turn_settings
             .thinking_level
             .map(CodexReasoningEffort::from_thinking_level)

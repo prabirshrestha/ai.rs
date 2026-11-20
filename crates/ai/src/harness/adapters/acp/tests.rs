@@ -529,7 +529,7 @@ async fn streams_a_prompt_turn() {
     assert_eq!(new["cwd"], json!(format!("{}/work", fixture.root)));
     let server = &new["mcpServers"][0];
     assert_eq!(server["name"], HOST_TOOL_MCP_SERVER_NAME);
-    assert_eq!(server["command"], "sh");
+    assert_eq!(server["command"], "/bin/sh");
     assert_eq!(server["args"][3], json!(fixture.mcp_dir()));
     let prompt = &fixture.requests("session/prompt")[0];
     assert_eq!(prompt["sessionId"], "s1");

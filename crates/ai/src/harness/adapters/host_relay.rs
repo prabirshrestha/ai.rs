@@ -107,7 +107,7 @@ const AGENT_SIDE_SCRIPT: &str = r#"cat "$1/res" & r=$!; cat > "$1/req"; kill $r 
 #[allow(dead_code)]
 pub(super) fn agent_side_command(directory: &str) -> Vec<String> {
     vec![
-        "sh".into(),
+        "/bin/sh".into(),
         "-c".into(),
         AGENT_SIDE_SCRIPT.into(),
         "relay".into(),
@@ -342,7 +342,8 @@ impl HostRelay {
         match &self.transport {
             Transport::Stdio { directory, .. } => json!({
                 "name": name,
-                "command": "sh",
+                // Some agents take only an absolute command.
+                "command": "/bin/sh",
                 "args": ["-c", AGENT_SIDE_SCRIPT, "relay", directory],
                 "env": [],
             }),

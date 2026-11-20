@@ -10,7 +10,9 @@
 //! cargo run -p ai --example harness_live -- acp fx acp
 //! ```
 //!
-//! `--no-turn` only probes; `--prompt <text>` changes the turn's prompt.
+//! `--no-turn` only probes; `--prompt <text>` changes the turn's prompt and
+//! `--model <id>` its model. Each CLI runs on its own login and
+//! configuration on this machine.
 
 use std::sync::Arc;
 
@@ -22,8 +24,8 @@ use ai::harness::adapters::codex::{CodexHarness, CodexHarnessSettings};
 use ai::harness::adapters::cursor::{CursorHarnessSettings, create_cursor};
 use ai::harness::adapters::github_copilot::{GitHubCopilotHarnessSettings, create_github_copilot};
 use ai::harness::{
-    Harness, HarnessSandbox, HarnessSession, HarnessStartOptions, HarnessTurnOptions, HostSandbox,
-    PermissionMode,
+    Harness, HarnessAuthentication, HarnessSandbox, HarnessSession, HarnessStartOptions,
+    HarnessTurnOptions, HostSandbox, PermissionMode,
 };
 use ai::{AssistantContent, Message};
 
@@ -35,7 +37,9 @@ fn harness(name: &str, rest: &[String], shared: bool) -> Result<Box<dyn Harness>
             executable: Some("claude".into()),
             ..Default::default()
         })),
+        // An empty authentication environment: the CLI's own login.
         "codex" => Box::new(CodexHarness::new(CodexHarnessSettings {
+            auth: Some(HarnessAuthentication::Environment(Default::default())),
             executable: Some("codex".into()),
             shared_app_server: shared,
             ..Default::default()
@@ -45,7 +49,8 @@ fn harness(name: &str, rest: &[String], shared: bool) -> Result<Box<dyn Harness>
             ..Default::default()
         })?),
         "cursor" => Box::new(create_cursor(CursorHarnessSettings {
-            executable_override: Some("agent".into()),
+            auth: Some(HarnessAuthentication::Environment(Default::default())),
+            executable_override: Some("cursor-agent".into()),
             ..Default::default()
         })?),
         "acp" => {
@@ -92,11 +97,15 @@ fn texts(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-async fn turn(session: &dyn HarnessSession, prompt: &str) -> Result<(), BoxError> {
+async fn turn(
+    session: &dyn HarnessSession,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<(), BoxError> {
     let started = std::time::Instant::now();
-    let turn = session
-        .prompt(Message::user_text(prompt), HarnessTurnOptions::default())
-        .await?;
+    let mut options = HarnessTurnOptions::default();
+    options.settings.model = model.map(str::to_string);
+    let turn = session.prompt(Message::user_text(prompt), options).await?;
     let (events, messages) = turn.collect().await?;
     println!(
         "turn on {} in {:.1}s: {} events, reply {:?}",
@@ -124,13 +133,15 @@ async fn main() -> Result<(), BoxError> {
     };
     let shared = flag(&mut args, "--shared");
     let no_turn = flag(&mut args, "--no-turn");
-    let prompt = match args.iter().position(|arg| arg == "--prompt") {
-        Some(at) => {
-            args.remove(at);
-            args.remove(at)
-        }
-        None => "Reply with the single word: pong".into(),
+    let value = |args: &mut Vec<String>, name: &str| {
+        let at = args.iter().position(|arg| arg == name)?;
+        args.remove(at);
+        Some(args.remove(at))
     };
+    let prompt =
+        value(&mut args, "--prompt").unwrap_or_else(|| "Reply with the single word: pong".into());
+    let model = value(&mut args, "--model");
+    let model = model.as_deref();
     let name = args.first().cloned().ok_or("name a harness")?;
     let harness = harness(&name, &args[1..], shared)?;
 
@@ -168,12 +179,17 @@ async fn main() -> Result<(), BoxError> {
     }
 
     if !no_turn {
-        turn(session.as_ref(), &prompt).await?;
+        turn(session.as_ref(), &prompt, model).await?;
         if shared {
             options.session_id = "live-2".into();
             let second = harness.start(options).await?;
-            turn(second.as_ref(), &prompt).await?;
-            turn(session.as_ref(), "Now reply with the single word: ping").await?;
+            turn(second.as_ref(), &prompt, model).await?;
+            turn(
+                session.as_ref(),
+                "Now reply with the single word: ping",
+                model,
+            )
+            .await?;
             second.destroy().await?;
         }
     }
