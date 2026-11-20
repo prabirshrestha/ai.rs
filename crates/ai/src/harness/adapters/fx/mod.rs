@@ -5,4 +5,5 @@ pub(crate) mod libfx;
 pub(crate) mod remote_ops;
 pub mod resume_state;
 pub mod session_storage;
+pub mod subscription;
 pub(crate) mod transport;
