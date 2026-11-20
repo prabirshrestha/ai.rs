@@ -30,9 +30,14 @@ const GROK_SCOPE: &str = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a82
 const KEYRING_SERVICE: &str = "Codex Auth";
 
 /// `resolveFxEnv({ auth, env })`.
-pub fn resolve_fx_env(auth: Option<&FxAuthenticationMode>, env: &IndexMap<String, String>) -> IndexMap<String, String> {
+pub fn resolve_fx_env(
+    auth: Option<&FxAuthenticationMode>,
+    env: &IndexMap<String, String>,
+) -> IndexMap<String, String> {
     let gateway = match auth {
-        Some(HarnessAuthentication::Environment(environment)) => get_ai_gateway_auth_from_env(environment),
+        Some(HarnessAuthentication::Environment(environment)) => {
+            get_ai_gateway_auth_from_env(environment)
+        }
         _ => get_ai_gateway_auth_from_env(env),
     };
     let mut resolved = IndexMap::new();
@@ -129,12 +134,16 @@ fn absolute(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
     } else {
-        std::env::current_dir().map(|dir| dir.join(&path)).unwrap_or(path)
+        std::env::current_dir()
+            .map(|dir| dir.join(&path))
+            .unwrap_or(path)
     }
 }
 
 /// `resolveFxAuthentication(options)`.
-pub async fn resolve_fx_authentication(options: ResolveFxAuthenticationOptions) -> HarnessResult<FxResolvedAuthentication> {
+pub async fn resolve_fx_authentication(
+    options: ResolveFxAuthenticationOptions,
+) -> HarnessResult<FxResolvedAuthentication> {
     let env = options
         .env
         .clone()
@@ -173,12 +182,17 @@ pub async fn resolve_fx_authentication(options: ResolveFxAuthenticationOptions) 
                 continue;
             }
             let store = FileStore::new(home.join(".fx").join(file));
-            if let Some(subscription) = bind_subscription(provider, CredentialFormat::Fx, store).await {
+            if let Some(subscription) =
+                bind_subscription(provider, CredentialFormat::Fx, store).await
+            {
                 return Ok(FxResolvedAuthentication::Subscription(subscription));
             }
         }
         if wants(FxProvider::Codex) {
-            let codex_home = absolute(env.get("CODEX_HOME").map_or_else(|| home.join(".codex"), PathBuf::from));
+            let codex_home = absolute(
+                env.get("CODEX_HOME")
+                    .map_or_else(|| home.join(".codex"), PathBuf::from),
+            );
             let mode = codex_store_mode(&codex_home).await;
             if matches!(mode, "keyring" | "auto") {
                 let keyring = options
@@ -193,13 +207,21 @@ pub async fn resolve_fx_authentication(options: ResolveFxAuthenticationOptions) 
                         &ring::digest::SHA256,
                         canonical.to_string_lossy().as_bytes(),
                     );
-                    let hex: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+                    let hex: String = digest
+                        .as_ref()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
                     let store = KeyringStore {
                         keyring,
                         account: format!("cli|{}", &hex[..16]),
                     };
-                    if let Some(subscription) =
-                        bind_subscription(FxSubscriptionProvider::Codex, CredentialFormat::Codex, store).await
+                    if let Some(subscription) = bind_subscription(
+                        FxSubscriptionProvider::Codex,
+                        CredentialFormat::Codex,
+                        store,
+                    )
+                    .await
                     {
                         return Ok(FxResolvedAuthentication::Subscription(subscription));
                     }
@@ -207,17 +229,26 @@ pub async fn resolve_fx_authentication(options: ResolveFxAuthenticationOptions) 
             }
             if matches!(mode, "file" | "auto") {
                 let store = FileStore::new(codex_home.join("auth.json"));
-                if let Some(subscription) =
-                    bind_subscription(FxSubscriptionProvider::Codex, CredentialFormat::Codex, store).await
+                if let Some(subscription) = bind_subscription(
+                    FxSubscriptionProvider::Codex,
+                    CredentialFormat::Codex,
+                    store,
+                )
+                .await
                 {
                     return Ok(FxResolvedAuthentication::Subscription(subscription));
                 }
             }
         }
         if wants(FxProvider::Grok) {
-            let grok_home = absolute(env.get("GROK_HOME").map_or_else(|| home.join(".grok"), PathBuf::from));
+            let grok_home = absolute(
+                env.get("GROK_HOME")
+                    .map_or_else(|| home.join(".grok"), PathBuf::from),
+            );
             let store = FileStore::new(grok_home.join("auth.json"));
-            if let Some(subscription) = bind_subscription(FxSubscriptionProvider::Grok, CredentialFormat::Grok, store).await {
+            if let Some(subscription) =
+                bind_subscription(FxSubscriptionProvider::Grok, CredentialFormat::Grok, store).await
+            {
                 return Ok(FxResolvedAuthentication::Subscription(subscription));
             }
         }
@@ -315,7 +346,10 @@ impl FxSubscription {
             let record = credential_record(&value, self.format)?.clone();
             Some((value, record))
         }) else {
-            return Err(HarnessError::new("Cannot update the selected fx subscription credential store.").into());
+            return Err(HarnessError::new(
+                "Cannot update the selected fx subscription credential store.",
+            )
+            .into());
         };
         let grok = self.format == CredentialFormat::Grok;
         record.insert(
@@ -326,7 +360,10 @@ impl FxSubscription {
             record.insert("refresh_token".into(), json!(refresh_token));
         }
         if let Some(account_id) = &credentials.account_id {
-            record.insert(if grok { "user_id" } else { "account_id" }.into(), json!(account_id));
+            record.insert(
+                if grok { "user_id" } else { "account_id" }.into(),
+                json!(account_id),
+            );
         }
         if let Some(expires_at) = credentials.expires_at {
             match self.format {
@@ -359,7 +396,11 @@ impl FxSubscription {
 
 impl FxCredentialSource for FxSubscription {
     fn read(&self) -> BoxFuture<'_, Result<FxProviderCredentials, String>> {
-        Box::pin(async { FxSubscription::read(self).await.map_err(|error| error.to_string()) })
+        Box::pin(async {
+            FxSubscription::read(self)
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
 
     fn write(&self, credentials: FxProviderCredentials) -> BoxFuture<'_, Result<(), String>> {
@@ -380,7 +421,10 @@ fn json_number(value: f64) -> Value {
     }
 }
 
-fn credential_record(value: &Map<String, Value>, format: CredentialFormat) -> Option<&Map<String, Value>> {
+fn credential_record(
+    value: &Map<String, Value>,
+    format: CredentialFormat,
+) -> Option<&Map<String, Value>> {
     match format {
         CredentialFormat::Fx => (value.get("version") == Some(&json!(1))).then_some(value),
         CredentialFormat::Codex => {
@@ -401,31 +445,43 @@ fn non_empty(value: Option<&Value>) -> Option<String> {
 }
 
 /// `credentialsFromDocument({ value, format })`.
-fn credentials_from_document(value: &Map<String, Value>, format: CredentialFormat) -> Option<FxProviderCredentials> {
+fn credentials_from_document(
+    value: &Map<String, Value>,
+    format: CredentialFormat,
+) -> Option<FxProviderCredentials> {
     let record = credential_record(value, format)?;
     let grok = format == CredentialFormat::Grok;
     let access_token = non_empty(record.get(if grok { "key" } else { "access_token" }))?;
     let refresh_token = non_empty(record.get("refresh_token"));
     let account_id = non_empty(record.get(if grok { "user_id" } else { "account_id" }));
-    let expires_at = match format {
-        CredentialFormat::Fx => {
-            refresh_token.as_ref()?;
-            account_id.as_ref()?;
-            Some(record.get("expires_at_ms")?.as_f64().filter(|value| value.is_finite())?)
-        }
-        CredentialFormat::Codex => get_jwt_expires_at(&access_token),
-        CredentialFormat::Grok => match record.get("expires_at") {
-            Some(Value::String(text)) => parse_iso_millis(text),
-            Some(Value::Number(number)) => number.as_f64().filter(|value| value.is_finite()).map(|value| {
-                if value < 10_000_000_000.0 {
-                    value * 1000.0
-                } else {
-                    value
-                }
-            }),
-            _ => None,
-        },
-    };
+    let expires_at =
+        match format {
+            CredentialFormat::Fx => {
+                refresh_token.as_ref()?;
+                account_id.as_ref()?;
+                Some(
+                    record
+                        .get("expires_at_ms")?
+                        .as_f64()
+                        .filter(|value| value.is_finite())?,
+                )
+            }
+            CredentialFormat::Codex => get_jwt_expires_at(&access_token),
+            CredentialFormat::Grok => match record.get("expires_at") {
+                Some(Value::String(text)) => parse_iso_millis(text),
+                Some(Value::Number(number)) => number
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|value| {
+                        if value < 10_000_000_000.0 {
+                            value * 1000.0
+                        } else {
+                            value
+                        }
+                    }),
+                _ => None,
+            },
+        };
     Some(FxProviderCredentials {
         access_token,
         refresh_token,
@@ -444,7 +500,11 @@ fn parse_iso_millis(text: &str) -> Option<f64> {
         .expect("valid regex")
     });
     let captures = ISO.captures(text.trim())?;
-    let number = |index: usize| captures.get(index).map_or(Some(0), |value| value.as_str().parse::<i64>().ok());
+    let number = |index: usize| {
+        captures
+            .get(index)
+            .map_or(Some(0), |value| value.as_str().parse::<i64>().ok())
+    };
     let (year, month, day) = (number(1)?, number(2)?, number(3)?);
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
@@ -471,7 +531,10 @@ fn parse_iso_millis(text: &str) -> Option<f64> {
             sign * (hours * 60 + minutes) * 60_000
         }
     };
-    Some((((days * 24 + hour) * 60 + minute) * 60 + second) as f64 * 1000.0 + millis as f64 - offset as f64)
+    Some(
+        (((days * 24 + hour) * 60 + minute) * 60 + second) as f64 * 1000.0 + millis as f64
+            - offset as f64,
+    )
 }
 
 fn parse_document(text: &str) -> Option<Map<String, Value>> {
@@ -518,7 +581,8 @@ impl CredentialStore for FileStore {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
-                tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).await?;
+                tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+                    .await?;
             }
             tokio::fs::rename(&temporary, &self.path).await?;
             Ok::<_, std::io::Error>(())
@@ -542,7 +606,11 @@ impl CredentialStore for KeyringStore {
 
     async fn write(&self, value: Map<String, Value>) -> HarnessResult<()> {
         self.keyring
-            .write(KEYRING_SERVICE, &self.account, &Value::Object(value).to_string())
+            .write(
+                KEYRING_SERVICE,
+                &self.account,
+                &Value::Object(value).to_string(),
+            )
             .await
     }
 }
@@ -609,7 +677,8 @@ impl FxCodexKeyring for PlatformKeyring {
     }
 
     async fn write(&self, service: &str, account: &str, value: &str) -> HarnessResult<()> {
-        let quote = |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
+        let quote =
+            |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
         if is_macos(&self.platform) {
             let hex: String = value.bytes().map(|byte| format!("{byte:02x}")).collect();
             let input = format!(
@@ -621,8 +690,17 @@ impl FxCodexKeyring for PlatformKeyring {
         } else if is_linux(&self.platform) {
             let label = format!("{account}@{service}:default");
             let args = [
-                "store", "--label", &label, "service", service, "username", account, "target", "default",
-                "application", "rust-keyring",
+                "store",
+                "--label",
+                &label,
+                "service",
+                service,
+                "username",
+                account,
+                "target",
+                "default",
+                "application",
+                "rust-keyring",
             ];
             run_command_with_input("secret-tool", &args, value, &[]).await
         } else {
@@ -648,7 +726,12 @@ impl FxCodexKeyring for PlatformKeyring {
 }
 
 /// `runCommandWithInput({ command, args, input, env })`.
-async fn run_command_with_input(command: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> HarnessResult<()> {
+async fn run_command_with_input(
+    command: &str,
+    args: &[&str],
+    input: &str,
+    env: &[(&str, &str)],
+) -> HarnessResult<()> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt as _;
     let mut child = tokio::process::Command::new(command);
@@ -664,7 +747,10 @@ async fn run_command_with_input(command: &str, args: &[&str], input: &str, env: 
         .map_err(|_| HarnessError::new("Unable to access the Codex credential store."))?;
     let update_failed = || HarnessError::new("Unable to update the Codex credential store.");
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).await.map_err(|_| update_failed())?;
+        stdin
+            .write_all(input.as_bytes())
+            .await
+            .map_err(|_| update_failed())?;
     }
     let status = child.wait().await.map_err(|_| update_failed())?;
     if status.success() {
@@ -677,7 +763,11 @@ async fn run_command_with_input(command: &str, args: &[&str], input: &str, env: 
 /// `resolveFxModel({ provider, model, homeDirectory })`: an explicit model,
 /// else the model the user's fx settings save for a subscription provider
 /// (`models.<provider>`, or the legacy `<provider>_model`).
-pub async fn resolve_fx_model(provider: FxProvider, model: Option<String>, home_directory: Option<&Path>) -> Option<String> {
+pub async fn resolve_fx_model(
+    provider: FxProvider,
+    model: Option<String>,
+    home_directory: Option<&Path>,
+) -> Option<String> {
     if model.as_deref().is_some_and(|model| !model.is_empty()) || provider == FxProvider::Gateway {
         return model;
     }

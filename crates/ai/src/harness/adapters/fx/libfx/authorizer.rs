@@ -462,7 +462,7 @@ async fn bounded_text(response: FxHttpResponse, limit: usize) -> Option<String> 
 }
 
 /// `createSubscriptionAuthorizer` for one provider.
-pub(crate) struct SubscriptionAuthorizer {
+pub struct SubscriptionAuthorizer {
     provider: FxSubscriptionProvider,
     source: Arc<dyn FxCredentialSource>,
     fetch: FxFetch,

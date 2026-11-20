@@ -1,7 +1,6 @@
 //! `path.matchesGlob(path, pattern)` on POSIX, for the adapters that filter
 //! sandbox file lists with it (Pi, fx).
 
-
 fn expand_braces(pattern: &str) -> Vec<String> {
     let bytes: Vec<char> = pattern.chars().collect();
     let mut depth = 0usize;
@@ -160,4 +159,3 @@ pub(crate) fn matches_glob(path: &str, pattern: &str) -> bool {
         match_segments(&pattern_segments, &path_segments)
     })
 }
-

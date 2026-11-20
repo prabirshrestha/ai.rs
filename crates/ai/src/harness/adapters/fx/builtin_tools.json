@@ -1,0 +1,265 @@
+{
+  "read": {
+    "description": "Read a file in the sandbox workspace.",
+    "nativeName": "read",
+    "commonName": "read",
+    "toolUseKind": "readonly",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "write": {
+    "description": "Create or overwrite a file in the sandbox workspace.",
+    "nativeName": "write",
+    "commonName": "write",
+    "toolUseKind": "edit",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "edit": {
+    "description": "Replace an exact, unique string in a sandbox workspace file.",
+    "nativeName": "edit",
+    "commonName": "edit",
+    "toolUseKind": "edit",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "old_string": {
+          "type": "string"
+        },
+        "new_string": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "old_string",
+        "new_string"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "bash": {
+    "description": "Execute a shell command in the sandbox workspace. Timeout is in seconds.",
+    "nativeName": "bash",
+    "commonName": "bash",
+    "toolUseKind": "bash",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "grep": {
+    "description": "Search sandbox file contents.",
+    "nativeName": "grep",
+    "commonName": "grep",
+    "toolUseKind": "readonly",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "glob": {
+          "type": "string"
+        },
+        "ignoreCase": {
+          "type": "boolean"
+        },
+        "literal": {
+          "type": "boolean"
+        },
+        "context": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "glob": {
+    "description": "Find files in the sandbox workspace.",
+    "nativeName": "glob",
+    "commonName": "glob",
+    "toolUseKind": "readonly",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "ls": {
+    "description": "List a sandbox workspace directory.",
+    "toolUseKind": "readonly",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "askUserQuestions": {
+    "description": "Ask the user one or more questions",
+    "toolUseKind": "readonly",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "allowPartialAnswers": {
+          "type": "boolean"
+        },
+        "questions": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1
+              },
+              "header": {
+                "type": "string"
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "preview": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "allowMultiple": {
+                "type": "boolean"
+              },
+              "allowFreeForm": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "secret": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "secret"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "question"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "allowPartialAnswers",
+        "questions"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

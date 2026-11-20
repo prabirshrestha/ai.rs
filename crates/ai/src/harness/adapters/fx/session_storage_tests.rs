@@ -66,10 +66,15 @@ fn entries(storage: &MemoryStorage) -> Vec<Value> {
 async fn appends_the_whole_state_as_the_first_entry() {
     let storage = Arc::new(MemoryStorage::default());
     let writer = FxSessionStorageWriter::new(storage.clone(), "session-1", None, None);
-    let leaf_id = writer.write(&state(Some("AQID"), Some(turn()))).await.unwrap();
+    let leaf_id = writer
+        .write(&state(Some("AQID"), Some(turn())))
+        .await
+        .unwrap();
     assert_eq!(
         entries(&storage),
-        vec![json!({ "entryId": leaf_id, "data": { "provider": "gateway", "checkpoint": "AQID", "turn": turn() } })]
+        vec![
+            json!({ "entryId": leaf_id, "data": { "provider": "gateway", "checkpoint": "AQID", "turn": turn() } })
+        ]
     );
 }
 
@@ -77,10 +82,16 @@ async fn appends_the_whole_state_as_the_first_entry() {
 async fn appends_only_the_changed_fields_linked_to_the_previous_entry() {
     let storage = Arc::new(MemoryStorage::default());
     let writer = FxSessionStorageWriter::new(storage.clone(), "session-1", None, None);
-    let first = writer.write(&state(Some("AQID"), Some(turn()))).await.unwrap();
+    let first = writer
+        .write(&state(Some("AQID"), Some(turn())))
+        .await
+        .unwrap();
     let mut changed = turn();
     changed["emittedKeys"] = json!(["start"]);
-    let second = writer.write(&state(Some("AQID"), Some(changed.clone()))).await.unwrap();
+    let second = writer
+        .write(&state(Some("AQID"), Some(changed.clone())))
+        .await
+        .unwrap();
     assert_eq!(
         entries(&storage)[1],
         json!({ "entryId": second, "parentEntryId": first, "data": { "turn": changed } })
@@ -91,9 +102,15 @@ async fn appends_only_the_changed_fields_linked_to_the_previous_entry() {
 async fn records_an_ended_turn_and_a_new_checkpoint() {
     let storage = Arc::new(MemoryStorage::default());
     let writer = FxSessionStorageWriter::new(storage.clone(), "session-1", None, None);
-    writer.write(&state(Some("AQID"), Some(turn()))).await.unwrap();
+    writer
+        .write(&state(Some("AQID"), Some(turn())))
+        .await
+        .unwrap();
     let leaf_id = writer.write(&state(Some("BAUG"), None)).await.unwrap();
-    assert_eq!(entries(&storage)[1]["data"], json!({ "checkpoint": "BAUG", "turn": null }));
+    assert_eq!(
+        entries(&storage)[1]["data"],
+        json!({ "checkpoint": "BAUG", "turn": null })
+    );
     assert_eq!(
         read_fx_session_state(storage.as_ref(), "session-1", &leaf_id, None)
             .await
@@ -107,7 +124,10 @@ async fn appends_nothing_when_the_state_did_not_change() {
     let storage = Arc::new(MemoryStorage::default());
     let writer = FxSessionStorageWriter::new(storage.clone(), "session-1", None, None);
     let first = writer.write(&state(Some("AQID"), None)).await.unwrap();
-    assert_eq!(writer.write(&state(Some("AQID"), None)).await.unwrap(), first);
+    assert_eq!(
+        writer.write(&state(Some("AQID"), None)).await.unwrap(),
+        first
+    );
     assert_eq!(entries(&storage).len(), 1);
 }
 
@@ -115,9 +135,17 @@ async fn appends_nothing_when_the_state_did_not_change() {
 async fn continues_from_a_restored_leaf() {
     let storage = Arc::new(MemoryStorage::default());
     let saved = state(Some("AQID"), None);
-    let writer = FxSessionStorageWriter::new(storage.clone(), "session-1", Some("restored".into()), Some(&saved));
+    let writer = FxSessionStorageWriter::new(
+        storage.clone(),
+        "session-1",
+        Some("restored".into()),
+        Some(&saved),
+    );
     assert_eq!(writer.write(&saved).await.unwrap(), "restored");
-    writer.write(&state(Some("AQID"), Some(turn()))).await.unwrap();
+    writer
+        .write(&state(Some("AQID"), Some(turn())))
+        .await
+        .unwrap();
     let written = entries(&storage);
     assert_eq!(written.len(), 1);
     assert_eq!(written[0]["parentEntryId"], "restored");

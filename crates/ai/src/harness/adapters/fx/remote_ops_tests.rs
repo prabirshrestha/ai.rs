@@ -17,7 +17,10 @@ fn encoded(path: &str) -> String {
 
 /// A sandbox whose `realpath` answers come from `canonical`, in order, and
 /// then `/workspace`.
-fn setup(canonical: Vec<&'static str>) -> (MockSandbox, FxRemoteOps, Arc<Mutex<Vec<(String, Option<String>, bool)>>>) {
+/// Each run's command, working directory and whether it had a signal.
+type Calls = Arc<Mutex<Vec<(String, Option<String>, bool)>>>;
+
+fn setup(canonical: Vec<&'static str>) -> (MockSandbox, FxRemoteOps, Calls) {
     let answers = Arc::new(Mutex::new(canonical.into_iter()));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
@@ -46,10 +49,17 @@ fn setup(canonical: Vec<&'static str>) -> (MockSandbox, FxRemoteOps, Arc<Mutex<V
 #[tokio::test]
 async fn rejects_paths_outside_the_workspace_before_any_sandbox_operation() {
     let (sandbox, remote, calls) = setup(vec![]);
-    let error = remote.call("read", json!({ "file_path": "/etc/passwd" }), None).await.unwrap_err();
+    let error = remote
+        .call("read", json!({ "file_path": "/etc/passwd" }), None)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("escapes the workspace"));
     let error = remote
-        .call("write", json!({ "file_path": "../outside", "content": "no" }), None)
+        .call(
+            "write",
+            json!({ "file_path": "../outside", "content": "no" }),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("escapes the workspace"));
@@ -73,13 +83,24 @@ async fn rejects_symlinks_escaping_the_canonical_workspace() {
 async fn runs_shell_commands_only_through_the_supplied_sandbox_and_forwards_cancellation() {
     let (_, remote, calls) = setup(vec![]);
     let output = remote
-        .call("bash", json!({ "command": "printf sandbox" }), Some(CancellationToken::new()))
+        .call(
+            "bash",
+            json!({ "command": "printf sandbox" }),
+            Some(CancellationToken::new()),
+        )
         .await
         .unwrap();
-    assert_eq!(output, json!({ "exitCode": 0, "stdout": "sandbox output", "stderr": "" }));
+    assert_eq!(
+        output,
+        json!({ "exitCode": 0, "stdout": "sandbox output", "stderr": "" })
+    );
     assert_eq!(
         calls.lock()[0],
-        ("printf sandbox".to_string(), Some("/workspace".to_string()), true)
+        (
+            "printf sandbox".to_string(),
+            Some("/workspace".to_string()),
+            true
+        )
     );
 }
 
@@ -91,7 +112,10 @@ async fn does_not_mask_canonicalization_errors() {
         ..Default::default()
     });
     let remote = FxRemoteOps::new(Arc::new(sandbox), "/workspace");
-    let error = remote.call("read", json!({ "file_path": "file" }), None).await.unwrap_err();
+    let error = remote
+        .call("read", json!({ "file_path": "file" }), None)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("Unable to resolve sandbox path"));
 }
 
@@ -131,7 +155,10 @@ async fn edits_unique_text_and_filters_globs() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.to_string(), "Text to replace occurs more than once. Include more context.");
+    assert_eq!(
+        error.to_string(),
+        "Text to replace occurs more than once. Include more context."
+    );
     let output = remote
         .call(
             "edit",
@@ -141,7 +168,10 @@ async fn edits_unique_text_and_filters_globs() {
         .await
         .unwrap();
     assert_eq!(output, json!("Edited notes.txt"));
-    assert_eq!(sandbox.state.lock().files["/workspace/notes.txt"], "one 2 one");
+    assert_eq!(
+        sandbox.state.lock().files["/workspace/notes.txt"],
+        "one 2 one"
+    );
     let files = remote
         .call("glob", json!({ "pattern": "**/*.ts" }), None)
         .await

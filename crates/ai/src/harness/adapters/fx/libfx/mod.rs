@@ -8,4 +8,4 @@ pub(crate) mod wasm;
 
 #[cfg(test)]
 #[path = "engine_tests.rs"]
-mod engine_tests;
+pub(crate) mod engine_tests;

@@ -55,9 +55,19 @@ impl FxMcpClient for MockClient {
         }
     }
 
-    async fn call_tool(&self, name: &str, arguments: Value, _signal: CancellationToken) -> HarnessResult<Value> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        _signal: CancellationToken,
+    ) -> HarnessResult<Value> {
         self.calls.lock().unwrap().push((name.into(), arguments));
-        Ok(self.call_result.lock().unwrap().clone().unwrap_or(json!({ "content": [] })))
+        Ok(self
+            .call_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(json!({ "content": [] })))
     }
 
     async fn close(&self) {
@@ -108,15 +118,22 @@ async fn configures_each_transport_type() {
         if let Some(kind) = kind {
             config["type"] = json!(kind);
         }
-        let runtime = create_fx_mcp_runtime(Some(&servers(json!({ "context7": config }))), None, &connector)
-            .await
-            .unwrap();
+        let runtime = create_fx_mcp_runtime(
+            Some(&servers(json!({ "context7": config }))),
+            None,
+            &connector,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             connections.lock().unwrap().clone(),
             vec![FxMcpTransportConfig {
                 kind: expected,
                 url: "https://mcp.context7.com/mcp".into(),
-                headers: Some(IndexMap::from([("x-api-key".to_string(), "test-key".to_string())])),
+                headers: Some(IndexMap::from([(
+                    "x-api-key".to_string(),
+                    "test-key".to_string()
+                )])),
             }]
         );
         assert_eq!(runtime.instructions, "Server instructions");
@@ -131,7 +148,9 @@ async fn configures_each_transport_type() {
 async fn skips_disabled_entries_without_validating_other_fields() {
     let (connector, connections) = connector(vec![]);
     let runtime = create_fx_mcp_runtime(
-        Some(&servers(json!({ "disabled": { "disabled": true, "headers": [], "type": "stdio" } }))),
+        Some(&servers(
+            json!({ "disabled": { "disabled": true, "headers": [], "type": "stdio" } }),
+        )),
         None,
         &connector,
     )
@@ -155,11 +174,18 @@ async fn rejects_unsupported_server_configurations() {
         json!({ "url": "https://mcp.context7.com/mcp", "type": "websocket" }),
     ] {
         let (connector, connections) = connector(vec![]);
-        let error = create_fx_mcp_runtime(Some(&servers(json!({ "context7": config }))), None, &connector)
-            .await
-            .err()
-            .unwrap();
-        assert!(HarnessError::is_capability_unsupported(error.as_ref()), "{config}");
+        let error = create_fx_mcp_runtime(
+            Some(&servers(json!({ "context7": config }))),
+            None,
+            &connector,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            HarnessError::is_capability_unsupported(error.as_ref()),
+            "{config}"
+        );
         assert_eq!(
             error.to_string(),
             "fx MCP server context7 must use an HTTP or SSE URL. Command/stdio servers are not supported."
@@ -172,16 +198,26 @@ async fn rejects_unsupported_server_configurations() {
 async fn identifies_invalid_fields() {
     for (fields, field) in [
         (json!({ "headers": [] }), "headers"),
-        (json!({ "headers": { "authorization": 123 } }), "headers.authorization"),
+        (
+            json!({ "headers": { "authorization": 123 } }),
+            "headers.authorization",
+        ),
         (json!({ "disabled": "false" }), "disabled"),
     ] {
         let (connector, connections) = connector(vec![]);
         let mut config = json!({ "url": "https://mcp.context7.com/mcp" });
-        config.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
-        let error = create_fx_mcp_runtime(Some(&servers(json!({ "context7": config }))), None, &connector)
-            .await
-            .err()
-            .unwrap();
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let error = create_fx_mcp_runtime(
+            Some(&servers(json!({ "context7": config }))),
+            None,
+            &connector,
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(
             error
                 .to_string()
@@ -219,7 +255,11 @@ async fn closes_initialized_clients_after_a_later_failure() {
         .await;
         assert!(result.is_err(), "{failure}");
         assert_eq!(first.closes(), 1, "{failure}");
-        assert_eq!(second.closes(), usize::from(failure == "catalog"), "{failure}");
+        assert_eq!(
+            second.closes(),
+            usize::from(failure == "catalog"),
+            "{failure}"
+        );
     }
 }
 
@@ -238,7 +278,9 @@ async fn names_paginates_and_runs_tools() {
     ]);
     let (connector, _) = connector(vec![Some(client.clone())]);
     let runtime = create_fx_mcp_runtime(
-        Some(&servers(json!({ "context 7": { "url": "https://mcp.context7.com/mcp" } }))),
+        Some(&servers(
+            json!({ "context 7": { "url": "https://mcp.context7.com/mcp" } }),
+        )),
         None,
         &connector,
     )
@@ -296,8 +338,13 @@ async fn names_paginates_and_runs_tools() {
     );
 
     *client.call_result.lock().unwrap() = Some(json!({ "content": [], "isError": true }));
-    let result = runtime.tools[0].execute(json!({}), CancellationToken::new()).await;
-    assert_eq!(result, FxToolResult::error("MCP tool resolve.library failed"));
+    let result = runtime.tools[0]
+        .execute(json!({}), CancellationToken::new())
+        .await;
+    assert_eq!(
+        result,
+        FxToolResult::error("MCP tool resolve.library failed")
+    );
 }
 
 #[tokio::test]
@@ -307,18 +354,26 @@ async fn rejects_repeated_cursors_and_duplicate_tools() {
         Ok(json!({ "tools": [], "nextCursor": "again" })),
     ]);
     let error = create_mcp_adapter(client, "").await.err().unwrap();
-    assert_eq!(error.to_string(), "MCP listTools() returned an invalid pagination cursor");
-    let client = MockClient::with_pages(vec![Ok(json!({ "tools": [{ "name": "a" }, { "name": "a" }] }))]);
+    assert_eq!(
+        error.to_string(),
+        "MCP listTools() returned an invalid pagination cursor"
+    );
+    let client = MockClient::with_pages(vec![Ok(
+        json!({ "tools": [{ "name": "a" }, { "name": "a" }] }),
+    )]);
     let error = create_mcp_adapter(client, "").await.err().unwrap();
     assert_eq!(error.to_string(), "MCP tool a is duplicated");
 }
 
 /// A one-connection-per-request HTTP server answering MCP over Streamable
 /// HTTP; it records each request's method and session header.
-async fn serve_streamable_http() -> (String, Arc<Mutex<Vec<(String, Option<String>)>>>) {
+/// Each request's method and session header.
+type Requests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+async fn serve_streamable_http() -> (String, Requests) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::default();
+    let seen: Requests = Arc::default();
     let log = seen.clone();
     tokio::spawn(async move {
         loop {
@@ -342,10 +397,18 @@ async fn serve_streamable_http() -> (String, Arc<Mutex<Vec<(String, Option<Strin
                     let head = text[..end].to_string();
                     let length = head
                         .lines()
-                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().parse::<usize>().unwrap()))
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
                         .unwrap_or(0);
                     if buffer.len() >= end + 4 + length {
-                        break (head, String::from_utf8_lossy(&buffer[end + 4..end + 4 + length]).into_owned());
+                        break (
+                            head,
+                            String::from_utf8_lossy(&buffer[end + 4..end + 4 + length])
+                                .into_owned(),
+                        );
                     }
                 };
                 let session = head.lines().find_map(|line| {
@@ -386,10 +449,18 @@ async fn serve_streamable_http() -> (String, Arc<Mutex<Vec<(String, Option<Strin
                     ),
                     _ => ("", String::new()),
                 };
-                let status = if response.0.is_empty() { "202 Accepted" } else { "200 OK" };
+                let status = if response.0.is_empty() {
+                    "202 Accepted"
+                } else {
+                    "200 OK"
+                };
                 let reply = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: {}\r\nmcp-session-id: session-1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    if response.0.is_empty() { "text/plain" } else { response.0 },
+                    if response.0.is_empty() {
+                        "text/plain"
+                    } else {
+                        response.0
+                    },
                     response.1.len(),
                     response.1
                 );
@@ -405,9 +476,13 @@ async fn serve_streamable_http() -> (String, Arc<Mutex<Vec<(String, Option<Strin
 async fn talks_to_a_streamable_http_server() {
     let (url, seen) = serve_streamable_http().await;
     let connector = default_mcp_connector();
-    let runtime = create_fx_mcp_runtime(Some(&servers(json!({ "docs": { "url": url } }))), None, &connector)
-        .await
-        .unwrap();
+    let runtime = create_fx_mcp_runtime(
+        Some(&servers(json!({ "docs": { "url": url } }))),
+        None,
+        &connector,
+    )
+    .await
+    .unwrap();
     assert_eq!(runtime.instructions, "Use the docs tool.");
     assert_eq!(runtime.tools.len(), 1);
     assert_eq!(runtime.tools[0].descriptor.name, "mcp_docs_docs");
@@ -420,7 +495,10 @@ async fn talks_to_a_streamable_http_server() {
         seen.lock().unwrap().clone(),
         vec![
             ("initialize".to_string(), None),
-            ("notifications/initialized".to_string(), Some("session-1".to_string())),
+            (
+                "notifications/initialized".to_string(),
+                Some("session-1".to_string())
+            ),
             ("tools/list".to_string(), Some("session-1".to_string())),
             ("tools/call".to_string(), Some("session-1".to_string())),
             ("DELETE".to_string(), Some("session-1".to_string())),

@@ -7,7 +7,6 @@
 //! [rust] Not ported: the request fingerprints and recorded responses a
 //! continued turn replays, since ai.rs sessions do not suspend turns.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,10 +52,16 @@ pub struct FxToolCall {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FxTransportSignal {
     /// `onRequest`: model request `index` starts.
-    Request { index: usize, model_id: Option<String> },
+    Request {
+        index: usize,
+        model_id: Option<String>,
+    },
     /// `beforeRelease`: request `index` finished with these tool calls,
     /// which the core is about to see.
-    ToolCalls { index: usize, calls: Vec<FxToolCall> },
+    ToolCalls {
+        index: usize,
+        calls: Vec<FxToolCall>,
+    },
     /// A subscription provider rejected request `index`.
     Rejected {
         index: usize,
@@ -99,8 +104,15 @@ fn without_query(url: &str) -> &str {
 
 fn origin_and_path(url: &str) -> Option<(String, String, String)> {
     let parsed = reqwest::Url::parse(url).ok()?;
-    let suffix = parsed.query().map(|query| format!("?{query}")).unwrap_or_default();
-    Some((parsed.origin().ascii_serialization(), parsed.path().to_string(), suffix))
+    let suffix = parsed
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    Some((
+        parsed.origin().ascii_serialization(),
+        parsed.path().to_string(),
+        suffix,
+    ))
 }
 
 /// `createFxTransportProtocol({ provider })`.
@@ -148,7 +160,8 @@ impl Protocol {
         match self.provider {
             FxProvider::Gateway => {
                 gateway_request
-                    && origin_and_path(url).is_some_and(|(_, path, _)| path.ends_with("/ai/language-model"))
+                    && origin_and_path(url)
+                        .is_some_and(|(_, path, _)| path.ends_with("/ai/language-model"))
             }
             FxProvider::Codex => without_query(url) == CODEX_ENDPOINT,
             FxProvider::Grok => without_query(url) == GROK_ENDPOINT,
@@ -191,7 +204,10 @@ impl Protocol {
             Some(schema) => {
                 let mut format = Map::new();
                 format.insert("type".into(), json!("json_schema"));
-                format.insert("name".into(), json!(name.clone().unwrap_or_else(|| "response".into())));
+                format.insert(
+                    "name".into(),
+                    json!(name.clone().unwrap_or_else(|| "response".into())),
+                );
                 if let Some(description) = description {
                     format.insert("description".into(), json!(description));
                 }
@@ -365,7 +381,9 @@ impl FxTransport {
         Arc::new(Self {
             options,
             protocol,
-            state: Mutex::new(State { request_index: None }),
+            state: Mutex::new(State {
+                request_index: None,
+            }),
             active: AtomicBool::new(true),
             tasks: Mutex::default(),
             stopped: CancellationToken::new(),
@@ -373,6 +391,7 @@ impl FxTransport {
     }
 
     /// The index of the last model request, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn request_index(&self) -> Option<usize> {
         self.state.lock().unwrap().request_index
     }
@@ -551,7 +570,10 @@ impl FxTransport {
                     if terminal_part {
                         terminal = true;
                     }
-                    if self.protocol.should_hold_frame(part.as_ref(), terminal_part) {
+                    if self
+                        .protocol
+                        .should_hold_frame(part.as_ref(), terminal_part)
+                    {
                         holding = true;
                     }
                     if holding {
@@ -582,7 +604,9 @@ impl FxTransport {
                 return Err(suspended());
             }
             if !held.is_empty() {
-                let _ = sender.send(Ok(Bytes::from(std::mem::take(&mut held)))).await;
+                let _ = sender
+                    .send(Ok(Bytes::from(std::mem::take(&mut held))))
+                    .await;
             }
             Ok(())
         }
@@ -601,9 +625,6 @@ enum Prepared {
         model_id: Option<String>,
     },
 }
-
-/// The tool calls of each request, as the session reads them.
-pub type FxToolCalls = HashMap<usize, Vec<FxToolCall>>;
 
 #[cfg(test)]
 #[path = "transport_tests.rs"]

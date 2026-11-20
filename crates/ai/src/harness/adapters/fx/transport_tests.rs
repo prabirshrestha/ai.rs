@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::harness::adapters::fx::libfx::fetch::{FxFetch, FxFetchError, FxHttpRequest, FxHttpResponse};
+use crate::harness::adapters::fx::libfx::fetch::{
+    FxFetch, FxFetchError, FxHttpRequest, FxHttpResponse,
+};
 use crate::harness::session::ResponseFormat;
 
 const FIXTURE: &str = include_str!("fixtures/gateway-0.sse.txt");
@@ -20,12 +22,17 @@ const XAI: &str = include_str!("fixtures/responses-xai.chunks.txt");
 const GATEWAY_URL: &str = "https://ai-gateway.vercel.sh/v4/ai/language-model";
 
 fn responses_fixtures(provider: FxProvider) -> Vec<String> {
-    let lines = if provider == FxProvider::Codex { OPENAI } else { XAI };
+    let lines = if provider == FxProvider::Codex {
+        OPENAI
+    } else {
+        XAI
+    };
     let mut responses = Vec::new();
     let mut body = String::new();
     for line in lines.trim().split('\n') {
         body.push_str(&format!("data: {line}\n\n"));
-        if parse_fx_event(&format!("data: {line}")).and_then(|part| part["type"].as_str().map(str::to_string))
+        if parse_fx_event(&format!("data: {line}"))
+            .and_then(|part| part["type"].as_str().map(str::to_string))
             == Some("response.completed".into())
         {
             responses.push(std::mem::take(&mut body));
@@ -37,7 +44,10 @@ fn responses_fixtures(provider: FxProvider) -> Vec<String> {
 type Log = Arc<Mutex<Vec<FxHttpRequest>>>;
 
 /// A fetch that records requests and answers each with `respond`.
-fn fetch_with(log: Log, respond: impl Fn(usize) -> Result<FxHttpResponse, FxFetchError> + Send + Sync + 'static) -> FxFetch {
+fn fetch_with(
+    log: Log,
+    respond: impl Fn(usize) -> Result<FxHttpResponse, FxFetchError> + Send + Sync + 'static,
+) -> FxFetch {
     Arc::new(move |request, _| {
         let index = {
             let mut log = log.lock().unwrap();
@@ -114,7 +124,9 @@ async fn extracts_complete_subscription_tool_batches_before_release() {
             None,
             &[],
             None,
-            fetch_with(log.clone(), move |index| Ok(FxHttpResponse::new(200, served[index].clone()))),
+            fetch_with(log.clone(), move |index| {
+                Ok(FxHttpResponse::new(200, served[index].clone()))
+            }),
         );
         let fetch = transport.fetch();
         let endpoint = if provider == FxProvider::Codex {
@@ -124,7 +136,9 @@ async fn extracts_complete_subscription_tool_batches_before_release() {
         };
         for (index, fixture) in fixtures.iter().enumerate() {
             let body = json!({ "model": "supplied-model", "input": [index] }).to_string();
-            let response = fetch(post(endpoint, &body, &[]), CancellationToken::new()).await.unwrap();
+            let response = fetch(post(endpoint, &body, &[]), CancellationToken::new())
+                .await
+                .unwrap();
             assert_eq!(&response.text().await.unwrap(), fixture);
         }
         let calls: Vec<(String, Value)> = tool_calls(&signals.lock().unwrap())
@@ -179,20 +193,26 @@ async fn reuses_the_request_index_after_a_rejected_subscription_response() {
     );
     let fetch = transport.fetch();
     let endpoint = "https://chatgpt.com/backend-api/codex/responses";
-    let rejected = fetch(post(endpoint, r#"{"model":"unchanged"}"#, &[]), CancellationToken::new())
-        .await
-        .unwrap();
+    let rejected = fetch(
+        post(endpoint, r#"{"model":"unchanged"}"#, &[]),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(rejected.status, 401);
     assert_eq!(rejected.text().await.unwrap(), "rejected secret");
     assert_eq!(transport.request_index(), None);
-    fetch(post(endpoint, r#"{"model":"unchanged"}"#, &[]), CancellationToken::new())
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    fetch(
+        post(endpoint, r#"{"model":"unchanged"}"#, &[]),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
     assert_eq!(transport.request_index(), Some(0));
-    let signals = signals.lock().unwrap();
+    let signals = signals.lock().unwrap().clone();
     assert_eq!(
         signals[1],
         FxTransportSignal::Rejected {
@@ -201,7 +221,10 @@ async fn reuses_the_request_index_after_a_rejected_subscription_response() {
             status: 401,
         }
     );
-    assert!(matches!(signals[2], FxTransportSignal::Request { index: 0, .. }));
+    assert!(matches!(
+        signals[2],
+        FxTransportSignal::Request { index: 0, .. }
+    ));
     transport.stop().await;
 }
 
@@ -211,7 +234,11 @@ async fn keeps_tools_unpublished_when_a_response_is_truncated() {
     let codex = codex[..codex.find(r#"data: {"type":"response.completed""#).unwrap()].to_string();
     let gateway = FIXTURE[..FIXTURE.find(r#"data: {"type":"finish""#).unwrap()].to_string();
     for (provider, url, body) in [
-        (FxProvider::Codex, "https://chatgpt.com/backend-api/codex/responses", codex),
+        (
+            FxProvider::Codex,
+            "https://chatgpt.com/backend-api/codex/responses",
+            codex,
+        ),
         (FxProvider::Gateway, GATEWAY_URL, gateway),
     ] {
         let (transport, signals) = transport(
@@ -219,7 +246,9 @@ async fn keeps_tools_unpublished_when_a_response_is_truncated() {
             Some("https://ai-gateway.vercel.sh"),
             &[],
             None,
-            fetch_with(Log::default(), move |_| Ok(FxHttpResponse::new(200, body.clone()))),
+            fetch_with(Log::default(), move |_| {
+                Ok(FxHttpResponse::new(200, body.clone()))
+            }),
         );
         let request = if provider == FxProvider::Gateway {
             gateway_request()
@@ -232,7 +261,10 @@ async fn keeps_tools_unpublished_when_a_response_is_truncated() {
             .text()
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("before a terminal event"), "{error}");
+        assert!(
+            error.to_string().contains("before a terminal event"),
+            "{error}"
+        );
         assert!(tool_calls(&signals.lock().unwrap()).is_empty());
         transport.stop().await;
     }
@@ -245,13 +277,18 @@ async fn scopes_gateway_headers_away_from_subscription_requests() {
     let (transport, _) = transport(
         FxProvider::Grok,
         None,
-        &[("authorization", "gateway-key"), ("x-client-app", "gateway")],
+        &[
+            ("authorization", "gateway-key"),
+            ("x-client-app", "gateway"),
+        ],
         Some(ResponseFormat::Json {
             schema: Some(json!({ "type": "object" })),
             name: None,
             description: None,
         }),
-        fetch_with(log.clone(), move |_| Ok(FxHttpResponse::new(200, fixture.clone()))),
+        fetch_with(log.clone(), move |_| {
+            Ok(FxHttpResponse::new(200, fixture.clone()))
+        }),
     );
     let fetch = transport.fetch();
     for url in [
@@ -260,7 +297,11 @@ async fn scopes_gateway_headers_away_from_subscription_requests() {
         "https://cli-chat-proxy.grok.com/v1/responses",
     ] {
         fetch(
-            post(url, r#"{"model":"unchanged"}"#, &[("authorization", "subscription")]),
+            post(
+                url,
+                r#"{"model":"unchanged"}"#,
+                &[("authorization", "subscription")],
+            ),
             CancellationToken::new(),
         )
         .await
@@ -308,7 +349,9 @@ async fn publishes_the_tool_batch_before_releasing_tool_frames() {
         None,
         fetch_with(Log::default(), |_| Ok(FxHttpResponse::new(200, FIXTURE))),
     );
-    let response = transport.fetch()(gateway_request(), CancellationToken::new()).await.unwrap();
+    let response = transport.fetch()(gateway_request(), CancellationToken::new())
+        .await
+        .unwrap();
     let mut body = response.body;
     let mut text = String::new();
     use futures::StreamExt as _;
@@ -347,7 +390,9 @@ async fn keeps_request_indexes_stable_when_libfx_retries_a_failed_fetch() {
         }),
     );
     let fetch = transport.fetch();
-    let error = fetch(gateway_request(), CancellationToken::new()).await.unwrap_err();
+    let error = fetch(gateway_request(), CancellationToken::new())
+        .await
+        .unwrap_err();
     assert_eq!(error.to_string(), "fetch failed");
     fetch(gateway_request(), CancellationToken::new())
         .await
@@ -367,7 +412,9 @@ async fn forwards_structured_output_and_attribution_to_the_configured_gateway() 
         Some("https://gateway.example"),
         &[("x-client-app", "ai-sdk-harness-fx/test")],
         Some(ResponseFormat::Json {
-            schema: Some(json!({ "type": "object", "properties": { "answer": { "type": "string" } } })),
+            schema: Some(
+                json!({ "type": "object", "properties": { "answer": { "type": "string" } } }),
+            ),
             name: None,
             description: None,
         }),
@@ -379,9 +426,12 @@ async fn forwards_structured_output_and_attribution_to_the_configured_gateway() 
         .text()
         .await
         .unwrap();
-    let log = log.lock().unwrap();
+    let log = log.lock().unwrap().clone();
     assert_eq!(log[0].url, "https://gateway.example/v4/ai/language-model");
-    assert_eq!(log[0].header("x-client-app"), Some("ai-sdk-harness-fx/test"));
+    assert_eq!(
+        log[0].header("x-client-app"),
+        Some("ai-sdk-harness-fx/test")
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&log[0].body_text()).unwrap(),
         json!({
@@ -394,6 +444,9 @@ async fn forwards_structured_output_and_attribution_to_the_configured_gateway() 
 
 #[test]
 fn parses_sse_frames() {
-    assert_eq!(parse_fx_event("event: x\r\ndata: {\"type\":\"finish\"}\r\n"), Some(json!({ "type": "finish" })));
+    assert_eq!(
+        parse_fx_event("event: x\r\ndata: {\"type\":\"finish\"}\r\n"),
+        Some(json!({ "type": "finish" }))
+    );
     assert_eq!(parse_fx_event("data: [DONE]"), None);
 }

@@ -37,7 +37,9 @@ fn relative(from: &str, to: &str) -> String {
 fn assert_contained(root: &str, candidate: &str) -> HarnessResult<String> {
     let relative = relative(root, candidate);
     if relative == ".." || relative.starts_with("../") || relative.starts_with('/') {
-        return Err(HarnessError::new(format!("fx path escapes the workspace: {candidate}")).into());
+        return Err(
+            HarnessError::new(format!("fx path escapes the workspace: {candidate}")).into(),
+        );
     }
     Ok(candidate.to_string())
 }
@@ -92,7 +94,8 @@ struct LsInput {
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(input: Value) -> HarnessResult<T> {
-    serde_json::from_value(input).map_err(|error| HarnessError::new(format!("Invalid tool input: {error}")).into())
+    serde_json::from_value(input)
+        .map_err(|error| HarnessError::new(format!("Invalid tool input: {error}")).into())
 }
 
 /// `createFxRemoteOps({ sandbox, workDir })`.
@@ -112,18 +115,23 @@ impl FxRemoteOps {
         }
     }
 
-    /// Whether `name` is one of these operations.
-    pub fn supports(name: &str) -> bool {
-        matches!(name, "read" | "write" | "edit" | "bash" | "grep" | "glob" | "ls")
-    }
-
     /// Runs operation `name` with the model's `input`.
-    pub async fn call(&self, name: &str, input: Value, signal: Option<CancellationToken>) -> HarnessResult<Value> {
+    pub async fn call(
+        &self,
+        name: &str,
+        input: Value,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Value> {
         match name {
-            "read" => Ok(Value::String(self.read(parse::<PathInput>(input)?.file_path, signal).await?)),
+            "read" => Ok(Value::String(
+                self.read(parse::<PathInput>(input)?.file_path, signal)
+                    .await?,
+            )),
             "write" => {
                 let input: WriteInput = parse(input)?;
-                Ok(Value::String(self.write(&input.file_path, input.content, signal).await?))
+                Ok(Value::String(
+                    self.write(&input.file_path, input.content, signal).await?,
+                ))
             }
             "edit" => {
                 let input: EditInput = parse(input)?;
@@ -145,7 +153,11 @@ impl FxRemoteOps {
         }
     }
 
-    async fn run(&self, command: String, signal: Option<CancellationToken>) -> HarnessResult<SandboxRunResult> {
+    async fn run(
+        &self,
+        command: String,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<SandboxRunResult> {
         if signal.as_ref().is_some_and(CancellationToken::is_cancelled) {
             return Err(HarnessError::new("This operation was aborted").into());
         }
@@ -162,25 +174,42 @@ impl FxRemoteOps {
             .await
     }
 
-    async fn realpath(&self, target: &str, signal: Option<CancellationToken>) -> HarnessResult<String> {
+    async fn realpath(
+        &self,
+        target: &str,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
         let inner = format!("realpath -mz -- {} | base64", shell_quote(target));
         let result = self
-            .run(format!("bash -o pipefail -c {}", shell_quote(&inner)), signal)
+            .run(
+                format!("bash -o pipefail -c {}", shell_quote(&inner)),
+                signal,
+            )
             .await?;
         let encoded: String = result.stdout.split_whitespace().collect();
         if result.exit_code != 0 || encoded.is_empty() {
-            return Err(HarnessError::new(format!("Unable to resolve sandbox path: {target}")).into());
+            return Err(
+                HarnessError::new(format!("Unable to resolve sandbox path: {target}")).into(),
+            );
         }
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|_| HarnessError::new(format!("Unable to resolve sandbox path: {target}")))?;
         let decoded = String::from_utf8_lossy(&decoded).into_owned();
-        Ok(decoded.strip_suffix('\0').map(str::to_string).unwrap_or(decoded))
+        Ok(decoded
+            .strip_suffix('\0')
+            .map(str::to_string)
+            .unwrap_or(decoded))
     }
 
     /// `resolvePath({ filePath })`: the canonical path, inside the workspace.
-    async fn resolve_path(&self, file_path: &str, signal: Option<CancellationToken>) -> HarnessResult<String> {
-        let candidate = assert_contained(&self.work_dir, &resolve_posix(&self.work_dir, file_path))?;
+    async fn resolve_path(
+        &self,
+        file_path: &str,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
+        let candidate =
+            assert_contained(&self.work_dir, &resolve_posix(&self.work_dir, file_path))?;
         let root = self
             .canonical_root
             .get_or_try_init(|| self.realpath(&self.work_dir, None))
@@ -189,7 +218,11 @@ impl FxRemoteOps {
         assert_contained(&root, &self.realpath(&candidate, signal).await?)
     }
 
-    pub async fn read(&self, file_path: String, signal: Option<CancellationToken>) -> HarnessResult<String> {
+    pub async fn read(
+        &self,
+        file_path: String,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
         let path = self.resolve_path(&file_path, signal.clone()).await?;
         self.sandbox
             .read_text_file(SandboxReadTextFileOptions {
@@ -201,7 +234,12 @@ impl FxRemoteOps {
             .ok_or_else(|| HarnessError::new(format!("File not found: {file_path}")).into())
     }
 
-    pub async fn write(&self, file_path: &str, content: String, signal: Option<CancellationToken>) -> HarnessResult<String> {
+    pub async fn write(
+        &self,
+        file_path: &str,
+        content: String,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
         let path = self.resolve_path(file_path, signal.clone()).await?;
         self.sandbox
             .write_text_file(SandboxWriteTextFileOptions {
@@ -214,14 +252,21 @@ impl FxRemoteOps {
         Ok(format!("Wrote {file_path}"))
     }
 
-    async fn edit(&self, input: EditInput, signal: Option<CancellationToken>) -> HarnessResult<String> {
+    async fn edit(
+        &self,
+        input: EditInput,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
         let content = self.read(input.file_path.clone(), signal.clone()).await?;
         let index = content.find(&input.old_string);
         let (Some(index), false) = (index, input.old_string.is_empty()) else {
             return Err(HarnessError::new("Text to replace was not found or is empty.").into());
         };
         if content[index + input.old_string.len()..].contains(&input.old_string) {
-            return Err(HarnessError::new("Text to replace occurs more than once. Include more context.").into());
+            return Err(HarnessError::new(
+                "Text to replace occurs more than once. Include more context.",
+            )
+            .into());
         }
         let next = format!(
             "{}{}{}",
@@ -233,7 +278,12 @@ impl FxRemoteOps {
         Ok(format!("Edited {}", input.file_path))
     }
 
-    async fn bash(&self, command: String, timeout: Option<f64>, signal: Option<CancellationToken>) -> HarnessResult<SandboxRunResult> {
+    async fn bash(
+        &self,
+        command: String,
+        timeout: Option<f64>,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<SandboxRunResult> {
         let Some(seconds) = timeout.filter(|seconds| *seconds > 0.0) else {
             return self.run(command, signal).await;
         };
@@ -248,11 +298,19 @@ impl FxRemoteOps {
         result
     }
 
-    async fn grep(&self, input: GrepInput, signal: Option<CancellationToken>) -> HarnessResult<String> {
+    async fn grep(
+        &self,
+        input: GrepInput,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<String> {
         let target = self
             .resolve_path(input.path.as_deref().unwrap_or("."), signal.clone())
             .await?;
-        let mut flags = vec!["-r".to_string(), "-n".into(), "--binary-files=without-match".into()];
+        let mut flags = vec![
+            "-r".to_string(),
+            "-n".into(),
+            "--binary-files=without-match".into(),
+        ];
         if input.ignore_case == Some(true) {
             flags.push("-i".into());
         }
@@ -269,7 +327,11 @@ impl FxRemoteOps {
         let limit = input.limit.unwrap_or(100.0).floor().max(1.0);
         let command = format!(
             "grep {} -- {} {} | head -n {}",
-            flags.iter().map(|flag| shell_quote(flag)).collect::<Vec<_>>().join(" "),
+            flags
+                .iter()
+                .map(|flag| shell_quote(flag))
+                .collect::<Vec<_>>()
+                .join(" "),
             shell_quote(&input.pattern),
             shell_quote(&target),
             js_number(limit),
@@ -284,12 +346,19 @@ impl FxRemoteOps {
         })
     }
 
-    async fn glob(&self, input: GlobInput, signal: Option<CancellationToken>) -> HarnessResult<Vec<String>> {
+    async fn glob(
+        &self,
+        input: GlobInput,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Vec<String>> {
         let target = self
             .resolve_path(input.path.as_deref().unwrap_or("."), signal.clone())
             .await?;
         let result = self
-            .run(format!("find {} -type f -print0", shell_quote(&target)), signal)
+            .run(
+                format!("find {} -type f -print0", shell_quote(&target)),
+                signal,
+            )
             .await?;
         if result.exit_code != 0 {
             return Err(HarnessError::new(result.stderr).into());
@@ -306,13 +375,20 @@ impl FxRemoteOps {
         Ok(files)
     }
 
-    async fn ls(&self, input: LsInput, signal: Option<CancellationToken>) -> HarnessResult<Vec<String>> {
+    async fn ls(
+        &self,
+        input: LsInput,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Vec<String>> {
         let target = self
             .resolve_path(input.path.as_deref().unwrap_or("."), signal.clone())
             .await?;
         let result = self
             .run(
-                format!("find {} -mindepth 1 -maxdepth 1 -printf '%f\\0'", shell_quote(&target)),
+                format!(
+                    "find {} -mindepth 1 -maxdepth 1 -printf '%f\\0'",
+                    shell_quote(&target)
+                ),
                 signal,
             )
             .await?;

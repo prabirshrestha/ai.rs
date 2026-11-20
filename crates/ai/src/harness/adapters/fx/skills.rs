@@ -73,7 +73,12 @@ mod tests {
     use super::*;
     use crate::harness::tools::HarnessSkillFile;
 
-    fn skill(name: &str, description: &str, content: &str, files: Option<Vec<HarnessSkillFile>>) -> HarnessSkill {
+    fn skill(
+        name: &str,
+        description: &str,
+        content: &str,
+        files: Option<Vec<HarnessSkillFile>>,
+    ) -> HarnessSkill {
         HarnessSkill {
             name: name.into(),
             description: description.into(),
@@ -106,11 +111,22 @@ mod tests {
 
     #[test]
     fn enforces_libfx_limits() {
-        let duplicate = create_fx_skills_instructions(&[skill("a", "", "x", None), skill("a", "", "y", None)]);
-        assert_eq!(duplicate.unwrap_err().to_string(), "duplicate skill name: a");
-        let many: Vec<_> = (0..65).map(|index| skill(&format!("s{index}"), "", "x", None)).collect();
+        let duplicate =
+            create_fx_skills_instructions(&[skill("a", "", "x", None), skill("a", "", "y", None)]);
+        assert_eq!(
+            duplicate.unwrap_err().to_string(),
+            "duplicate skill name: a"
+        );
+        let many: Vec<_> = (0..65)
+            .map(|index| skill(&format!("s{index}"), "", "x", None))
+            .collect();
         assert!(create_fx_skills_instructions(&many).is_err());
-        let large = create_fx_skills_instructions(&[skill("a", "", &"x".repeat(MAX_INSTRUCTIONS_BYTES), None)]);
+        let large = create_fx_skills_instructions(&[skill(
+            "a",
+            "",
+            &"x".repeat(MAX_INSTRUCTIONS_BYTES),
+            None,
+        )]);
         assert!(large.unwrap_err().to_string().contains("byte libfx limit"));
     }
 }

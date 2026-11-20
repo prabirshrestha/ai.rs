@@ -42,13 +42,21 @@ pub trait FxMcpClient: Send + Sync {
     /// `tools/list` with an optional cursor; the raw result.
     async fn list_tools(&self, cursor: Option<String>) -> HarnessResult<Value>;
     /// `tools/call`; the raw result.
-    async fn call_tool(&self, name: &str, arguments: Value, signal: CancellationToken) -> HarnessResult<Value>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        signal: CancellationToken,
+    ) -> HarnessResult<Value>;
     async fn close(&self);
 }
 
 /// `createMCPClient`: connects and initializes a client.
 pub type FxMcpConnector = Arc<
-    dyn Fn(FxMcpTransportConfig, Option<CancellationToken>) -> BoxFuture<'static, HarnessResult<Arc<dyn FxMcpClient>>>
+    dyn Fn(
+            FxMcpTransportConfig,
+            Option<CancellationToken>,
+        ) -> BoxFuture<'static, HarnessResult<Arc<dyn FxMcpClient>>>
         + Send
         + Sync,
 >;
@@ -81,20 +89,29 @@ fn initialize_params() -> Value {
 /// The `result` of a JSON-RPC response, or its error.
 fn response_result(message: Value) -> HarnessResult<Value> {
     if let Some(error) = message.get("error") {
-        let text = error.get("message").and_then(Value::as_str).unwrap_or("MCP request failed");
+        let text = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("MCP request failed");
         return Err(HarnessError::new(format!("MCP error: {text}")).into());
     }
     Ok(message.get("result").cloned().unwrap_or(Value::Null))
 }
 
-fn apply_headers(mut request: reqwest::RequestBuilder, headers: &Option<IndexMap<String, String>>) -> reqwest::RequestBuilder {
+fn apply_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &Option<IndexMap<String, String>>,
+) -> reqwest::RequestBuilder {
     for (name, value) in headers.iter().flatten() {
         request = request.header(name, value);
     }
     request
 }
 
-async fn cancellable<T>(signal: Option<&CancellationToken>, future: impl Future<Output = HarnessResult<T>>) -> HarnessResult<T> {
+async fn cancellable<T>(
+    signal: Option<&CancellationToken>,
+    future: impl Future<Output = HarnessResult<T>>,
+) -> HarnessResult<T> {
     match signal {
         Some(signal) => tokio::select! {
             _ = signal.cancelled() => Err(HarnessError::new("This operation was aborted").into()),
@@ -114,7 +131,10 @@ struct HttpMcpClient {
 }
 
 impl HttpMcpClient {
-    async fn connect(config: FxMcpTransportConfig, signal: Option<CancellationToken>) -> HarnessResult<Self> {
+    async fn connect(
+        config: FxMcpTransportConfig,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Self> {
         let mut client = Self {
             http: reqwest::Client::new(),
             config,
@@ -122,10 +142,20 @@ impl HttpMcpClient {
             next_id: AtomicU64::new(0),
             instructions: None,
         };
-        let result = cancellable(signal.as_ref(), client.request("initialize", initialize_params(), signal.clone())).await?;
-        client.instructions = result.get("instructions").and_then(Value::as_str).map(str::to_string);
+        let result = cancellable(
+            signal.as_ref(),
+            client.request("initialize", initialize_params(), signal.clone()),
+        )
+        .await?;
+        client.instructions = result
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         client
-            .send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), None)
+            .send(
+                json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+                None,
+            )
             .await?;
         Ok(client)
     }
@@ -143,10 +173,18 @@ impl HttpMcpClient {
     }
 
     /// Sends a message and returns the response, if the server sent one.
-    async fn send(&self, body: Value, signal: Option<CancellationToken>) -> HarnessResult<Option<Value>> {
+    async fn send(
+        &self,
+        body: Value,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Option<Value>> {
         let id = body.get("id").cloned();
         let response = self.post(&body).send().await?;
-        if let Some(session_id) = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()) {
+        if let Some(session_id) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
             *self.session_id.lock().unwrap() = Some(session_id.to_string());
         }
         let status = response.status();
@@ -168,7 +206,9 @@ impl HttpMcpClient {
                 Value::Array(messages) => messages,
                 message => vec![message],
             };
-            return Ok(messages.into_iter().find(|message| message.get("id") == Some(&id)));
+            return Ok(messages
+                .into_iter()
+                .find(|message| message.get("id") == Some(&id)));
         }
         let mut events = std::pin::pin!(crate::utils::sse::events(response, signal));
         while let Some(event) = events.next().await {
@@ -186,7 +226,12 @@ impl HttpMcpClient {
         Err(HarnessError::new("MCP server closed the stream without a response").into())
     }
 
-    async fn request(&self, method: &str, params: Value, signal: Option<CancellationToken>) -> HarnessResult<Value> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let response = self.send(request_body(id, method, params), signal).await?;
         response_result(response.ok_or_else(|| HarnessError::new("MCP server sent no response"))?)
@@ -204,9 +249,18 @@ impl FxMcpClient for HttpMcpClient {
         self.request("tools/list", params, None).await
     }
 
-    async fn call_tool(&self, name: &str, arguments: Value, signal: CancellationToken) -> HarnessResult<Value> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        signal: CancellationToken,
+    ) -> HarnessResult<Value> {
         let params = json!({ "name": name, "arguments": arguments });
-        cancellable(Some(&signal), self.request("tools/call", params, Some(signal.clone()))).await
+        cancellable(
+            Some(&signal),
+            self.request("tools/call", params, Some(signal.clone())),
+        )
+        .await
     }
 
     async fn close(&self) {
@@ -235,9 +289,13 @@ struct SseMcpClient {
 }
 
 impl SseMcpClient {
-    async fn connect(config: FxMcpTransportConfig, signal: Option<CancellationToken>) -> HarnessResult<Self> {
+    async fn connect(
+        config: FxMcpTransportConfig,
+        signal: Option<CancellationToken>,
+    ) -> HarnessResult<Self> {
         let http = reqwest::Client::new();
-        let base = reqwest::Url::parse(&config.url).map_err(|error| HarnessError::new(format!("Invalid MCP URL: {error}")))?;
+        let base = reqwest::Url::parse(&config.url)
+            .map_err(|error| HarnessError::new(format!("Invalid MCP URL: {error}")))?;
         let response = cancellable(signal.as_ref(), async {
             Ok(apply_headers(http.get(base.clone()), &config.headers)
                 .header("accept", "text/event-stream")
@@ -246,7 +304,11 @@ impl SseMcpClient {
         })
         .await?;
         if !response.status().is_success() {
-            return Err(HarnessError::new(format!("MCP SSE Transport Error: {}", response.status())).into());
+            return Err(HarnessError::new(format!(
+                "MCP SSE Transport Error: {}",
+                response.status()
+            ))
+            .into());
         }
         let stop = CancellationToken::new();
         let pending: Pending = Arc::default();
@@ -282,9 +344,12 @@ impl SseMcpClient {
             reader_pending.lock().unwrap().clear();
         });
         let endpoint = cancellable(signal.as_ref(), async {
-            endpoint
-                .await
-                .map_err(|_| HarnessError::new("MCP SSE Transport Error: the stream ended before an endpoint event").into())
+            endpoint.await.map_err(|_| {
+                HarnessError::new(
+                    "MCP SSE Transport Error: the stream ended before an endpoint event",
+                )
+                .into()
+            })
         })
         .await?;
         let endpoint = base
@@ -292,7 +357,10 @@ impl SseMcpClient {
             .map_err(|error| HarnessError::new(format!("Invalid MCP endpoint: {error}")))?;
         if endpoint.origin() != base.origin() {
             stop.cancel();
-            return Err(HarnessError::new("MCP SSE endpoint origin does not match the connection origin").into());
+            return Err(HarnessError::new(
+                "MCP SSE endpoint origin does not match the connection origin",
+            )
+            .into());
         }
         let mut client = Self {
             http,
@@ -303,7 +371,11 @@ impl SseMcpClient {
             instructions: None,
             stop,
         };
-        let result = cancellable(signal.as_ref(), client.request("initialize", initialize_params())).await;
+        let result = cancellable(
+            signal.as_ref(),
+            client.request("initialize", initialize_params()),
+        )
+        .await;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -311,7 +383,10 @@ impl SseMcpClient {
                 return Err(error);
             }
         };
-        client.instructions = result.get("instructions").and_then(Value::as_str).map(str::to_string);
+        client.instructions = result
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         client
             .post(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
             .await?;
@@ -327,7 +402,9 @@ impl SseMcpClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(HarnessError::new(format!("MCP SSE Transport Error: {status} {text}")).into());
+            return Err(
+                HarnessError::new(format!("MCP SSE Transport Error: {status} {text}")).into(),
+            );
         }
         Ok(())
     }
@@ -358,7 +435,12 @@ impl FxMcpClient for SseMcpClient {
         self.request("tools/list", params).await
     }
 
-    async fn call_tool(&self, name: &str, arguments: Value, signal: CancellationToken) -> HarnessResult<Value> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        signal: CancellationToken,
+    ) -> HarnessResult<Value> {
         let params = json!({ "name": name, "arguments": arguments });
         cancellable(Some(&signal), self.request("tools/call", params)).await
     }

@@ -13,9 +13,9 @@ pub mod cursor;
 pub mod fx;
 #[cfg(feature = "harness-github-copilot")]
 pub mod github_copilot;
+pub(crate) mod glob;
 #[cfg(any(feature = "harness-acp", feature = "harness-opencode"))]
 pub(crate) mod host_relay;
-pub(crate) mod glob;
 pub mod host_tools;
 #[cfg(feature = "harness-github-copilot")]
 pub(crate) mod jsonc;

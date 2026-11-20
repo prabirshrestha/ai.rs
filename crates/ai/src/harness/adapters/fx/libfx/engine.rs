@@ -133,6 +133,9 @@ pub enum FxEngineEvent {
         signal: CancellationToken,
         reply: oneshot::Sender<FxToolResult>,
     },
+    /// [rust] The model transport's signal, sent into the same channel so it
+    /// is in order with the core's output.
+    Transport(crate::harness::adapters::fx::transport::FxTransportSignal),
 }
 
 /// How the engine reaches the model.

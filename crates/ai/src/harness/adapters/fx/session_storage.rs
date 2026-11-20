@@ -74,12 +74,16 @@ pub async fn read_fx_session_state(
     leaf_id: &str,
     cancellation_token: Option<CancellationToken>,
 ) -> HarnessResult<FxSessionState> {
-    let values = storage.read(session_id, leaf_id, cancellation_token).await?;
+    let values = storage
+        .read(session_id, leaf_id, cancellation_token)
+        .await?;
     let mut entries = std::collections::HashMap::new();
     for (index, value) in values.into_iter().enumerate() {
         let entry: Entry = serde_json::from_value(value).map_err(|error| {
             HarnessError::with_cause(
-                format!("Entry {index} of the fx session \"{session_id}\" is not an fx session entry."),
+                format!(
+                    "Entry {index} of the fx session \"{session_id}\" is not an fx session entry."
+                ),
                 error,
             )
         })?;
@@ -190,11 +194,15 @@ impl FxSessionStorageWriter {
             data.insert("provider".into(), serde_json::to_value(snapshot.provider)?);
         }
         if let Some(checkpoint) = &current.checkpoint
-            && writer.saved.as_ref().and_then(|saved| saved.checkpoint.as_ref()) != Some(checkpoint)
+            && writer
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.checkpoint.as_ref())
+                != Some(checkpoint)
         {
             data.insert("checkpoint".into(), Value::String(checkpoint.clone()));
         }
-        if writer.saved.as_ref().map(|saved| &saved.turn) != Some(&current.turn) {
+        if writer.saved.as_ref().and_then(|saved| saved.turn.as_ref()) != current.turn.as_ref() {
             data.insert("turn".into(), snapshot.turn.clone().unwrap_or(Value::Null));
         }
         if let Some(leaf_id) = &writer.leaf_id

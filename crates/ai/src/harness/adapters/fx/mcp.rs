@@ -16,7 +16,10 @@ const MAX_PAGES: usize = 64;
 
 /// `parseFxMcpServerConfig({ serverName, config })`: `None` for a disabled
 /// entry.
-pub(crate) fn parse_fx_mcp_server_config(server_name: &str, config: &Value) -> HarnessResult<Option<FxMcpTransportConfig>> {
+pub(crate) fn parse_fx_mcp_server_config(
+    server_name: &str,
+    config: &Value,
+) -> HarnessResult<Option<FxMcpTransportConfig>> {
     if config.get("disabled") == Some(&Value::Bool(true)) {
         return Ok(None);
     }
@@ -27,7 +30,10 @@ pub(crate) fn parse_fx_mcp_server_config(server_name: &str, config: &Value) -> H
         )
         .into())
     };
-    let invalid = |field: &str, expected: &str, value: &Value| -> HarnessResult<Option<FxMcpTransportConfig>> {
+    let invalid = |field: &str,
+                   expected: &str,
+                   value: &Value|
+     -> HarnessResult<Option<FxMcpTransportConfig>> {
         Err(HarnessError::new(format!(
             "Invalid fx MCP server {server_name} field {field}: Invalid input: expected {expected}, received {}",
             received(value)
@@ -105,7 +111,11 @@ impl std::fmt::Debug for FxMcpTool {
 impl FxMcpTool {
     /// `execute(input, { signal })`.
     pub async fn execute(&self, input: Value, signal: CancellationToken) -> FxToolResult {
-        match self.client.call_tool(&self.remote_name, input, signal).await {
+        match self
+            .client
+            .call_tool(&self.remote_name, input, signal)
+            .await
+        {
             Ok(result) => mcp_tool_result(&self.remote_name, &result),
             Err(error) => FxToolResult::error(error.to_string()),
         }
@@ -137,7 +147,10 @@ fn content_text(content: Option<&Value>) -> String {
             }
             if item.get("type").and_then(Value::as_str) == Some("resource_link") {
                 let uri = item.get("uri").and_then(Value::as_str)?;
-                let name = item.get("name").and_then(Value::as_str).unwrap_or("Resource");
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Resource");
                 return Some(format!("{name}: {uri}"));
             }
             None
@@ -190,7 +203,11 @@ fn mcp_tool_result(name: &str, result: &Value) -> FxToolResult {
         .collect();
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return FxToolResult {
-            text: if text.is_empty() { format!("MCP tool {name} failed") } else { text },
+            text: if text.is_empty() {
+                format!("MCP tool {name} failed")
+            } else {
+                text
+            },
             images,
             is_error: true,
         };
@@ -203,7 +220,10 @@ fn mcp_tool_result(name: &str, result: &Value) -> FxToolResult {
 }
 
 /// `createMcpAdapter(client, { prefix })`: the server's tool catalog.
-pub(crate) async fn create_mcp_adapter(client: Arc<dyn FxMcpClient>, prefix: &str) -> HarnessResult<Vec<FxMcpTool>> {
+pub(crate) async fn create_mcp_adapter(
+    client: Arc<dyn FxMcpClient>,
+    prefix: &str,
+) -> HarnessResult<Vec<FxMcpTool>> {
     let mut catalog: Vec<Value> = Vec::new();
     let mut cursors = HashSet::new();
     let mut cursor: Option<String> = None;
@@ -219,7 +239,9 @@ pub(crate) async fn create_mcp_adapter(client: Arc<dyn FxMcpClient>, prefix: &st
                     .get("tools")
                     .and_then(Value::as_array)
                     .cloned()
-                    .ok_or_else(|| HarnessError::new("MCP listTools() returned an invalid tool catalog"))?,
+                    .ok_or_else(|| {
+                        HarnessError::new("MCP listTools() returned an invalid tool catalog")
+                    })?,
                 listed.get("nextCursor").filter(|next| !next.is_null()),
             ),
         };
@@ -230,7 +252,9 @@ pub(crate) async fn create_mcp_adapter(client: Arc<dyn FxMcpClient>, prefix: &st
         let next = next
             .as_str()
             .filter(|next| next.len() <= 4096 && !cursors.contains(*next))
-            .ok_or_else(|| HarnessError::new("MCP listTools() returned an invalid pagination cursor"))?;
+            .ok_or_else(|| {
+                HarnessError::new("MCP listTools() returned an invalid pagination cursor")
+            })?;
         cursors.insert(next.to_string());
         cursor = Some(next.to_string());
     }
@@ -251,13 +275,22 @@ pub(crate) async fn create_mcp_adapter(client: Arc<dyn FxMcpClient>, prefix: &st
         }
         let base: String = format!("{prefix}{name}")
             .chars()
-            .map(|char| if char.is_ascii_alphanumeric() || char == '_' || char == '-' { char } else { '_' })
+            .map(|char| {
+                if char.is_ascii_alphanumeric() || char == '_' || char == '-' {
+                    char
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let mut exposed: String = base.chars().take(64).collect();
         let mut suffix = 2;
         while names.contains(&exposed) {
             let tail = format!("_{suffix}");
-            exposed = format!("{}{tail}", base.chars().take(64 - tail.len()).collect::<String>());
+            exposed = format!(
+                "{}{tail}",
+                base.chars().take(64 - tail.len()).collect::<String>()
+            );
             suffix += 1;
         }
         names.insert(exposed.clone());
@@ -316,7 +349,13 @@ pub(crate) async fn create_fx_mcp_runtime(
             }
             let prefix: String = server_name
                 .chars()
-                .map(|char| if char.is_ascii_alphanumeric() || char == '_' || char == '-' { char } else { '_' })
+                .map(|char| {
+                    if char.is_ascii_alphanumeric() || char == '_' || char == '-' {
+                        char
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             runtime
                 .tools

@@ -42,7 +42,7 @@ const STDERR_TAIL_LINES: usize = 40;
 /// What the core asks of the engine, in the order it asks.
 pub(crate) enum CoreItem {
     /// One line of ACP output and its size in bytes.
-    Line(Value, usize),
+    Line(Value, #[allow(dead_code)] usize),
     /// `fx_host_tool_call`.
     HostToolCall {
         name: String,
@@ -257,6 +257,7 @@ impl FxCore {
     }
 
     /// `withdrawSteering(id)`: false once the core took it.
+    #[allow(dead_code)]
     pub fn withdraw_steering(&self, id: &str) -> bool {
         let mut steering = self.shared.steering.lock().unwrap();
         let Some(index) = steering.entries.iter().position(|entry| entry.id == id) else {
@@ -268,6 +269,7 @@ impl FxCore {
     }
 
     /// `handOffSteering()`.
+    #[allow(dead_code)]
     pub fn hand_off_steering(&self) -> bool {
         let mut steering = self.shared.steering.lock().unwrap();
         if !steering.open {
@@ -312,6 +314,7 @@ impl FxCore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn exit_code(&self) -> Option<i32> {
         *self.exit.borrow()
     }
@@ -322,6 +325,7 @@ impl FxCore {
     }
 
     /// The core's last stderr lines.
+    #[allow(dead_code)]
     pub fn stderr(&self) -> String {
         self.shared
             .stderr
@@ -976,14 +980,12 @@ fn define_fx(linker: &mut Linker<HostData>) -> wasmtime::Result<()> {
                 let Some(state) = caller.data_mut().streams.get_mut(&handle) else {
                     return Ok(-1i32);
                 };
-                if state.settled.is_none() {
-                    if let Some(response) = state.response.as_mut() {
-                        if let Ok(response) =
-                            tokio::time::timeout(Duration::from_millis(50), response).await
-                        {
-                            state.settle(response);
-                        }
-                    }
+                if state.settled.is_none()
+                    && let Some(response) = state.response.as_mut()
+                    && let Ok(response) =
+                        tokio::time::timeout(Duration::from_millis(50), response).await
+                {
+                    state.settle(response);
                 }
                 let state = caller.data_mut().streams.get_mut(&handle).unwrap();
                 Ok(match state.settled.clone() {
@@ -1007,12 +1009,12 @@ fn define_fx(linker: &mut Linker<HostData>) -> wasmtime::Result<()> {
                     return Ok(-1i32);
                 };
                 // A body read before the response settled waits for it.
-                if state.settled.is_none() {
-                    if let Some(response) = state.response.as_mut() {
-                        match tokio::time::timeout(Duration::from_millis(50), response).await {
-                            Ok(response) => state.settle(response),
-                            Err(_) => return Ok(-3),
-                        }
+                if state.settled.is_none()
+                    && let Some(response) = state.response.as_mut()
+                {
+                    match tokio::time::timeout(Duration::from_millis(50), response).await {
+                        Ok(response) => state.settle(response),
+                        Err(_) => return Ok(-3),
                     }
                 }
                 let cap = out_cap.max(0) as usize;

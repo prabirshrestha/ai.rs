@@ -114,6 +114,7 @@ async fn runs_a_turn_with_a_host_tool_on_the_real_core() {
                     seen.push(format!("model.end {:?}", end.finish_reason))
                 }
                 FxEngineEvent::Turn(event) => seen.push(format!("{event:?}")),
+                FxEngineEvent::Transport(_) => {}
             }
         }
         seen

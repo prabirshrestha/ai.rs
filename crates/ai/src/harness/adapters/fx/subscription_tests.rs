@@ -74,7 +74,9 @@ fn options(directory: &TempDir) -> ResolveFxAuthenticationOptions {
     }
 }
 
-async fn resolve(options: ResolveFxAuthenticationOptions) -> HarnessResult<FxResolvedAuthentication> {
+async fn resolve(
+    options: ResolveFxAuthenticationOptions,
+) -> HarnessResult<FxResolvedAuthentication> {
     resolve_fx_authentication(options).await
 }
 
@@ -102,10 +104,30 @@ fn credentials(access_token: &str) -> FxProviderCredentials {
 async fn uses_fx_codex_fx_grok_native_codex_then_native_grok() {
     let directory = mkdtemp("fx-subscription-");
     let sources = [
-        (".fx/chatgpt-auth.json", fx_credentials("fx-codex"), FxProvider::Codex, "fx-codex"),
-        (".fx/grok-auth.json", fx_credentials("fx-grok"), FxProvider::Grok, "fx-grok"),
-        (".codex/auth.json", codex_credentials(), FxProvider::Codex, "native-codex"),
-        (".grok/auth.json", grok_credentials(), FxProvider::Grok, "native-grok"),
+        (
+            ".fx/chatgpt-auth.json",
+            fx_credentials("fx-codex"),
+            FxProvider::Codex,
+            "fx-codex",
+        ),
+        (
+            ".fx/grok-auth.json",
+            fx_credentials("fx-grok"),
+            FxProvider::Grok,
+            "fx-grok",
+        ),
+        (
+            ".codex/auth.json",
+            codex_credentials(),
+            FxProvider::Codex,
+            "native-codex",
+        ),
+        (
+            ".grok/auth.json",
+            grok_credentials(),
+            FxProvider::Grok,
+            "native-grok",
+        ),
     ];
     for (file, value, ..) in &sources {
         put(&directory, file, value);
@@ -113,17 +135,31 @@ async fn uses_fx_codex_fx_grok_native_codex_then_native_grok() {
     for (file, _, provider, token) in &sources {
         let auth = resolve(options(&directory)).await.unwrap();
         assert_eq!(auth.provider(), *provider);
-        assert_eq!(subscription(auth).read().await.unwrap().access_token, *token);
+        assert_eq!(
+            subscription(auth).read().await.unwrap().access_token,
+            *token
+        );
         std::fs::remove_file(directory.path().join(file)).unwrap();
     }
-    assert!(error_text(resolve(options(&directory)).await).contains("No subscription credentials were available"));
+    assert!(
+        error_text(resolve(options(&directory)).await)
+            .contains("No subscription credentials were available")
+    );
 }
 
 #[tokio::test]
 async fn prefers_gateway_without_direct_mode() {
-    for auth in [None, Some(HarnessAuthentication::Auto), Some(HarnessAuthentication::AiGateway)] {
+    for auth in [
+        None,
+        Some(HarnessAuthentication::Auto),
+        Some(HarnessAuthentication::AiGateway),
+    ] {
         let directory = mkdtemp("fx-subscription-");
-        put(&directory, ".fx/chatgpt-auth.json", &fx_credentials("subscription"));
+        put(
+            &directory,
+            ".fx/chatgpt-auth.json",
+            &fx_credentials("subscription"),
+        );
         let resolved = resolve(ResolveFxAuthenticationOptions {
             auth,
             env: Some(env(&[("AI_GATEWAY_API_KEY", "gateway")])),
@@ -142,8 +178,16 @@ async fn prefers_gateway_without_direct_mode() {
 #[tokio::test]
 async fn discovers_subscriptions_in_direct_mode_and_retains_gateway_fallback() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/chatgpt-auth.json", &fx_credentials("subscription"));
-    let direct = || Some(HarnessAuthentication::Choice(HarnessDirectAuthentication::Direct));
+    put(
+        &directory,
+        ".fx/chatgpt-auth.json",
+        &fx_credentials("subscription"),
+    );
+    let direct = || {
+        Some(HarnessAuthentication::Choice(
+            HarnessDirectAuthentication::Direct,
+        ))
+    };
     let resolved = resolve(ResolveFxAuthenticationOptions {
         auth: direct(),
         env: Some(env(&[("AI_GATEWAY_API_KEY", "gateway")])),
@@ -166,7 +210,11 @@ async fn discovers_subscriptions_in_direct_mode_and_retains_gateway_fallback() {
 #[tokio::test]
 async fn isolates_explicit_authentication_environments() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/chatgpt-auth.json", &fx_credentials("subscription"));
+    put(
+        &directory,
+        ".fx/chatgpt-auth.json",
+        &fx_credentials("subscription"),
+    );
     let result = resolve(ResolveFxAuthenticationOptions {
         auth: Some(HarnessAuthentication::Environment(IndexMap::new())),
         env: Some(env(&[("AI_GATEWAY_API_KEY", "host")])),
@@ -175,7 +223,10 @@ async fn isolates_explicit_authentication_environments() {
     .await;
     assert!(error_text(result).contains("fx requires"));
     let resolved = resolve(ResolveFxAuthenticationOptions {
-        auth: Some(HarnessAuthentication::Environment(env(&[("AI_GATEWAY_API_KEY", "explicit")]))),
+        auth: Some(HarnessAuthentication::Environment(env(&[(
+            "AI_GATEWAY_API_KEY",
+            "explicit",
+        )]))),
         ..options(&directory)
     })
     .await
@@ -192,7 +243,11 @@ async fn isolates_explicit_authentication_environments() {
 #[tokio::test]
 async fn skips_malformed_stores_and_ignores_native_api_key_records() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/chatgpt-auth.json", &json!({ "version": 2 }));
+    put(
+        &directory,
+        ".fx/chatgpt-auth.json",
+        &json!({ "version": 2 }),
+    );
     put(&directory, ".fx/grok-auth.json", &json!({}));
     put(
         &directory,
@@ -200,7 +255,10 @@ async fn skips_malformed_stores_and_ignores_native_api_key_records() {
         &json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "ignore" }),
     );
     put(&directory, ".grok/auth.json", &grok_credentials());
-    assert_eq!(resolve(options(&directory)).await.unwrap().provider(), FxProvider::Grok);
+    assert_eq!(
+        resolve(options(&directory)).await.unwrap().provider(),
+        FxProvider::Grok
+    );
 }
 
 #[tokio::test]
@@ -209,22 +267,38 @@ async fn honors_native_home_overrides() {
     put(&directory, "custom-codex/auth.json", &codex_credentials());
     put(&directory, "custom-grok/auth.json", &grok_credentials());
     let homes = env(&[
-        ("CODEX_HOME", &directory.path().join("custom-codex").to_string_lossy()),
-        ("GROK_HOME", &directory.path().join("custom-grok").to_string_lossy()),
+        (
+            "CODEX_HOME",
+            &directory.path().join("custom-codex").to_string_lossy(),
+        ),
+        (
+            "GROK_HOME",
+            &directory.path().join("custom-grok").to_string_lossy(),
+        ),
     ]);
     let with_env = || ResolveFxAuthenticationOptions {
         env: Some(homes.clone()),
         ..options(&directory)
     };
-    assert_eq!(resolve(with_env()).await.unwrap().provider(), FxProvider::Codex);
+    assert_eq!(
+        resolve(with_env()).await.unwrap().provider(),
+        FxProvider::Codex
+    );
     std::fs::remove_file(directory.path().join("custom-codex/auth.json")).unwrap();
-    assert_eq!(resolve(with_env()).await.unwrap().provider(), FxProvider::Grok);
+    assert_eq!(
+        resolve(with_env()).await.unwrap().provider(),
+        FxProvider::Grok
+    );
 }
 
 #[tokio::test]
 async fn pins_the_provider_on_resume_without_overriding_an_explicit_gateway_mode() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/chatgpt-auth.json", &fx_credentials("codex"));
+    put(
+        &directory,
+        ".fx/chatgpt-auth.json",
+        &fx_credentials("codex"),
+    );
     put(&directory, ".fx/grok-auth.json", &fx_credentials("grok"));
     let gateway = || Some(env(&[("AI_GATEWAY_API_KEY", "gateway")]));
     let resolved = resolve(ResolveFxAuthenticationOptions {
@@ -237,7 +311,9 @@ async fn pins_the_provider_on_resume_without_overriding_an_explicit_gateway_mode
     assert_eq!(resolved.provider(), FxProvider::Grok);
     let resolved = resolve(ResolveFxAuthenticationOptions {
         required_provider: Some(FxProvider::Gateway),
-        auth: Some(HarnessAuthentication::Choice(HarnessDirectAuthentication::Direct)),
+        auth: Some(HarnessAuthentication::Choice(
+            HarnessDirectAuthentication::Direct,
+        )),
         env: gateway(),
         ..options(&directory)
     })
@@ -297,7 +373,10 @@ async fn rereads_and_updates_the_selected_fx_store() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(directory.path().join(&file)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(directory.path().join(&file))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let entries: Vec<String> = std::fs::read_dir(directory.path().join(".fx"))
@@ -314,7 +393,8 @@ async fn rereads_and_updates_the_selected_fx_store() {
 #[tokio::test]
 async fn preserves_native_codex_metadata_and_derives_jwt_expiry() {
     let directory = mkdtemp("fx-subscription-");
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({ "exp": 2_000_000_000 }).to_string());
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(json!({ "exp": 2_000_000_000 }).to_string());
     let token = format!("header.{payload}.signature");
     let mut value = codex_credentials();
     value["tokens"]["access_token"] = json!(token);
@@ -373,8 +453,16 @@ async fn reads_grok_expiry_and_writes_native_compatible_timestamps() {
 #[tokio::test]
 async fn does_not_fall_back_after_a_selected_store_disappears() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/chatgpt-auth.json", &fx_credentials("selected"));
-    put(&directory, ".fx/grok-auth.json", &fx_credentials("fallback"));
+    put(
+        &directory,
+        ".fx/chatgpt-auth.json",
+        &fx_credentials("selected"),
+    );
+    put(
+        &directory,
+        ".fx/grok-auth.json",
+        &fx_credentials("fallback"),
+    );
     let auth = subscription(resolve(options(&directory)).await.unwrap());
     std::fs::remove_file(directory.path().join(".fx/chatgpt-auth.json")).unwrap();
     assert!(error_text(auth.read().await).contains("no longer available"));
@@ -390,7 +478,10 @@ struct MockKeyring {
 #[async_trait]
 impl FxCodexKeyring for MockKeyring {
     async fn read(&self, service: &str, account: &str) -> Option<String> {
-        self.reads.lock().unwrap().push((service.into(), account.into()));
+        self.reads
+            .lock()
+            .unwrap()
+            .push((service.into(), account.into()));
         self.stored.lock().unwrap().clone()
     }
 
@@ -424,14 +515,20 @@ async fn honors_each_native_codex_credential_store_mode() {
             ..options(&directory)
         };
         if mode == "ephemeral" {
-            assert!(error_text(resolve(with_keyring()).await).contains("No subscription credentials"));
+            assert!(
+                error_text(resolve(with_keyring()).await).contains("No subscription credentials")
+            );
             assert!(keyring.reads.lock().unwrap().is_empty());
             continue;
         }
         let auth = subscription(resolve(with_keyring()).await.unwrap());
         assert_eq!(
             auth.read().await.unwrap().access_token,
-            if mode == "file" { "native-codex" } else { "keyring" }
+            if mode == "file" {
+                "native-codex"
+            } else {
+                "keyring"
+            }
         );
         auth.write(&credentials("rotated")).await.unwrap();
         if mode == "file" {
@@ -439,15 +536,25 @@ async fn honors_each_native_codex_credential_store_mode() {
             continue;
         }
         let canonical = std::fs::canonicalize(directory.path().join(".codex")).unwrap();
-        let digest = ring::digest::digest(&ring::digest::SHA256, canonical.to_string_lossy().as_bytes());
-        let hex: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+        let digest = ring::digest::digest(
+            &ring::digest::SHA256,
+            canonical.to_string_lossy().as_bytes(),
+        );
+        let hex: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let account = format!("cli|{}", &hex[..16]);
-        assert!(keyring
-            .reads
-            .lock()
-            .unwrap()
-            .contains(&("Codex Auth".to_string(), account)));
-        let stored: Value = serde_json::from_str(keyring.stored.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert!(
+            keyring
+                .reads
+                .lock()
+                .unwrap()
+                .contains(&("Codex Auth".to_string(), account))
+        );
+        let stored: Value =
+            serde_json::from_str(keyring.stored.lock().unwrap().as_deref().unwrap()).unwrap();
         assert_eq!(stored["tokens"]["access_token"], json!("rotated"));
         assert_eq!(
             read_json(&directory, ".codex/auth.json")["tokens"]["access_token"],
@@ -481,9 +588,18 @@ async fn falls_back_to_the_file_in_auto_mode_when_the_keyring_has_no_credentials
 #[tokio::test]
 async fn resolve_fx_model_prefers_the_explicit_model() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/settings.json", &json!({ "models": { "grok": "saved-grok" } }));
+    put(
+        &directory,
+        ".fx/settings.json",
+        &json!({ "models": { "grok": "saved-grok" } }),
+    );
     assert_eq!(
-        resolve_fx_model(FxProvider::Grok, Some("explicit".into()), Some(directory.path())).await,
+        resolve_fx_model(
+            FxProvider::Grok,
+            Some("explicit".into()),
+            Some(directory.path())
+        )
+        .await,
         Some("explicit".into())
     );
 }
@@ -491,7 +607,10 @@ async fn resolve_fx_model_prefers_the_explicit_model() {
 #[tokio::test]
 async fn resolve_fx_model_leaves_the_gateway_model_to_libfx() {
     let directory = mkdtemp("fx-subscription-");
-    assert_eq!(resolve_fx_model(FxProvider::Gateway, None, Some(directory.path())).await, None);
+    assert_eq!(
+        resolve_fx_model(FxProvider::Gateway, None, Some(directory.path())).await,
+        None
+    );
 }
 
 #[tokio::test]
@@ -519,15 +638,28 @@ async fn resolve_fx_model_uses_the_model_saved_for_the_subscription_provider() {
 #[tokio::test]
 async fn resolve_fx_model_returns_none_when_no_subscription_model_is_saved() {
     let directory = mkdtemp("fx-subscription-");
-    put(&directory, ".fx/settings.json", &json!({ "models": { "gateway": "saved-gateway" } }));
-    assert_eq!(resolve_fx_model(FxProvider::Grok, None, Some(directory.path())).await, None);
+    put(
+        &directory,
+        ".fx/settings.json",
+        &json!({ "models": { "gateway": "saved-gateway" } }),
+    );
+    assert_eq!(
+        resolve_fx_model(FxProvider::Grok, None, Some(directory.path())).await,
+        None
+    );
 }
 
 #[test]
 fn parses_iso_timestamps_like_date_parse() {
-    assert_eq!(parse_iso_millis("2033-05-18T03:33:20.000Z"), Some(EXPIRES_AT));
+    assert_eq!(
+        parse_iso_millis("2033-05-18T03:33:20.000Z"),
+        Some(EXPIRES_AT)
+    );
     assert_eq!(parse_iso_millis("2033-05-18T03:33:20Z"), Some(EXPIRES_AT));
-    assert_eq!(parse_iso_millis("2033-05-18T05:33:20+02:00"), Some(EXPIRES_AT));
+    assert_eq!(
+        parse_iso_millis("2033-05-18T05:33:20+02:00"),
+        Some(EXPIRES_AT)
+    );
     assert_eq!(parse_iso_millis("1970-01-01"), Some(0.0));
     assert_eq!(parse_iso_millis("not a date"), None);
 }

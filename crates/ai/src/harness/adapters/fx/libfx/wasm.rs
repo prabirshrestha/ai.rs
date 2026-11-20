@@ -127,10 +127,10 @@ pub async fn load_core(source: &FxCoreSource) -> HarnessResult<Vec<u8>> {
                 return read(Path::new(&path)).await;
             }
             let cached = cached_core_path();
-            if let Ok(bytes) = tokio::fs::read(&cached).await {
-                if sha256_hex(&bytes) == FX_CORE_SHA256 {
-                    return Ok(bytes);
-                }
+            if let Ok(bytes) = tokio::fs::read(&cached).await
+                && sha256_hex(&bytes) == FX_CORE_SHA256
+            {
+                return Ok(bytes);
             }
             let wasm = download().await?;
             if sha256_hex(&wasm) != FX_CORE_SHA256 {

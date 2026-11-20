@@ -56,7 +56,9 @@ fn invalid(detail: impl std::fmt::Display) -> HarnessError {
 
 /// `parseFxResumeStateData(data)` (`fxResumeStateSchema.parse`).
 pub fn parse_fx_resume_state_data(data: &Value) -> Result<FxResumeStateData, HarnessError> {
-    let object: &Map<String, Value> = data.as_object().ok_or_else(|| invalid("expected an object"))?;
+    let object: &Map<String, Value> = data
+        .as_object()
+        .ok_or_else(|| invalid("expected an object"))?;
     match (object.get("session"), object.get("leafId"), object.len()) {
         (Some(session), None, 1) => serde_json::from_value(session.clone())
             .map(FxResumeStateData::Session)
