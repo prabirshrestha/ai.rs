@@ -3,6 +3,8 @@
 //! process that answers the OpenCode API and scripts the event stream, and a
 //! fake `opencode` executable that prints its listening line.
 
+#![allow(clippy::field_reassign_with_default, clippy::await_holding_lock)]
+
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -465,9 +467,11 @@ async fn streams_a_prompt_turn_and_reuses_the_server() {
         None
     });
     let session = fixture.start(fixture.start_options()).await;
-    let mut settings = HarnessTurnSettings::default();
-    settings.model = Some("anthropic/claude".into());
-    settings.instructions = Some("Be brief.".into());
+    let settings = HarnessTurnSettings {
+        model: Some("anthropic/claude".into()),
+        instructions: Some("Be brief.".into()),
+        ..Default::default()
+    };
     let (_, messages) = run(session.as_ref(), options(settings.clone())).await;
     assert_eq!(texts(&messages), ["hello world"]);
     let assistant = last_assistant(&messages);

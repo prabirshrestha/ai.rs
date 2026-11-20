@@ -276,15 +276,15 @@ pub(super) async fn ensure_server(
     fingerprinted.remove("model");
     let next_fingerprint = fingerprint(&json!({ "config": fingerprinted, "env": session.env }));
 
-    if let Some(server) = &runtime.server {
-        if server.fingerprint == next_fingerprint {
-            if let Some(relay) = &server.relay
-                && relay.set_tools(tools)
-            {
-                relay.notify_tools_changed().await;
-            }
-            return Ok(());
+    if let Some(server) = &runtime.server
+        && server.fingerprint == next_fingerprint
+    {
+        if let Some(relay) = &server.relay
+            && relay.set_tools(tools)
+        {
+            relay.notify_tools_changed().await;
         }
+        return Ok(());
     }
     if runtime.server.is_none()
         && let Some(coords) = runtime.attach.take()
@@ -811,7 +811,7 @@ impl Handlers {
         request: &PermissionRequest<'_>,
     ) -> PermissionReply {
         let tool_name = to_permission_tool_name(request.action);
-        if self.inactive.iter().any(|name| *name == tool_name) {
+        if self.inactive.contains(&tool_name) {
             return PermissionReply::Reject(Some(BuiltinToolFilter::denial_reason(&tool_name)));
         }
         match select_permission_reply(

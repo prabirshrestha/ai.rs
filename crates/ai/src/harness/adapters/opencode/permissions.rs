@@ -281,10 +281,7 @@ pub(super) async fn select_permission_reply(
     abort: Option<CancellationToken>,
 ) -> PermissionDecision {
     let tool_name = to_permission_tool_name(request.action);
-    if inactive_builtin_tool_names
-        .iter()
-        .any(|name| *name == tool_name)
-    {
+    if inactive_builtin_tool_names.contains(&tool_name) {
         return PermissionDecision::Ask;
     }
     if permission_mode == PermissionMode::AllowAll {

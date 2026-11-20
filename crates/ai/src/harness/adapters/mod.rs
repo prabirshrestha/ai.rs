@@ -13,6 +13,11 @@ pub mod cursor;
 pub mod fx;
 #[cfg(feature = "harness-github-copilot")]
 pub mod github_copilot;
+#[cfg(any(
+    feature = "harness-native",
+    feature = "harness-pi",
+    feature = "harness-fx"
+))]
 pub(crate) mod glob;
 #[cfg(any(feature = "harness-acp", feature = "harness-opencode"))]
 pub(crate) mod host_relay;

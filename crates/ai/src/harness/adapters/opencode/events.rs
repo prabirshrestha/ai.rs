@@ -684,16 +684,16 @@ impl Translator {
                         }
                     }
                     self.emit_legacy_step_finish_part(props.get("part"));
-                } else if current && props.get("field").and_then(Value::as_str) == Some("text") {
-                    if let (Some(id), Some(delta)) = (
+                } else if current
+                    && props.get("field").and_then(Value::as_str) == Some("text")
+                    && let (Some(id), Some(delta)) = (
                         string_value(props.get("partID")),
                         props.get("delta").and_then(Value::as_str),
-                    ) {
-                        let compaction = self.compaction.as_mut().unwrap();
-                        if let Some(entry) = compaction.text.iter_mut().find(|(key, _)| *key == id)
-                        {
-                            entry.1.push_str(delta);
-                        }
+                    )
+                {
+                    let compaction = self.compaction.as_mut().unwrap();
+                    if let Some(entry) = compaction.text.iter_mut().find(|(key, _)| *key == id) {
+                        entry.1.push_str(delta);
                     }
                 }
                 return;

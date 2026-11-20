@@ -47,6 +47,7 @@ pub(super) enum RelayEvent {
 
 /// How the turn answers a [`RelayEvent::Call`].
 #[cfg_attr(not(feature = "harness-opencode"), allow(dead_code))]
+#[allow(clippy::large_enum_variant)]
 pub(super) enum RelayAnswer {
     /// Run the host tool under this call id, in this assistant message.
     Run {

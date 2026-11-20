@@ -77,6 +77,8 @@ pub(crate) fn iso_timestamp(millis: i64) -> String {
 }
 
 /// `crypto.randomUUID()`: a random version 4 UUID.
+// Unused when no adapter feature is on.
+#[allow(dead_code)]
 pub(crate) fn random_uuid() -> String {
     use ring::rand::SecureRandom as _;
     let mut bytes = [0u8; 16];

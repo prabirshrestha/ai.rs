@@ -197,6 +197,7 @@ pub enum NoticeLevel {
 
 /// One event of a turn.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum HarnessEvent {
     /// The same events [`Agent`](crate::Agent) emits. Builtin tools the agent
     /// runs itself show up as `ToolExecution*` events with their harness names.

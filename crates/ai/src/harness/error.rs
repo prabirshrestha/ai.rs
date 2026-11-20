@@ -150,6 +150,8 @@ impl HarnessError {
 
 /// Convert a sandbox or helper error into an [`AgentError`](crate::AgentError),
 /// keeping harness errors typed.
+// Unused when no adapter feature is on.
+#[allow(dead_code)]
 pub(crate) fn into_agent_error(error: BoxError) -> crate::AgentError {
     match error.downcast::<HarnessError>() {
         Ok(error) => crate::AgentError::Harness(*error),

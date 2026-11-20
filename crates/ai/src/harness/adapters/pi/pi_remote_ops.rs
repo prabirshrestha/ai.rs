@@ -62,10 +62,13 @@ pub struct PiGrepInput {
     pub limit: Option<i64>,
 }
 
+/// Streams a command's output.
+pub type PiOnData<'a> = &'a mut (dyn FnMut(&[u8]) + Send);
+
 /// The `exec` input.
 #[derive(Default)]
 pub struct PiExecInput<'a> {
-    pub on_data: Option<&'a mut (dyn FnMut(&[u8]) + Send)>,
+    pub on_data: Option<PiOnData<'a>>,
     pub signal: Option<CancellationToken>,
     /// Seconds (Pi's `bash` tool contract).
     pub timeout: Option<f64>,
@@ -140,7 +143,7 @@ fn frame_path_shell(path_expression: &str) -> String {
 
 fn is_base64_path(encoded: &str) -> bool {
     let bytes = encoded.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return false;
     }
     let is_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/';
@@ -332,7 +335,7 @@ impl PiRemoteOps {
         command: String,
         cwd: Option<&str>,
         signal: Option<CancellationToken>,
-        on_data: Option<&mut (dyn FnMut(&[u8]) + Send)>,
+        on_data: Option<PiOnData<'_>>,
     ) -> HarnessResult<RunShellResult> {
         // `sandbox.run({ command })` already wraps in `bash -c`.
         let working_directory = match cwd {

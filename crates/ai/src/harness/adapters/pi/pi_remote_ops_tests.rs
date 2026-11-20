@@ -3,6 +3,8 @@
 //! [rust] The `just-bash` and native-shell cases run against a local `bash`
 //! sandbox rooted in a temporary directory.
 
+#![allow(clippy::type_complexity)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

@@ -131,7 +131,7 @@ impl HostCalls {
                     })
                     .map(|(id, _)| id.clone())
             })
-            .unwrap_or_else(|| crate::harness::utils::random_uuid());
+            .unwrap_or_else(crate::harness::utils::random_uuid);
         self.claimed.insert(id.clone());
         id
     }
@@ -1059,7 +1059,7 @@ impl ControlContext {
         let id = tool_use_id
             .or_else(|| str_field(input, "tool_use_id"))
             .map(str::to_string)
-            .unwrap_or_else(|| crate::harness::utils::random_uuid());
+            .unwrap_or_else(crate::harness::utils::random_uuid);
         if self.host.find(QUESTIONS_TOOL).is_none() {
             return deny(format!(
                 "No '{QUESTIONS_TOOL}' tool was provided to answer the questions."
@@ -1468,12 +1468,11 @@ pub(super) async fn run_turn(
     translator.flush_compaction(true);
 
     process.close_stdin().await;
-    if translator.terminal_error.is_some() || interrupted {
-        process.kill().await;
-    } else if tokio::time::timeout(EXIT_GRACE, process.wait())
-        .await
-        .is_err()
-    {
+    let exited = !(translator.terminal_error.is_some() || interrupted)
+        && tokio::time::timeout(EXIT_GRACE, process.wait())
+            .await
+            .is_ok();
+    if !exited {
         process.kill().await;
     }
 
