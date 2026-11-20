@@ -8,6 +8,7 @@
 //! with [`Harness::start`], and run turns with [`HarnessSession::prompt`].
 
 pub mod adapters;
+pub mod agent;
 pub mod auth;
 pub mod bootstrap;
 pub mod error;
@@ -24,6 +25,10 @@ pub mod utils;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use agent::{
+    HarnessAgent, HarnessAgentCallOptions, HarnessAgentSessionOptions, HarnessAgentSettings,
+    HarnessCall, PrepareCallFn,
+};
 pub use auth::*;
 pub use bootstrap::*;
 pub use error::{BoxError, HarnessError, HarnessResult};

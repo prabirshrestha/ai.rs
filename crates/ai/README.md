@@ -71,6 +71,7 @@ and a lightweight agent loop, inspired by [`pi`](https://github.com/earendil-wor
   - [Tool Error Handling](#agent-tool-error-handling)
   - [Proxy Usage](#proxy-usage)
   - [Low-Level API](#low-level-api)
+- [Harness](#harness)
 - [Development](#development)
   - [Adding a New Provider](#adding-a-new-provider)
 - [License](#license)
@@ -1695,6 +1696,10 @@ async fn main() -> Result<()> {
 Low-level streams are observational. They preserve event order, but they do not
 wait for async event handling to settle before later producer phases continue.
 Use `Agent` when message processing must be a barrier before tool preflight.
+
+## Harness
+
+The `harness` feature runs coding agents that have their own loop, such as Claude Code, Codex, GitHub Copilot, Cursor, OpenCode, fx, Pi or the ai.rs agent, behind one API. `HarnessAgent` sets the model, instructions and tools once, and each session runs in a sandbox, such as `HostSandbox` for the CLIs installed on this machine. It is a Rust port of the AI SDK harness. See [src/harness/README.md](src/harness/README.md).
 
 ## Development
 

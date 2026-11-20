@@ -24,8 +24,8 @@ use ai::harness::adapters::codex::{CodexHarness, CodexHarnessSettings};
 use ai::harness::adapters::cursor::{CursorHarnessSettings, create_cursor};
 use ai::harness::adapters::github_copilot::{GitHubCopilotHarnessSettings, create_github_copilot};
 use ai::harness::{
-    Harness, HarnessAuthentication, HarnessSandbox, HarnessSession, HarnessStartOptions,
-    HarnessTurnOptions, HostSandbox, PermissionMode,
+    Harness, HarnessAgent, HarnessAgentSessionOptions, HarnessAgentSettings, HarnessAuthentication,
+    HarnessSandbox, HarnessSession, HostSandbox, PermissionMode,
 };
 use ai::{AssistantContent, Message};
 
@@ -98,14 +98,14 @@ fn texts(messages: &[Message]) -> Vec<String> {
 }
 
 async fn turn(
+    agent: &HarnessAgent,
     session: &dyn HarnessSession,
     prompt: &str,
-    model: Option<&str>,
 ) -> Result<(), BoxError> {
     let started = std::time::Instant::now();
-    let mut options = HarnessTurnOptions::default();
-    options.settings.model = model.map(str::to_string);
-    let turn = session.prompt(Message::user_text(prompt), options).await?;
+    let turn = agent
+        .prompt(session, Message::user_text(prompt), Default::default())
+        .await?;
     let (events, messages) = turn.collect().await?;
     println!(
         "turn on {} in {:.1}s: {} events, reply {:?}",
@@ -141,18 +141,26 @@ async fn main() -> Result<(), BoxError> {
     let prompt =
         value(&mut args, "--prompt").unwrap_or_else(|| "Reply with the single word: pong".into());
     let model = value(&mut args, "--model");
-    let model = model.as_deref();
     let name = args.first().cloned().ok_or("name a harness")?;
-    let harness = harness(&name, &args[1..], shared)?;
+    let harness: Arc<dyn Harness> = harness(&name, &args[1..], shared)?.into();
+    // The model is set once, on the agent; every turn uses it.
+    let agent = HarnessAgent::new(
+        harness,
+        HarnessAgentSettings {
+            model,
+            permission_mode: Some(PermissionMode::AllowAll),
+            ..Default::default()
+        },
+    )?;
 
     let work_dir = std::env::temp_dir().join(format!("harness-live-{}", std::process::id()));
     std::fs::create_dir_all(&work_dir)?;
     let work_dir = work_dir.to_string_lossy().into_owned();
     let sandbox = HarnessSandbox::Basic(Arc::new(HostSandbox::new(work_dir.clone())));
-    let mut options = HarnessStartOptions::new("live-1", sandbox, work_dir.clone());
-    options.permission_mode = PermissionMode::AllowAll;
+    let mut options = HarnessAgentSessionOptions::new(sandbox, work_dir.clone());
+    options.session_id = Some("live-1".into());
 
-    let session = harness.start(options.clone()).await?;
+    let session = agent.create_session(options.clone()).await?;
     let started = std::time::Instant::now();
     match session.probe().await {
         Ok(probe) => {
@@ -179,15 +187,15 @@ async fn main() -> Result<(), BoxError> {
     }
 
     if !no_turn {
-        turn(session.as_ref(), &prompt, model).await?;
+        turn(&agent, session.as_ref(), &prompt).await?;
         if shared {
-            options.session_id = "live-2".into();
-            let second = harness.start(options).await?;
-            turn(second.as_ref(), &prompt, model).await?;
+            options.session_id = Some("live-2".into());
+            let second = agent.create_session(options).await?;
+            turn(&agent, second.as_ref(), &prompt).await?;
             turn(
+                &agent,
                 session.as_ref(),
                 "Now reply with the single word: ping",
-                model,
             )
             .await?;
             second.destroy().await?;
