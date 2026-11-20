@@ -36,6 +36,8 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 #[derive(Default)]
 pub(super) struct Runtime {
     pub client: Option<Arc<AppServer>>,
+    /// What the client was started for, to restart it when that changes.
+    config_key: String,
     loaded_thread_id: Option<String>,
     /// (requested model, model Codex reported) of the loaded thread.
     loaded_thread_model: Option<(Option<String>, Option<String>)>,
@@ -43,11 +45,62 @@ pub(super) struct Runtime {
 
 impl Runtime {
     pub async fn close(&mut self) {
-        self.loaded_thread_id = None;
+        let loaded = self.loaded_thread_id.take();
         self.loaded_thread_model = None;
-        if let Some(client) = self.client.take() {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        if !client.shared {
+            client.close().await;
+            return;
+        }
+        // [rust] A shared process keeps running for its other sessions: only
+        // this session's thread is unloaded, and the last one out stops it.
+        if let Some(thread_id) = loaded
+            && !client.is_closed()
+        {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.request("thread/unsubscribe", json!({ "threadId": thread_id })),
+            )
+            .await;
+        }
+        if Arc::strong_count(&client) == 1 {
             client.close().await;
         }
+    }
+}
+
+/// [rust] App servers that sessions share, by sandbox, command and
+/// environment. Held weakly: the last session to let go stops the process.
+#[derive(Clone, Default)]
+pub(crate) struct SharedAppServers(
+    Arc<tokio::sync::Mutex<HashMap<String, std::sync::Weak<AppServer>>>>,
+);
+
+impl SharedAppServers {
+    async fn get_or_spawn(
+        &self,
+        sandbox: &Arc<dyn SandboxSession>,
+        options: SandboxProcessOptions,
+    ) -> HarnessResult<Arc<AppServer>> {
+        let key = json!({
+            "sandbox": Arc::as_ptr(sandbox) as *const () as usize,
+            // Each thread names its own working directory.
+            "command": options.command,
+            "env": options.env,
+        })
+        .to_string();
+        let mut servers = self.0.lock().await;
+        servers.retain(|_, server| server.strong_count() > 0);
+        if let Some(server) = servers.get(&key).and_then(std::sync::Weak::upgrade)
+            && !server.is_closed()
+        {
+            return Ok(server);
+        }
+        let server = AppServer::spawn(sandbox.as_ref(), options, true).await?;
+        servers.insert(key, Arc::downgrade(&server));
+        Ok(server)
     }
 }
 
@@ -72,6 +125,8 @@ pub(super) struct TurnConfig {
     /// The thread id, updated when Codex reports it.
     pub thread_id_out: Arc<StdMutex<Option<String>>>,
     pub steer: Arc<StdMutex<Option<SteerHandle>>>,
+    /// [rust] Run on a process other sessions share.
+    pub shared: Option<SharedAppServers>,
 }
 
 /// Lets callers add user messages to the running turn (`turn/steer`).
@@ -155,6 +210,63 @@ pub(super) fn split_model_provider_config(
     }
     Ok((thread_config, overrides))
 }
+
+/// [rust] Sign-in and models from a short-lived app server.
+pub(super) async fn probe(
+    sandbox: &dyn SandboxSession,
+    executable: &str,
+    work_dir: &str,
+    env: &IndexMap<String, String>,
+    codex_config: &Map<String, Value>,
+) -> HarnessResult<crate::harness::probe::HarnessProbe> {
+    use crate::harness::probe::{HarnessProbe, codex_account, codex_models};
+    let (_, overrides) = split_model_provider_config(codex_config)?;
+    let command = std::iter::once(executable.to_string())
+        .chain(
+            app_server_args(&overrides)
+                .iter()
+                .map(|arg| shell_quote(arg)),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
+    let client = AppServer::spawn(
+        sandbox,
+        SandboxProcessOptions {
+            command,
+            working_directory: Some(work_dir.to_string()),
+            env: Some(env.clone()),
+            abort_signal: None,
+        },
+        false,
+    )
+    .await?;
+    let read = async {
+        client.initialize().await?;
+        let mut probe = HarnessProbe::default();
+        match client.request("account/read", json!({})).await {
+            Ok(account) => {
+                let (signed_in, label) = codex_account(&account);
+                probe.signed_in = Some(signed_in);
+                probe.account = label;
+            }
+            Err(error) => probe.error = Some(error.to_string()),
+        }
+        let models = client.request("model/list", json!({})).await?;
+        probe.models = codex_models(&models);
+        HarnessResult::Ok(probe)
+    };
+    let result = tokio::time::timeout(PROBE_TIMEOUT, read).await;
+    client.close().await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            Err(HarnessError::new("Codex app-server did not answer the probe in time.").into())
+        }
+    }
+}
+
+/// How long a probe waits for the harness.
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `createCodexAppServerArgs`.
 pub(super) fn app_server_args(cli_overrides: &[String]) -> Vec<String> {
@@ -957,11 +1069,7 @@ async fn drive(
         cli_overrides.extend(hook.cli_overrides.iter().cloned());
     }
     let config_key = json!({ "thread": thread_config, "cliOverrides": cli_overrides }).to_string();
-    if runtime
-        .client
-        .as_ref()
-        .is_some_and(|client| client.config_key != config_key)
-    {
+    if runtime.client.is_some() && runtime.config_key != config_key {
         runtime.close().await;
     }
     let host_tool_definitions: Vec<crate::Tool> = config
@@ -982,19 +1090,23 @@ async fn drive(
             )
             .collect::<Vec<_>>()
             .join(" ");
-        let client = AppServer::spawn(
-            config.sandbox.as_ref(),
-            SandboxProcessOptions {
-                command,
-                working_directory: Some(config.work_dir.clone()),
-                env: Some(config.env.clone()),
-                abort_signal: None,
-            },
-            config_key,
-        )
-        .await
-        .map_err(TurnFailure::from)?;
+        let options = SandboxProcessOptions {
+            command,
+            working_directory: Some(config.work_dir.clone()),
+            env: Some(config.env.clone()),
+            abort_signal: None,
+        };
+        let client = match &config.shared {
+            Some(shared) => shared
+                .get_or_spawn(&config.sandbox, options)
+                .await
+                .map_err(TurnFailure::from)?,
+            None => AppServer::spawn(config.sandbox.as_ref(), options, false)
+                .await
+                .map_err(TurnFailure::from)?,
+        };
         runtime.client = Some(client);
+        runtime.config_key = config_key;
     }
     let client = runtime.client.clone().unwrap();
     let result = drive_with_client(
@@ -1126,9 +1238,8 @@ async fn drive_with_client(
     if let Some(schema) = &config.output_schema {
         params.insert("outputSchema".into(), schema.clone());
     }
-    let mut events = client.events.lock().await;
-    // Events of an earlier turn no longer matter.
-    while events.try_recv().is_ok() {}
+    // Only this thread's messages, from here on.
+    let mut events = client.subscribe(&thread_id);
     let response = race(cancel, client.request("turn/start", Value::Object(params)))
         .await
         .map_err(closed)?;

@@ -564,6 +564,101 @@ fn external_mcp_servers(
     Ok(servers)
 }
 
+/// [rust] Spawn the agent alone for a probe: its sign-in, its models and
+/// commands from a new session with no MCP servers.
+pub(super) async fn probe(
+    session: &SessionConfig,
+) -> HarnessResult<crate::harness::probe::HarnessProbe> {
+    use crate::harness::probe::{HarnessProbe, acp_commands, acp_models, is_sign_in_error};
+    let settings = &session.settings;
+    let mut env = session.env.clone();
+    let command = match &session.agent_home {
+        Some(home) => {
+            env.insert("HOME".into(), home.clone());
+            format!(
+                "PATH={}\"${{PATH:+:$PATH}}\" exec {}",
+                crate::harness::utils::shell_quote(&format!("{home}/.local/bin")),
+                session.command
+            )
+        }
+        None => format!("exec {}", session.command),
+    };
+    let conn = AcpConnection::spawn(
+        session.sandbox.as_ref(),
+        SandboxProcessOptions {
+            command,
+            working_directory: Some(session.work_dir.clone()),
+            env: Some(env),
+            abort_signal: None,
+        },
+        &settings.harness_id,
+    )
+    .await?;
+    let read = async {
+        conn.request("initialize", initialize_request(settings))
+            .await?;
+        if let Some(authentication) = &settings.authentication {
+            let mut params = json!({ "methodId": authentication.method_id });
+            if let Some(meta) = &authentication.meta {
+                params["_meta"] = Value::Object(meta.clone());
+            }
+            conn.request("authenticate", params).await?;
+        }
+        let response = conn
+            .request(
+                "session/new",
+                json!({ "cwd": session.work_dir, "mcpServers": [] }),
+            )
+            .await?;
+        // Commands come as an update soon after the session opens.
+        let mut commands = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(750);
+        let mut events = conn.events.lock().await;
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                _ = tokio::time::sleep_until(deadline) => None,
+            };
+            let Some(event) = event else { break };
+            if let Some(update) = event.pointer("/params/update")
+                && let Some(list) = acp_commands(update)
+            {
+                commands = list;
+                break;
+            }
+            answer_outside_turn(&conn, &event).await;
+        }
+        drop(events);
+        HarnessResult::Ok(HarnessProbe {
+            signed_in: Some(true),
+            models: acp_models(&response),
+            commands,
+            ..Default::default()
+        })
+    };
+    let result = tokio::time::timeout(Duration::from_secs(30), read).await;
+    conn.close().await;
+    match result {
+        Ok(Ok(probe)) => Ok(probe),
+        Ok(Err(failure)) => {
+            let message = failure.to_string();
+            if is_sign_in_error(&message) {
+                Ok(HarnessProbe {
+                    signed_in: Some(false),
+                    error: Some(message),
+                    ..Default::default()
+                })
+            } else {
+                Err(failure)
+            }
+        }
+        Err(_) => Err(error(format!(
+            "{} did not answer the probe in time.",
+            settings.harness_id
+        ))),
+    }
+}
+
 /// Start the agent and its session, or keep the running one.
 async fn ensure_agent(
     runtime: &mut Runtime,

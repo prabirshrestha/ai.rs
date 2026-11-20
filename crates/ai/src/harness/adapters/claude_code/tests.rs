@@ -766,3 +766,41 @@ fn builds_the_bootstrap_recipe() {
         "./node_modules/.bin/claude --version"
     );
 }
+
+const FAKE_CLAUDE_PROBE: &str = r#"
+printf '%s\n' "$@" >> "$FAKE_DIR/probe-args"
+if [ "$1" = auth ]; then
+  echo '{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com"}'
+  exit 0
+fi
+IFS= read -r line
+printf '%s\n' "$line" >> "$FAKE_DIR/probe-stdin"
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"probe","response":{"models":[{"value":"default","displayName":"Default"},{"value":"haiku","displayName":"Haiku"}],"commands":[{"name":"review","description":"Review","argumentHint":"<pr>"},{"name":"skill","description":"A skill (user)"}]}}}'
+while IFS= read -r line; do :; done
+"#;
+
+#[tokio::test]
+async fn probes_sign_in_models_and_commands() {
+    let fixture = fixture();
+    std::fs::write(format!("{}/probe.sh", fixture.fake_dir), FAKE_CLAUDE_PROBE).unwrap();
+    let session = fixture
+        .harness(|settings| {
+            settings.executable = Some(format!("sh {}/probe.sh", fixture.fake_dir));
+            settings.extra_args = vec!["--add-dir".into(), "/extra".into()];
+        })
+        .start(fixture.start_options(PermissionMode::AllowAll))
+        .await
+        .unwrap();
+    let probe = session.probe().await.unwrap();
+    assert_eq!(probe.signed_in, Some(true));
+    assert_eq!(probe.account.as_deref(), Some("me@example.com"));
+    assert_eq!(probe.models.len(), 2);
+    assert!(probe.models[0].is_default);
+    assert!(probe.models[1].thinking_levels.is_empty());
+    assert_eq!(probe.commands.len(), 1);
+    let stdin = std::fs::read_to_string(format!("{}/probe-stdin", fixture.fake_dir)).unwrap();
+    assert!(stdin.contains("\"subtype\":\"initialize\""));
+    let args = std::fs::read_to_string(format!("{}/probe-args", fixture.fake_dir)).unwrap();
+    assert!(args.contains("--add-dir\n/extra"));
+    session.destroy().await.unwrap();
+}

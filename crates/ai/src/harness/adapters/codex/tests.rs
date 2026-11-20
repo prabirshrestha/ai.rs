@@ -1074,3 +1074,115 @@ fn builds_the_bootstrap_recipe() {
         "./node_modules/.bin/codex --version"
     );
 }
+
+#[tokio::test]
+async fn probes_the_account_and_models() {
+    let fixture = fixture();
+    fixture.script(vec![
+        Step::Reply("initialize", json!({})),
+        Step::Reply(
+            "account/read",
+            json!({ "account": { "type": "chatgpt", "email": "me@example.com" }, "requiresOpenaiAuth": true }),
+        ),
+        Step::Reply(
+            "model/list",
+            json!({ "data": [
+                { "id": "1", "model": "gpt-5.5", "displayName": "GPT-5.5", "isDefault": true,
+                  "supportedReasoningEfforts": [{ "reasoningEffort": "medium" }] },
+                { "id": "2", "model": "hidden", "hidden": true },
+            ]}),
+        ),
+    ]);
+    let session = fixture
+        .harness(|settings| settings.extra_args = vec!["--profile".into(), "work".into()])
+        .start(fixture.start_options())
+        .await
+        .unwrap();
+    let probe = session.probe().await.unwrap();
+    assert_eq!(probe.signed_in, Some(true));
+    assert_eq!(probe.account.as_deref(), Some("me@example.com"));
+    assert_eq!(probe.models.len(), 1);
+    assert_eq!(
+        probe.models[0].thinking_levels,
+        [crate::ThinkingLevel::Medium]
+    );
+    // Extra arguments go before the subcommand.
+    let args = fixture.args();
+    let profile = args.iter().position(|arg| arg == "--profile").unwrap();
+    let app_server = args.iter().position(|arg| arg == "app-server").unwrap();
+    assert!(profile < app_server);
+    session.destroy().await.unwrap();
+}
+
+fn thread_notice(thread: &str, turn: &str, id: &str, text: &str) -> Vec<Step> {
+    vec![
+        notify(
+            "item/started",
+            json!({ "threadId": thread, "turnId": turn, "item": { "type": "agentMessage", "id": id, "text": "" } }),
+        ),
+        notify(
+            "item/completed",
+            json!({ "threadId": thread, "turnId": turn, "item": { "type": "agentMessage", "id": id, "text": text } }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn sessions_share_one_app_server() {
+    let fixture = fixture();
+    let mut steps = start_steps("thr_1", "turn_1");
+    steps.extend(thread_notice("thr_1", "turn_1", "m1", "first"));
+    steps.push(notify(
+        "turn/completed",
+        json!({ "threadId": "thr_1", "turn": { "id": "turn_1", "status": "completed", "error": null } }),
+    ));
+    steps.push(Step::Reply(
+        "thread/backgroundTerminals/list",
+        json!({ "data": [] }),
+    ));
+    // The second session starts its own thread on the same process, with no
+    // second initialize.
+    steps.push(Step::Reply("thread/start", thread_response("thr_2")));
+    steps.push(Step::Reply(
+        "turn/start",
+        json!({ "turn": { "id": "turn_2" } }),
+    ));
+    // A message about the first thread does not reach the second session.
+    steps.extend(thread_notice("thr_1", "turn_2", "stray", "not mine"));
+    steps.extend(thread_notice("thr_2", "turn_2", "m2", "second"));
+    steps.push(notify(
+        "turn/completed",
+        json!({ "threadId": "thr_2", "turn": { "id": "turn_2", "status": "completed", "error": null } }),
+    ));
+    steps.push(Step::Reply(
+        "thread/backgroundTerminals/list",
+        json!({ "data": [] }),
+    ));
+    steps.push(Step::Reply("thread/unsubscribe", json!({})));
+    steps.push(Step::Reply("thread/unsubscribe", json!({})));
+    fixture.script(steps);
+
+    let harness = fixture.harness(|settings| settings.shared_app_server = true);
+    // Sessions share a process only on the same sandbox.
+    let options = fixture.start_options();
+    let first = harness.start(options.clone()).await.unwrap();
+    let mut second_options = options;
+    second_options.session_id = "session-2".into();
+    let second = harness.start(second_options).await.unwrap();
+
+    let (_, messages) = run(first.as_ref(), HarnessTurnOptions::default()).await;
+    assert_eq!(texts(&messages), ["first"]);
+    let (_, messages) = run(second.as_ref(), HarnessTurnOptions::default()).await;
+    assert_eq!(texts(&messages), ["second"]);
+
+    assert_eq!(fixture.spawns(), 1);
+    assert_eq!(fixture.requests("initialize").len(), 1);
+    first.destroy().await.unwrap();
+    second.destroy().await.unwrap();
+    let unloaded: Vec<_> = fixture
+        .requests("thread/unsubscribe")
+        .into_iter()
+        .map(|params| params["threadId"].clone())
+        .collect();
+    assert_eq!(unloaded, [json!("thr_1"), json!("thr_2")]);
+}

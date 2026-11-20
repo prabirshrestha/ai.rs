@@ -207,6 +207,8 @@ pub struct ClaudeCodeHarnessSettings {
     /// [rust] The host environment for credential discovery. Defaults to
     /// this process's environment.
     pub process_env: Option<IndexMap<String, String>>,
+    /// [rust] Extra arguments for every `claude` run, after the adapter's.
+    pub extra_args: Vec<String>,
 }
 
 /// The adapter's resume state.
@@ -728,6 +730,7 @@ impl HarnessSession for ClaudeCodeSession {
         };
         let command = std::iter::once(inner.executable.clone())
             .chain(cli.args().iter().map(|arg| shell_quote(arg)))
+            .chain(settings.extra_args.iter().map(|arg| shell_quote(arg)))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -783,6 +786,12 @@ impl HarnessSession for ClaudeCodeSession {
         }))
     }
 
+    async fn probe(&self) -> AgentResult<crate::harness::probe::HarnessProbe> {
+        probe_claude_code(&self.inner)
+            .await
+            .map_err(into_agent_error)
+    }
+
     async fn detach(&self) -> AgentResult<HarnessResumeState> {
         Ok(self.inner.resume_state())
     }
@@ -798,4 +807,94 @@ impl HarnessSession for ClaudeCodeSession {
         let _ = self.inner.turn_lock.lock().await;
         Ok(())
     }
+}
+
+/// [rust] `claude auth status`, then the models and commands of an
+/// `initialize` control request to a short-lived `claude`.
+async fn probe_claude_code(
+    inner: &SessionInner,
+) -> crate::harness::error::HarnessResult<crate::harness::probe::HarnessProbe> {
+    use crate::harness::adapters::stdio_process::{JsonLineProcess, process_exit_error};
+    use crate::harness::probe::{
+        HarnessProbe, claude_code_auth, claude_code_commands, claude_code_models,
+    };
+    use crate::harness::sandbox::{SandboxProcessOptions, SandboxRunOptions};
+
+    let options = |command: String| SandboxProcessOptions {
+        command,
+        working_directory: Some(inner.work_dir.clone()),
+        env: Some(inner.environment.clone()),
+        abort_signal: None,
+    };
+    let mut probe = HarnessProbe::default();
+    let status = inner
+        .sandbox
+        .run(SandboxRunOptions {
+            process: options(format!("{} auth status", inner.executable)),
+            max_output_length: Some(64 * 1024),
+        })
+        .await;
+    match status {
+        Ok(status) => {
+            let (signed_in, account) = claude_code_auth(status.exit_code == 0, &status.stdout);
+            probe.signed_in = Some(signed_in);
+            probe.account = account;
+        }
+        Err(error) => probe.error = Some(error.to_string()),
+    }
+
+    let command = std::iter::once(inner.executable.clone())
+        .chain(
+            [
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+            ]
+            .map(String::from),
+        )
+        .chain(inner.settings.extra_args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (process, mut output) =
+        JsonLineProcess::spawn(inner.sandbox.as_ref(), options(command), "claude").await?;
+    let read = async {
+        process
+            .send(&json!({
+                "type": "control_request",
+                "request_id": "probe",
+                "request": { "subtype": "initialize" },
+            }))
+            .await?;
+        while let Some(message) = output.recv().await {
+            if message.get("type").and_then(Value::as_str) == Some("control_response") {
+                return Ok(message);
+            }
+        }
+        Err(process_exit_error(&process, "exited before it answered initialize").into())
+    };
+    let result: crate::harness::error::HarnessResult<Value> =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), read).await {
+            Ok(result) => result,
+            Err(_) => {
+                Err(HarnessError::new("Claude Code did not answer the probe in time.").into())
+            }
+        };
+    process.close_stdin().await;
+    process.kill().await;
+    // `{ type: control_response, response: { subtype, response: {...} } }`.
+    let response = result?["response"].clone();
+    if response.get("subtype").and_then(Value::as_str) == Some("error") {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Claude Code refused initialize.")
+            .to_string();
+        probe.error.get_or_insert(error);
+        return Ok(probe);
+    }
+    probe.models = claude_code_models(&response);
+    probe.commands = claude_code_commands(&response);
+    Ok(probe)
 }

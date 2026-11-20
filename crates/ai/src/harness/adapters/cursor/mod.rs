@@ -57,6 +57,13 @@ pub struct CursorHarnessSettings {
     /// MCP server definitions keyed by server name, in Cursor's native
     /// format.
     pub mcp_servers: Option<IndexMap<String, Value>>,
+    /// [rust] Run this agent command (a sandbox path or command, already
+    /// shell-quoted) instead of installing the CLI with the bootstrap.
+    pub executable_override: Option<String>,
+    /// [rust] Extra arguments, before the `acp` subcommand.
+    pub extra_args: Vec<String>,
+    /// [rust] Extra environment variables for the agent.
+    pub env: IndexMap<String, String>,
 }
 
 /// `CURSOR_BUILTIN_TOOLS`. `mcpToolCall` is dynamic and `truncatedToolCall`
@@ -115,6 +122,13 @@ pub fn cursor_acp_settings(settings: CursorHarnessSettings) -> AcpHarnessSetting
         "--disable-project-configs".into(),
         "acp".into(),
     ];
+    // Before the `acp` subcommand.
+    let at = acp.args.len() - 1;
+    acp.args.splice(at..at, settings.extra_args.iter().cloned());
+    acp.env.extend(settings.env.clone());
+    if settings.executable_override.is_some() {
+        acp.executable_override = settings.executable_override.clone();
+    }
     acp.write_protected_paths = vec![".cursor".into()];
     acp.client_capabilities = Some(
         json!({ "_meta": { "parameterizedModelPicker": true } })

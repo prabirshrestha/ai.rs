@@ -97,6 +97,13 @@ pub struct GitHubCopilotHarnessSettings {
     pub reasoning_effort: Option<GitHubCopilotReasoningEffort>,
     /// MCP server definitions keyed by server name, in ACP format.
     pub mcp_servers: Option<IndexMap<String, Value>>,
+    /// [rust] Run this agent command (a sandbox path or command, already
+    /// shell-quoted) instead of installing the CLI with the bootstrap.
+    pub executable_override: Option<String>,
+    /// [rust] Extra arguments, after the adapter's.
+    pub extra_args: Vec<String>,
+    /// [rust] Extra environment variables for the agent.
+    pub env: IndexMap<String, String>,
 }
 
 /// `GITHUB_COPILOT_BUILTIN_TOOLS`: the stable, non-MCP tool surface of
@@ -145,6 +152,11 @@ pub fn github_copilot_acp_settings(settings: GitHubCopilotHarnessSettings) -> Ac
     if let Some(effort) = settings.reasoning_effort {
         acp.args
             .push(format!("--reasoning-effort={}", effort.as_str()));
+    }
+    acp.args.extend(settings.extra_args.iter().cloned());
+    acp.env.extend(settings.env.clone());
+    if settings.executable_override.is_some() {
+        acp.executable_override = settings.executable_override.clone();
     }
     acp.auth = settings.auth;
     acp.resolve_authentication_environment = Some(Arc::new(|auth, env| {

@@ -338,6 +338,7 @@ async fn forwards_launch_settings() {
         credential_forwarding: Some(credential_forwarding),
         reasoning_effort: Some(GitHubCopilotReasoningEffort::High),
         mcp_servers: Some(mcp_servers.clone()),
+        ..Default::default()
     });
     assert_eq!(settings.auth, Some(direct));
     assert_eq!(

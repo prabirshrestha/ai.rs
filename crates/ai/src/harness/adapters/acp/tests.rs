@@ -1554,3 +1554,60 @@ fn resolves_model_ids() {
     );
     assert_eq!(turn::resolve_acp_model_id(&json!({}), Some(&config)), None);
 }
+
+#[tokio::test]
+async fn probes_models_and_commands_from_a_new_session() {
+    let fixture = fixture();
+    fixture.script(vec![
+        Step::Reply("initialize", json!({ "protocolVersion": 1 })),
+        Step::Reply(
+            "session/new",
+            json!({
+                "sessionId": "probe-1",
+                "models": { "currentModelId": "m/b", "availableModels": [
+                    { "modelId": "m/a", "name": "A" }, { "modelId": "m/b", "name": "B" }] },
+                "configOptions": [{ "id": "effort", "options": [{ "value": "low" }, { "value": "high" }] }],
+            }),
+        ),
+        Step::Emit(json!({ "jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "probe-1",
+            "update": { "sessionUpdate": "available_commands_update", "availableCommands": [
+                { "name": "plan", "description": "Make a plan", "input": { "hint": "goal" } }] } } })),
+    ]);
+    let session = fixture
+        .harness(|_| {})
+        .start(fixture.start_options(PermissionMode::AllowAll))
+        .await
+        .unwrap();
+    let probe = session.probe().await.unwrap();
+    assert_eq!(probe.signed_in, Some(true));
+    let ids: Vec<_> = probe.models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, ["m/a", "m/b"]);
+    assert!(probe.models[1].is_default);
+    assert_eq!(probe.models[0].thinking_levels.len(), 2);
+    assert_eq!(probe.commands.len(), 1);
+    assert_eq!(probe.commands[0].hint, "goal");
+    let new_session = fixture
+        .stdin()
+        .into_iter()
+        .find(|message| message["method"] == "session/new")
+        .unwrap();
+    assert_eq!(new_session["params"]["mcpServers"], json!([]));
+    session.destroy().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_probe_refused_for_sign_in_reports_signed_out() {
+    let fixture = fixture();
+    fixture.script(vec![Step::Await("\"method\":\"initialize\""), Step::Emit(json!({
+        "jsonrpc": "2.0", "id": 0, "error": { "code": -32000, "message": "Authentication required" } }))]);
+    let session = fixture
+        .harness(|_| {})
+        .start(fixture.start_options(PermissionMode::AllowAll))
+        .await
+        .unwrap();
+    let probe = session.probe().await.unwrap();
+    assert_eq!(probe.signed_in, Some(false));
+    assert!(probe.error.unwrap().contains("Authentication required"));
+    session.destroy().await.unwrap();
+}

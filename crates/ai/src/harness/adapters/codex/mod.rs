@@ -140,6 +140,16 @@ pub struct CodexHarnessSettings {
     /// [rust] The host environment for credential discovery. Defaults to
     /// this process's environment.
     pub process_env: Option<IndexMap<String, String>>,
+    /// [rust] Extra environment variables for the `codex` process. They win
+    /// over the credentials the adapter resolves.
+    pub env: IndexMap<String, String>,
+    /// [rust] Extra arguments, before the `app-server` subcommand.
+    pub extra_args: Vec<String>,
+    /// [rust] Run the sessions of this harness on one `codex app-server`
+    /// process (one per sandbox object, command and environment) instead
+    /// of one each. Each thread keeps its session's working directory. Each session gets its own thread's messages; the last session
+    /// to stop ends the process.
+    pub shared_app_server: bool,
 }
 
 /// The adapter's resume state.
@@ -159,12 +169,14 @@ pub struct CodexResumeState {
 #[derive(Clone, Default)]
 pub struct CodexHarness {
     settings: Arc<CodexHarnessSettings>,
+    shared: turn::SharedAppServers,
 }
 
 impl CodexHarness {
     pub fn new(settings: CodexHarnessSettings) -> Self {
         Self {
             settings: Arc::new(settings),
+            shared: turn::SharedAppServers::default(),
         }
     }
 }
@@ -412,6 +424,7 @@ impl Harness for CodexHarness {
             }
         }
 
+        sandbox_environment.extend(settings.env.clone());
         let home_dir = resolve_sandbox_home_dir(sandbox.as_ref(), abort.clone())
             .await
             .map_err(into_agent_error)?;
@@ -425,6 +438,11 @@ impl Harness for CodexHarness {
                 shell_quote(&format!("{bootstrap_dir}/node_modules/.bin/codex"))
             }
         };
+        let executable = std::iter::once(executable)
+            .chain(settings.extra_args.iter().map(|arg| shell_quote(arg)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let shared = settings.shared_app_server.then(|| self.shared.clone());
 
         Ok(Box::new(CodexSession {
             inner: Arc::new(SessionInner {
@@ -446,6 +464,7 @@ impl Harness for CodexHarness {
                     .map(|token| token.child_token())
                     .unwrap_or_default(),
                 runtime: Arc::new(tokio::sync::Mutex::new(turn::Runtime::default())),
+                shared,
             }),
         }))
     }
@@ -468,6 +487,7 @@ struct SessionInner {
     cancellation_token: CancellationToken,
     /// The app server; also the turn lock.
     runtime: Arc<tokio::sync::Mutex<turn::Runtime>>,
+    shared: Option<turn::SharedAppServers>,
 }
 
 impl SessionInner {
@@ -629,6 +649,7 @@ impl HarnessSession for CodexSession {
             model,
             thread_id_out: inner.thread_id.clone(),
             steer: steer.clone(),
+            shared: inner.shared.clone(),
         };
         let turn = HarnessTurn::spawn(move |sender| async move {
             let result = turn::run_turn(&mut runtime, config, message, sender, token.clone()).await;
@@ -644,6 +665,27 @@ impl HarnessSession for CodexSession {
                 }
             }
         }))
+    }
+
+    async fn probe(&self) -> AgentResult<crate::harness::probe::HarnessProbe> {
+        let inner = &self.inner;
+        let (codex_config, _) = resolve_codex_runtime(
+            &inner.environment,
+            None,
+            None,
+            inner.settings.codex_config.as_ref(),
+            None,
+            inner.headers.as_ref(),
+        )?;
+        turn::probe(
+            inner.sandbox.as_ref(),
+            &inner.executable,
+            &inner.work_dir,
+            &inner.environment,
+            &codex_config,
+        )
+        .await
+        .map_err(into_agent_error)
     }
 
     async fn detach(&self) -> AgentResult<HarnessResumeState> {

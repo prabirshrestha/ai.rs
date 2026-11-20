@@ -390,6 +390,12 @@ pub trait HarnessSession: Send + Sync {
         unsupported("reading history", self.harness_id())
     }
 
+    /// [rust] What the agent offers here: whether it is signed in, its
+    /// models and its commands, read from a short-lived process.
+    async fn probe(&self) -> AgentResult<crate::harness::probe::HarnessProbe> {
+        unsupported("probing", self.harness_id())
+    }
+
     /// Leave the agent running and return the state to reattach to it.
     async fn detach(&self) -> AgentResult<HarnessResumeState>;
 

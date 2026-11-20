@@ -775,6 +775,12 @@ impl HarnessSession for AcpSession {
         }))
     }
 
+    async fn probe(&self) -> AgentResult<crate::harness::probe::HarnessProbe> {
+        turn::probe(&self.inner.config)
+            .await
+            .map_err(into_agent_error)
+    }
+
     async fn detach(&self) -> AgentResult<HarnessResumeState> {
         Ok(self.inner.resume_state())
     }
