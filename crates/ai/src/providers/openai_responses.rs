@@ -129,7 +129,8 @@ impl StreamFailure {
         }
     }
 
-    fn api_status(output: AssistantMessage, status: reqwest::StatusCode, body: String) -> Self {
+    fn api_status(mut output: AssistantMessage, status: reqwest::StatusCode, body: String) -> Self {
+        crate::append_http_status_diagnostic(&mut output, status.as_u16(), &body);
         Self {
             output,
             message: format_openai_responses_api_error(status, &body),

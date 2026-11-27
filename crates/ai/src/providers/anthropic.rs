@@ -503,6 +503,8 @@ async fn run_stream(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let mut output = output;
+        crate::append_http_status_diagnostic(&mut output, status.as_u16(), &body);
         return Err(StreamFailure::new(
             output,
             Error::ApiStatus { status, body },
