@@ -72,6 +72,37 @@ pub fn append_assistant_message_diagnostic(
     }
 }
 
+/// Diagnostic type for a provider that rejected the request with an HTTP status.
+pub const HTTP_STATUS_DIAGNOSTIC: &str = "http-status";
+
+/// Records the HTTP status a provider rejected the request with, so callers
+/// such as proxies can pass the real status on instead of parsing the message.
+pub fn append_http_status_diagnostic(message: &mut AssistantMessage, status: u16, body: &str) {
+    append_assistant_message_diagnostic(
+        message,
+        create_assistant_message_diagnostic(
+            HTTP_STATUS_DIAGNOSTIC,
+            DiagnosticErrorInfo {
+                name: Some("ApiStatus".to_string()),
+                message: body.to_string(),
+                stack: None,
+                code: Some(Value::from(status)),
+            },
+            Some(serde_json::json!({ "status": status })),
+        ),
+    );
+}
+
+/// The HTTP status recorded by [`append_http_status_diagnostic`], if any.
+pub fn http_status_diagnostic(message: &AssistantMessage) -> Option<u16> {
+    message.diagnostics.iter().find_map(|diagnostic| {
+        if diagnostic.get("type")?.as_str()? != HTTP_STATUS_DIAGNOSTIC {
+            return None;
+        }
+        u16::try_from(diagnostic.get("details")?.get("status")?.as_u64()?).ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -111,5 +142,9 @@ mod tests {
         assert_eq!(message.diagnostics.len(), 1);
         assert_eq!(message.diagnostics[0]["type"], "provider-retry");
         assert_eq!(message.diagnostics[0]["details"]["attempt"], 1);
+        assert_eq!(http_status_diagnostic(&message), None);
+
+        append_http_status_diagnostic(&mut message, 413, "too large");
+        assert_eq!(http_status_diagnostic(&message), Some(413));
     }
 }

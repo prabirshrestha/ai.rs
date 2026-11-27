@@ -87,8 +87,10 @@ pub use session_resources::{
 pub use stream::{complete, complete_simple, stream, stream_simple};
 pub use types::*;
 pub use utils::diagnostics::{
-    AssistantMessageDiagnostic, DiagnosticErrorInfo, append_assistant_message_diagnostic,
+    AssistantMessageDiagnostic, DiagnosticErrorInfo, HTTP_STATUS_DIAGNOSTIC,
+    append_assistant_message_diagnostic, append_http_status_diagnostic,
     create_assistant_message_diagnostic, extract_diagnostic_error, format_thrown_value,
+    http_status_diagnostic,
 };
 pub use utils::json::{parse_json_with_repair, parse_streaming_json, repair_json};
 pub use utils::overflow::{get_overflow_patterns, is_context_overflow};
